@@ -3,7 +3,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { prisma } from '../lib/prisma';
-import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
+import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../lib/errors';
 import {
   requireAuth, requireProjectMember,
   requirePage, requireEdit, requireAnyPage, requireAnyEdit, requireSection, requireFinancialView,
@@ -111,6 +111,7 @@ const nstr = z.string().nullable().optional();
 // Coerce numeric fields so values typed as strings ("25") validate cleanly.
 const num = z.coerce.number().optional();
 const updateSchema = z.object({
+  docNumber: z.string().trim().min(1).max(60).optional(),
   vendorId: z.string().nullable().optional(),
   vendorName: nstr, vendorAddress: nstr, vendorGstin: nstr, vendorContact: nstr, vendorPhone: nstr,
   againstQuotation: nstr, invoiceTo: nstr, shipTo: nstr, siteAddress: nstr,
@@ -130,6 +131,12 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
   if (existing.status === 'APPROVED') throw forbidden('Approved documents are locked.');
   const b = updateSchema.parse(req.body);
 
+  // docNumber is unique. If it changed, ensure no other doc already uses it.
+  if (b.docNumber !== undefined && b.docNumber !== existing.docNumber) {
+    const clash = await prisma.procurementDoc.findUnique({ where: { docNumber: b.docNumber } });
+    if (clash) throw conflict(`Document number "${b.docNumber}" is already in use.`);
+  }
+
   // Replace line items if provided + recompute totals.
   let totals = { basicAmount: existing.basicAmount, gstAmount: existing.gstAmount, finalAmount: existing.finalAmount };
   if (b.lineItems) {
@@ -148,6 +155,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
   const doc = await prisma.procurementDoc.update({
     where: { id: existing.id },
     data: {
+      ...(b.docNumber !== undefined && { docNumber: b.docNumber }),
       ...(b.vendorId !== undefined && { vendorId: b.vendorId }),
       ...(b.vendorName !== undefined && { vendorName: b.vendorName }),
       ...(b.vendorAddress !== undefined && { vendorAddress: b.vendorAddress }),

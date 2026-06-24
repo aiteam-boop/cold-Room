@@ -137,7 +137,10 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
         </div>
         <div className="flex w-56 shrink-0 flex-col">
           <div className={`flex flex-1 items-center justify-center overflow-hidden border-b ${B} px-2 py-1 text-center`}>Date : {new Date(d.docDate).toLocaleDateString('en-GB')}</div>
-          <div className={`flex flex-1 items-center justify-center overflow-hidden border-b ${B} px-2 py-1 text-center font-semibold`}>{isWO ? 'WO' : 'PO'} No.: {d.docNumber}</div>
+          <div className={`flex flex-1 items-center justify-center gap-1 overflow-hidden border-b ${B} px-2 py-1 text-center font-semibold`}>
+            <span className="shrink-0">{isWO ? 'WO' : 'PO'} No.:</span>
+            <T value={d.docNumber} onChange={(x: string) => setD({ ...d, docNumber: x })} className="min-w-0 flex-1 text-center font-semibold" placeholder="—" />
+          </div>
           <div className="flex min-w-0 flex-1 flex-col items-center justify-center overflow-hidden px-2 pb-3 pt-1 text-center">
             <div className="text-[10px] leading-tight">Against Quotation:</div>
             <T value={d.againstQuotation} onChange={(x: string) => setD({ ...d, againstQuotation: x })} className="mb-1 w-full break-all text-center text-[10px] font-semibold" placeholder="—" />

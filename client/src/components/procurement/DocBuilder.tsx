@@ -37,6 +37,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/docs/${docId}`, {
+      docNumber: d.docNumber,
       vendorId: d.vendorId, vendorName: d.vendorName, vendorAddress: d.vendorAddress, vendorGstin: d.vendorGstin, vendorContact: d.vendorContact, vendorPhone: d.vendorPhone,
       againstQuotation: d.againstQuotation, invoiceTo: d.invoiceTo, shipTo: d.shipTo, siteAddress: d.siteAddress,
       gstEnabled: d.gstEnabled, gstPct: Number(d.gstPct),
