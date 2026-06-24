@@ -1,0 +1,98 @@
+import { useState } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import { api, errMsg } from '../../lib/api';
+import { Modal } from '../ui';
+import { fmtNum } from '../../lib/format';
+
+interface Row {
+  srNo?: string; description: string; category?: string; roomZone?: string;
+  unit?: string; plannedQty: number; isGroup?: boolean;
+}
+
+export default function BOQImportModal({ projectId, onClose, onImported }: { projectId: string; onClose: () => void; onImported: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [rows, setRows] = useState<Row[] | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [replace, setReplace] = useState(true);
+  const [err, setErr] = useState('');
+
+  const parse = useMutation({
+    mutationFn: async () => {
+      const fd = new FormData();
+      fd.append('file', file!);
+      return (await api.post(`/projects/${projectId}/boq/parse`, fd)).data as { rows: Row[]; warnings: string[]; source: string };
+    },
+    onSuccess: (d) => { setRows(d.rows); setWarnings(d.warnings || []); setErr(''); },
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  const importMut = useMutation({
+    mutationFn: async () => api.post(`/projects/${projectId}/boq/import`, { items: rows, replace }),
+    onSuccess: onImported,
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  function updateRow(i: number, patch: Partial<Row>) {
+    setRows((rs) => rs!.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function removeRow(i: number) {
+    setRows((rs) => rs!.filter((_, idx) => idx !== i));
+  }
+
+  return (
+    <Modal title="Upload & Import BOQ" onClose={onClose} wide>
+      {!rows ? (
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500">
+            Upload the BOQ as <strong>.xlsx</strong>, <strong>.csv</strong>, or <strong>.pdf</strong>. The system auto-extracts
+            Sr.No, Description, Unit and Planned Quantity for your review before locking. (PDF parsing uses Claude AI when an
+            API key is configured.)
+          </p>
+          <input className="input" type="file" accept=".xlsx,.xls,.csv,.pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+          <div className="flex justify-end gap-2">
+            <button className="btn-outline" onClick={onClose}>Cancel</button>
+            <button className="btn-primary" disabled={!file || parse.isPending} onClick={() => parse.mutate()}>{parse.isPending ? 'Parsing…' : 'Parse File'}</button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {warnings.length > 0 && (
+            <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
+              {warnings.map((w, i) => <div key={i}>• {w}</div>)}
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">{rows.length} rows extracted — review & correct before importing.</div>
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace existing BOQ
+            </label>
+          </div>
+          <div className="max-h-[50vh] overflow-auto rounded-lg border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-slate-400">
+                <tr><th className="px-2 py-2">Category</th><th>Description</th><th>Unit</th><th className="text-right">Planned</th><th></th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className={`border-b border-slate-100 ${r.isGroup ? 'bg-slate-50 font-medium' : ''}`}>
+                    <td className="px-2 py-1"><input className="w-28 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.category ?? ''} onChange={(e) => updateRow(i, { category: e.target.value })} /></td>
+                    <td><input className="w-full rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} /></td>
+                    <td><input className="w-16 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.unit ?? ''} onChange={(e) => updateRow(i, { unit: e.target.value })} /></td>
+                    <td className="text-right"><input className="w-20 rounded border border-transparent bg-transparent px-1 text-right hover:border-slate-300 focus:border-navy" type="number" step="any" value={r.plannedQty} onChange={(e) => updateRow(i, { plannedQty: Number(e.target.value) })} /></td>
+                    <td className="text-right"><button className="px-1 text-slate-300 hover:text-red-500" onClick={() => removeRow(i)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+          <div className="flex justify-between">
+            <button className="btn-outline" onClick={() => { setRows(null); setFile(null); }}>← Back</button>
+            <button className="btn-primary" disabled={importMut.isPending || rows.length === 0} onClick={() => importMut.mutate()}>{importMut.isPending ? 'Importing…' : `Import ${rows.length} Items`}</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}

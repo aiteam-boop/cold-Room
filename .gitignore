@@ -1,0 +1,26 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.local
+server/uploads/
+server/prisma/*.db
+server/prisma/*.db-journal
+*.db
+*.db-journal
+*.sqlite
+.DS_Store
+client/dist/
+crystal-procurement-main-main/
+.env.example
+CRMCTS_Module_C_PRD_v2.0.PDF
+CRMCTS_PRD_v1.0.pdf
+PO-IN788_Kingspan Jindal Pvt Ltd_Panels for Bhopal (1).pdf
+QAS-001_Shiv Ref. & Electric_Panels and Refrigeration Work.pdf
+Module_C_PRD.txt
+PO_Doors.txt
+PRD.txt
+WO_Panels.txt
+WO_QAS001.txt
+e-sign.png

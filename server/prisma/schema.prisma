@@ -1,0 +1,475 @@
+// CRMCTS — Prisma schema. MongoDB (Atlas) backed. String cuid ids are mapped to
+// Mongo's `_id` so application code keeps treating ids as opaque strings.
+// (Was SQLite; switched to MongoDB. relationMode is "prisma" implicitly on Mongo.)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ── Users & Access ─────────────────────────────────────────────────────────
+// Note: allowed enum-like values are enforced in app code
+// (see server/src/lib/enums.ts). Role: ADMIN | ENGINEER | SUPERVISOR | CLIENT | MANAGEMENT
+
+model User {
+  id           String           @id @default(cuid()) @map("_id")
+  name         String
+  email        String           @unique
+  passwordHash String
+  // Global account role: ADMIN (full access) | USER (grant-based). See enums.ts.
+  role         String           @default("USER")
+  active       Boolean          @default(true)
+  whatsapp     String?          // optional, for parity with IMS (no alerting yet)
+  // IMS-style per-user grants (admin-controlled). JSON, parsed in permissions.ts.
+  pageAccess   String?          // { [pageKey]: { view: bool, edit: bool } }
+  sectionPerms String?          // { hideFinancials, canApprove, canMarkPaid }
+  twoFactor    Boolean          @default(false)
+  createdAt    DateTime         @default(now())
+
+  memberships  ProjectMember[]
+  submitted    ProgressEntry[]  @relation("SubmittedBy")
+  approvals    ProgressEntry[]  @relation("ApprovedBy")
+  drawings     Drawing[]
+  auditLogs    AuditLog[]
+  projects     Project[]        @relation("CreatedProjects")
+  notifications Notification[]
+}
+
+// Many-to-many between users and projects, carrying a per-project role.
+model ProjectMember {
+  id        String   @id @default(cuid()) @map("_id")
+  projectId String
+  userId    String
+  role      String
+  createdAt DateTime @default(now())
+
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+}
+
+// ── Projects ───────────────────────────────────────────────────────────────
+// status: DRAFT | ACTIVE | ON_HOLD | COMPLETED
+
+model Project {
+  id                   String          @id @default(cuid()) @map("_id")
+  name                 String
+  clientName           String?
+  siteLocation         String?
+  startDate            DateTime?
+  targetCompletionDate DateTime?
+  status               String          @default("DRAFT")
+  boqLocked            Boolean         @default(false)
+  boqLockedAt          DateTime?
+  createdById          String
+  createdBy            User            @relation("CreatedProjects", fields: [createdById], references: [id])
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  boqAnalyzedAt        DateTime?
+
+  members   ProjectMember[]
+  boqItems  BOQItem[]
+  boqAnalysis BOQAnalysisItem[]
+  drawings  Drawing[]
+  zones     ProjectZone[]
+  entries   ProgressEntry[]
+  auditLogs AuditLog[]
+
+  // Module C — Procurement
+  vendorSites   VendorSiteMapping[]
+  procurementDocs ProcurementDoc[]
+  grns          GRN[]
+  procDocuments ProcurementDocument[]
+}
+
+// ── Module C: Procurement & PO Management ───────────────────────────────────
+
+// Vendor / Contractor master (KYC stored once, site-wise mapped).
+// type: VENDOR | CONTRACTOR
+model Vendor {
+  id            String   @id @default(cuid()) @map("_id")
+  name          String
+  type          String   @default("VENDOR")
+  contactPerson String?
+  phones        String?  // comma/JSON list
+  address       String?
+  email         String?
+  gstin         String?
+  pan           String?
+  bankAccount   String?
+  ifsc          String?
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  siteMappings  VendorSiteMapping[]
+  docs          ProcurementDoc[]
+  kycDocs       ProcurementDocument[]
+}
+
+model VendorSiteMapping {
+  id        String  @id @default(cuid()) @map("_id")
+  vendorId  String
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([vendorId, projectId])
+}
+
+// Purchase Order / Work Order. type: PO | WO
+// status: DRAFT | PENDING_APPROVAL | APPROVED | REJECTED
+model ProcurementDoc {
+  id            String   @id @default(cuid()) @map("_id")
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type          String   // PO | WO
+  docNumber     String   @unique
+  status        String   @default("DRAFT")
+
+  vendorId      String?
+  vendor        Vendor?  @relation(fields: [vendorId], references: [id])
+  // Snapshot of vendor header (auto-filled, manually overridable)
+  vendorName    String?
+  vendorAddress String?
+  vendorGstin   String?
+  vendorContact String?
+  vendorPhone   String?
+
+  docDate       DateTime @default(now())
+  againstQuotation String?
+  invoiceTo     String?  // fixed company billing block (editable)
+  shipTo        String?  // PO ship-to
+  siteAddress   String?  // WO site address
+
+  // Totals
+  basicAmount   Float    @default(0)
+  gstEnabled    Boolean  @default(true)
+  gstPct        Float    @default(18)
+  gstAmount     Float    @default(0)
+  finalAmount   Float    @default(0)
+  overrides     String?  // JSON: which fields were manually overridden
+
+  // 6-field payment terms (% values); amounts derived/overridable
+  payAdvancePct        Float @default(0)
+  payBeforeDeliveryPct Float @default(0)
+  payRunningPct        Float @default(0)
+  payPostDeliveryPct   Float @default(0)
+  payPostCompletionPct Float @default(0)
+  payRetentionPct      Float @default(0)
+  payTriggers          String? // JSON: per-field trigger condition notes + INR overrides
+
+  termsSections String?  // JSON array [{title, text}]
+
+  createdById   String?
+  approvedById  String?
+  approvedAt    DateTime?
+  rejectionReason String?
+  esignApplied  Boolean  @default(false)
+  lockedAt      DateTime?
+  pdfUrl        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lineItems     ProcurementLineItem[]
+  milestones    PaymentMilestone[]
+  grns          GRN[]
+
+  @@index([projectId])
+  @@index([type])
+}
+
+model ProcurementLineItem {
+  id          String  @id @default(cuid()) @map("_id")
+  docId       String
+  doc         ProcurementDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  srNo        Int
+  description String          // size/description (multi-line)
+  uom         String?         // WO only
+  qty         Float   @default(0)
+  unitPrice   Float   @default(0)
+  totalPrice  Float   @default(0)
+  isLeadTime  Boolean @default(false) // special "Lead Time: 7 Days" row
+  leadTimeText String?
+  sortOrder   Int     @default(0)
+
+  grnLines    GRNLineItem[]
+
+  @@index([docId])
+}
+
+// Auto-generated from 6-field payment terms (one per non-zero field).
+// status: PENDING | TRIGGERED | PAID
+model PaymentMilestone {
+  id            String  @id @default(cuid()) @map("_id")
+  docId         String
+  doc           ProcurementDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  fieldKey      String          // advance | beforeDelivery | running | postDelivery | postCompletion | retention
+  name          String
+  triggerCondition String?
+  percentage    Float   @default(0)
+  inrAmount     Float   @default(0)
+  expectedDate  DateTime?
+  actualTriggerDate DateTime?
+  status        String  @default("PENDING")
+  accountsNotifiedAt DateTime?
+  paymentDate   DateTime?
+  paymentReference String?
+  remarks       String?
+  sortOrder     Int     @default(0)
+
+  @@index([docId])
+}
+
+// Good Receipt Note. status: DRAFT | OPEN | APPROVED | REJECTED
+model GRN {
+  id          String  @id @default(cuid()) @map("_id")
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  docId       String  // parent PO/WO
+  doc         ProcurementDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  grnNumber   String  @unique
+  grnDate     DateTime @default(now())
+  vendorName  String?
+  siteAddress String?
+  raisedById  String?
+  vehicleNumber String?
+  driverName  String?
+  deliveryChallanNumber String?
+
+  // Invoice section (mandatory)
+  invoiceNumber String?
+  invoiceDate   DateTime?
+  invoiceValue  Float?
+  invoicePdfUrl String?
+  ewayBillNumber String?
+  packingListUrl String?
+
+  status        String  @default("DRAFT")
+  approvedById  String?
+  approvedAt    DateTime?
+  rejectionReason String?
+  pdfUrl        String?
+  createdAt     DateTime @default(now())
+
+  lineItems   GRNLineItem[]
+
+  @@index([projectId])
+  @@index([docId])
+}
+
+model GRNLineItem {
+  id            String  @id @default(cuid()) @map("_id")
+  grnId         String
+  grn           GRN     @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  lineItemId    String?
+  lineItem      ProcurementLineItem? @relation(fields: [lineItemId], references: [id])
+  srNo          Int
+  description   String
+  uom           String?
+  poQty         Float   @default(0)
+  previouslyReceivedQty Float @default(0)
+  receiptQty    Float   @default(0)
+  defectQty     Float   @default(0)
+  acceptedQty   Float   @default(0)
+  remarks       String?
+
+  @@index([grnId])
+}
+
+// Central document repository entry.
+// type: PO | WO | GRN | PI | KACCHA_BILL | TAX_INVOICE | DELIVERY_CHALLAN |
+//       KYC | COMPLETION_CERT | PHOTO | EWAY | PAYMENT_PROOF | PACKING_LIST | OTHER
+model ProcurementDocument {
+  id            String  @id @default(cuid()) @map("_id")
+  projectId     String
+  project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type          String
+  fileName      String
+  fileUrl       String
+  mimeType      String?
+  linkedDocNumber String?
+  vendorId      String?
+  vendor        Vendor? @relation(fields: [vendorId], references: [id])
+  vendorName    String?
+  uploadedById  String?
+  uploadedAt    DateTime @default(now())
+  archived      Boolean @default(false)
+  archiveReason String?
+
+  @@index([projectId])
+  @@index([type])
+}
+
+// AI-processed, clean procurement breakdown of the raw BOQ (the "bible").
+// Generated from BOQItem rows; the raw BOQItem table is left untouched.
+model BOQAnalysisItem {
+  id             String   @id @default(cuid()) @map("_id")
+  projectId      String
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  srNo           String?
+  itemName       String              // short, clean name
+  category       String?
+  quantity       Float?
+  unit           String?
+  specifications String?             // key technical specs (concise, ; separated)
+  requirements   String?             // what must be supplied/approved
+  dependencies   String?             // coordination / depends-on
+  notes          String?             // important caveats
+  boqItemId      String?             // best-effort link back to the raw line
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([projectId])
+}
+
+// ── BOQ ──────────────────────────────────────────────────────────────────────
+
+model BOQItem {
+  id          String   @id @default(cuid()) @map("_id")
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  srNo        String?
+  description String
+  category    String?        // e.g. "Refrigeration Units", "PUF Panels"
+  roomZone    String?        // e.g. "Blast Freezer (-30C)"
+  unit        String?        // mtr, No's, Sq.M, RMT, MT
+  plannedQty  Float          @default(0)
+
+  // Hierarchy (collapsible BOQ tree)
+  parentId    String?
+  parent      BOQItem?       @relation("BOQHierarchy", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children    BOQItem[]      @relation("BOQHierarchy")
+  isGroup     Boolean        @default(false) // header row with no own quantity
+  sortOrder   Int            @default(0)
+
+  // Link to a spatial zone
+  zoneId      String?
+  zone        ProjectZone?   @relation(fields: [zoneId], references: [id])
+
+  lockedAt    DateTime?
+  createdAt   DateTime       @default(now())
+
+  entries     ProgressEntry[]
+
+  @@index([projectId])
+  @@index([parentId])
+}
+
+// ── Progress ─────────────────────────────────────────────────────────────────
+// status: PENDING | APPROVED | REJECTED | VOIDED
+
+model ProgressEntry {
+  id               String      @id @default(cuid()) @map("_id")
+  projectId        String
+  project          Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  boqItemId        String
+  boqItem          BOQItem     @relation(fields: [boqItemId], references: [id], onDelete: Cascade)
+
+  submittedById    String
+  submittedBy      User        @relation("SubmittedBy", fields: [submittedById], references: [id])
+  approvedById     String?
+  approvedBy       User?       @relation("ApprovedBy", fields: [approvedById], references: [id])
+
+  date             DateTime
+  quantityInstalled Float
+  unit             String?
+  photoUrl         String?
+  remarks          String?
+
+  status           String      @default("PENDING")
+  approvedAt       DateTime?
+  rejectionReason  String?
+  voidReason       String?
+  createdAt        DateTime    @default(now())
+
+  @@index([projectId])
+  @@index([boqItemId])
+  @@index([status])
+}
+
+// ── Drawings & Zones ─────────────────────────────────────────────────────────
+// status: PROCESSING | APPROVED | ARCHIVED
+
+model Drawing {
+  id             String         @id @default(cuid()) @map("_id")
+  projectId      String
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fileName       String
+  fileUrl        String
+  mimeType       String?
+  fileSize       Int?
+  uploadedById   String
+  uploadedBy     User           @relation(fields: [uploadedById], references: [id])
+  version        Int            @default(1)
+  status         String         @default("PROCESSING")
+  extractedZones String?        // JSON array of AI/OCR-detected zones
+  classification String?        // JSON: AI classification of which part/rooms this diagram covers
+  uploadedAt     DateTime       @default(now())
+
+  zones          ProjectZone[]
+
+  @@index([projectId])
+}
+
+model ProjectZone {
+  id          String    @id @default(cuid()) @map("_id")
+  projectId   String
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  drawingId   String?
+  drawing     Drawing?  @relation(fields: [drawingId], references: [id])
+
+  zoneName    String
+  boqCategory String?
+  roomType    String?
+  coordinates String?   // JSON polygon: [{x,y}, ...] in 0..100 floor-plan space
+  heightM     Float?    // for 3D extrusion
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+
+  boqItems    BOQItem[]
+
+  @@index([projectId])
+}
+
+// ── Audit ────────────────────────────────────────────────────────────────────
+
+// In-app notifications (Module C). Email is a future add-on.
+model Notification {
+  id                  String   @id @default(cuid()) @map("_id")
+  userId              String                 // recipient
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type                String                 // e.g. PO_SUBMITTED, PO_APPROVED, GRN_APPROVED, MILESTONE_TRIGGERED
+  title               String
+  message             String
+  projectId           String?
+  relatedDocType      String?                // ProcurementDoc | GRN | PaymentMilestone
+  relatedDocId        String?
+  link                String?                // optional client route hint
+  isRead              Boolean  @default(false)
+  createdAt           DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid()) @map("_id")
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String   // e.g. "PROJECT_CREATE", "BOQ_LOCK", "ENTRY_APPROVE"
+  entity    String?  // entity type
+  entityId  String?
+  details   String?  // JSON metadata
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+}
