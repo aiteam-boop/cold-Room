@@ -5,6 +5,8 @@ import { useAuth } from '../../lib/auth';
 import { Spinner } from '../ui';
 import { docStatusPill, inr, titleize } from '../../lib/format';
 import DocPaper from './DocPaper';
+import ApprovalTimeline from './ApprovalTimeline';
+import ChainBuilder from './ChainBuilder';
 
 // Common units of measure for Work Order line items. The line's existing value
 // is merged in at render time so custom / legacy units are never dropped.
@@ -26,14 +28,15 @@ const PAY = [
 
 export default function DocBuilder({ projectId, docId, onClose }: { projectId: string; docId: string; role: string; onClose: () => void }) {
   const qc = useQueryClient();
-  const { canEdit, can } = useAuth();
+  const { canEdit, can, user } = useAuth();
   const [d, setD] = useState<any>(null);
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [view, setView] = useState<'document' | 'form'>('document');
+  const [showChain, setShowChain] = useState(false);
 
-  const { data, isLoading } = useQuery({ queryKey: ['proc-doc', docId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs/${docId}`)).data.doc });
+  const { data, isLoading } = useQuery({ queryKey: ['proc-doc', docId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs/${docId}`)).data as { doc: any; approval?: any } });
   const vendorsQ = useQuery({ queryKey: ['proc-vendors', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/vendors`)).data.vendors as any[] });
-  useEffect(() => { if (data) setD(structuredClone(data)); }, [data]);
+  useEffect(() => { if (data?.doc) setD(structuredClone(data.doc)); }, [data]);
 
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/docs/${docId}`, {
@@ -62,6 +65,18 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const canApprove = can('canApprove');
   const locked = d.status === 'APPROVED';
   const editable = !locked && canEditDoc;
+
+  // Approval-chain state. Whose turn it is drives which action buttons show.
+  const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
+  const hasChain = (approval?.total ?? 0) > 0;
+  const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
+  // Show Approve/Reject to the current approver, or (legacy, no chain) to canApprove holders.
+  const canAct = d.status === 'PENDING_APPROVAL' && (hasChain ? (myTurn || canApprove) : canApprove);
+  const promptRemarks = (verb: 'approve' | 'reject') => {
+    const r = window.prompt(verb === 'reject' ? 'Rejection reason' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
+    if (verb === 'reject' && !r) return;
+    doAction.mutate({ verb, body: verb === 'reject' ? { reason: r } : { remarks: r } });
+  };
 
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p.key]) || 0), 0);
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
@@ -94,13 +109,23 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           </div>
           <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`)}>📄 PDF</button>
           {editable && <button className="btn-primary text-sm" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save'}</button>}
-          {editable && d.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={async () => { await save.mutateAsync(); doAction.mutate({ verb: 'submit' }); }}>Submit for Approval</button>}
+          {editable && d.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit for Approval</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => doAction.mutate({ verb: 'recall' })}>Recall</button>}
-          {canApprove && d.status === 'PENDING_APPROVAL' && <button className="btn-primary text-sm" onClick={() => doAction.mutate({ verb: 'approve' })}>✓ Approve + e-sign</button>}
-          {canApprove && d.status === 'PENDING_APPROVAL' && <button className="btn-danger text-sm" onClick={() => { const r = prompt('Rejection reason'); if (r) doAction.mutate({ verb: 'reject', body: { reason: r } }); }}>Reject</button>}
+          {canEditDoc && d.status === 'PENDING_APPROVAL' && hasChain && <button className="btn-outline text-sm" disabled={doAction.isPending} onClick={() => doAction.mutate({ verb: 'remind' })}>Send Reminder</button>}
+          {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
+          {canAct && <button className="btn-danger text-sm" onClick={() => promptRemarks('reject')}>Reject</button>}
         </div>
       </div>
       {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{msg.t}</div>}
+      {hasChain && <ApprovalTimeline approval={approval as any} />}
+      {showChain && (
+        <ChainBuilder
+          docType={isWO ? 'WO' : 'PO'}
+          busy={doAction.isPending || save.isPending}
+          onClose={() => setShowChain(false)}
+          onConfirm={async (chain) => { await save.mutateAsync(); doAction.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
+        />
+      )}
       {d.rejectionReason && d.status !== 'APPROVED' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">Last rejection: {d.rejectionReason}</div>}
       {locked && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">This {d.type} is approved and locked. Every field was editable before approval (manual override on all).</div>}
 

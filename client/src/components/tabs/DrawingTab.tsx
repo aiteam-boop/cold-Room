@@ -137,7 +137,7 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
           {msg && <div className={`mt-2 rounded-lg px-2 py-1.5 text-xs ${msg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{msg.text}</div>}
           {isAdmin && (
             <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
-              <input className="input text-xs" type="file" accept=".dxf,.pdf,.png,.jpg,.jpeg" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              <input className="input text-xs" type="file" accept=".dxf,.dwg,.pdf,.png,.jpg,.jpeg" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
               <button className="btn-primary w-full text-sm" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>{upload.isPending ? 'Uploading…' : 'Upload Drawing'}</button>
             </div>
           )}

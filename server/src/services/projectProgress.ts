@@ -26,7 +26,7 @@ export interface ProjectProgress {
 export async function loadProjectProgress(projectId: string, now = new Date()): Promise<ProjectProgress> {
   const [project, boqItems, entries] = await Promise.all([
     prisma.project.findUnique({ where: { id: projectId }, select: { targetCompletionDate: true } }),
-    prisma.bOQItem.findMany({ where: { projectId, isGroup: false } }),
+    prisma.bOQItem.findMany({ where: { projectId, isGroup: false }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
     prisma.progressEntry.findMany({
       where: { projectId, status: 'APPROVED' },
       select: { boqItemId: true, date: true, quantityInstalled: true, status: true },

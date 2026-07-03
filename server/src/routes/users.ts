@@ -8,7 +8,8 @@ import { audit } from '../lib/audit';
 import { ROLES, ROLE_LABELS, PROJECT_ROLES } from '../lib/enums';
 import {
   PAGE_KEYS, PAGE_LABELS, SECTION_KEYS, SECTION_LABELS,
-  cleanGrants, cleanSections, parseGrants, parseSections,
+  APPROVAL_ROLES, APPROVAL_TYPES,
+  cleanGrants, cleanSections, parseGrants, parseSections, cleanApprover, parseApprover,
 } from '../lib/permissions';
 
 const router = Router();
@@ -19,22 +20,35 @@ router.use(requireAdmin);
 // Shape of grants/sections coming from the admin UI.
 const grantsInput = z.record(z.object({ view: z.boolean().optional(), edit: z.boolean().optional() })).optional();
 const sectionsInput = z.record(z.boolean()).optional();
+const approverInput = z.object({
+  canApprove: z.boolean().optional(),
+  approvalRole: z.string().nullable().optional(),
+  level: z.coerce.number().optional(),
+  types: z.array(z.string()).optional(),
+}).optional();
 const projectsInput = z
   .array(z.object({ projectId: z.string().min(1), role: z.enum(PROJECT_ROLES).default('ENGINEER') }))
   .optional();
 
 function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
-  whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; createdAt?: Date;
+  whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
 }) {
   return {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
     whatsapp: u.whatsapp ?? '',
     pageAccess: parseGrants(u.pageAccess),
     sectionPerms: parseSections(u.sectionPerms),
+    approver: parseApprover(u.approver),
     createdAt: u.createdAt,
   };
 }
+
+// Column selection shared by the user endpoints (keeps `approver` included).
+const USER_SELECT = {
+  id: true, name: true, email: true, role: true, active: true,
+  whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
+} as const;
 
 // GET /api/users/meta — the page/section catalogue + project list for the UI.
 router.get(
@@ -50,6 +64,8 @@ router.get(
       projectRoles: PROJECT_ROLES,
       pages: PAGE_KEYS.map((key) => ({ key, label: PAGE_LABELS[key] })),
       sections: SECTION_KEYS.map((key) => ({ key, label: SECTION_LABELS[key] })),
+      approvalRoles: APPROVAL_ROLES,
+      approvalTypes: APPROVAL_TYPES,
       projects,
     });
   })
@@ -61,10 +77,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const users = await prisma.user.findMany({
       orderBy: { createdAt: 'asc' },
-      select: {
-        id: true, name: true, email: true, role: true, active: true,
-        whatsapp: true, pageAccess: true, sectionPerms: true, createdAt: true,
-      },
+      select: USER_SELECT,
     });
     res.json({ users: users.map(publicUser) });
   })
@@ -76,11 +89,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { id: req.params.id },
-      select: {
-        id: true, name: true, email: true, role: true, active: true,
-        whatsapp: true, pageAccess: true, sectionPerms: true, createdAt: true,
-        memberships: { select: { projectId: true, role: true } },
-      },
+      select: { ...USER_SELECT, memberships: { select: { projectId: true, role: true } } },
     });
     if (!user) throw notFound('User not found');
     res.json({ user: { ...publicUser(user), projects: user.memberships } });
@@ -96,6 +105,7 @@ const createSchema = z.object({
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
+  approver: approverInput,
   projects: projectsInput,
 });
 
@@ -119,14 +129,12 @@ router.post(
         whatsapp: body.whatsapp || null,
         pageAccess: JSON.stringify(cleanGrants(body.pageAccess)),
         sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)),
+        approver: JSON.stringify(cleanApprover(body.approver)),
         memberships: body.projects?.length
           ? { create: body.projects.map((p) => ({ projectId: p.projectId, role: p.role })) }
           : undefined,
       },
-      select: {
-        id: true, name: true, email: true, role: true, active: true,
-        whatsapp: true, pageAccess: true, sectionPerms: true, createdAt: true,
-      },
+      select: USER_SELECT,
     });
     await audit({ userId: req.account!.id, action: 'USER_CREATE', entity: 'User', entityId: user.id, details: { role: body.role } });
     res.status(201).json({ user: publicUser(user) });
@@ -140,6 +148,7 @@ const updateSchema = z.object({
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
+  approver: approverInput,
 });
 
 // PATCH /api/users/:id — update profile, role, active state and grants.
@@ -166,11 +175,9 @@ router.patch(
         ...(body.whatsapp !== undefined && { whatsapp: body.whatsapp || null }),
         ...(body.pageAccess !== undefined && { pageAccess: JSON.stringify(cleanGrants(body.pageAccess)) }),
         ...(body.sectionPerms !== undefined && { sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)) }),
+        ...(body.approver !== undefined && { approver: JSON.stringify(cleanApprover(body.approver)) }),
       },
-      select: {
-        id: true, name: true, email: true, role: true, active: true,
-        whatsapp: true, pageAccess: true, sectionPerms: true, createdAt: true,
-      },
+      select: USER_SELECT,
     });
     await audit({ userId: req.account!.id, action: 'USER_UPDATE', entity: 'User', entityId: user.id, details: { fields: Object.keys(body) } });
     res.json({ user: publicUser(user) });

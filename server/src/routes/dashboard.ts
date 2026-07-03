@@ -8,6 +8,36 @@ import { assessDelay } from '../services/calc';
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
 
+// GET .../room-progress — per-room (zone) completion %, fed by linked BOQ items
+// (Feature 3 — Room-wise tracking). Drives the dashboard room cards + the
+// existing Module A floor-plan colouring (same green/orange/red thresholds).
+router.get(
+  '/room-progress',
+  requireProjectMember,
+  requirePage('dashboard'),
+  asyncHandler(async (req, res) => {
+    const projectId = req.params.projectId;
+    const [zones, prog] = await Promise.all([
+      prisma.projectZone.findMany({ where: { projectId }, orderBy: { sortOrder: 'asc' }, include: { boqItems: { where: { isGroup: false }, select: { id: true } } } }),
+      loadProjectProgress(projectId),
+    ]);
+    const rooms = zones.map((z) => {
+      const linked = z.boqItems.map((b) => prog.itemsById.get(b.id)).filter(Boolean) as NonNullable<ReturnType<typeof prog.itemsById.get>>[];
+      const planned = linked.reduce((s, i) => s + i.plannedQty, 0);
+      const installed = linked.reduce((s, i) => s + i.installedQty, 0);
+      const pct = planned > 0 ? Math.round((installed / planned) * 1000) / 10 : 0;
+      const color = pct >= 80 ? 'GREEN' : pct >= 20 ? 'YELLOW' : 'RED';
+      return {
+        zoneId: z.id, roomName: z.zoneName, roomType: z.roomType, temperatureRange: z.temperatureRange,
+        completionPct: pct, colorStatus: color, plannedQty: planned, installedQty: Math.round(installed * 100) / 100,
+        itemCount: linked.length,
+        items: linked.map((i) => ({ id: i.id, description: i.description, unit: i.unit, plannedQty: i.plannedQty, installedQty: i.installedQty, completionPct: i.completionPct })),
+      };
+    });
+    res.json({ rooms });
+  })
+);
+
 // GET .../dashboard — everything the Analytics tab needs (PRD §10.5, FR-DB-*).
 router.get(
   '/',

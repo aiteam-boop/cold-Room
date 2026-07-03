@@ -12,8 +12,11 @@ export interface ParsedBOQRow {
   category?: string;
   roomZone?: string;
   unit?: string;
+  makeModel?: string;
+  remarks?: string;
   plannedQty: number;
   isGroup?: boolean;
+  flagged?: boolean; // low-confidence quantity mapping — review before import
 }
 
 export interface ParseResult {
@@ -46,22 +49,52 @@ function toNumber(raw: unknown): number | null {
   return isFinite(n) ? n : null;
 }
 
-// Find the header row + column indexes by fuzzy header matching.
-function detectColumns(rows: unknown[][]): {
+type Cols = { sr?: number; desc?: number; unit?: number; qty?: number; makeModel?: number; remarks?: number };
+
+// Find the header row + column indexes by fuzzy header matching. Real BOQ sheets
+// often SPLIT the header across two rows (e.g. "Quantity"/"Units" on one row and
+// "MAKE & MODEL" typed into the next), so once the primary header row is found we
+// also pick up any still-unassigned column labels from the next two rows.
+// `qtyCols` is the full set of columns the Quantity header spans (it is commonly
+// merged across several per-site columns), so the value can be read from whichever
+// of them actually holds it.
+function detectColumns(rows: unknown[][], merges: MergeRange[]): {
   headerIdx: number;
-  cols: { sr?: number; desc?: number; unit?: number; qty?: number };
+  cols: Cols;
+  qtyCols: number[];
 } | null {
-  for (let r = 0; r < Math.min(rows.length, 25); r++) {
-    const row = rows[r].map((c) => String(c ?? '').toLowerCase().trim());
-    const cols: { sr?: number; desc?: number; unit?: number; qty?: number } = {};
+  const scan = (cols: Cols, rowIdx: number) => {
+    const row = (rows[rowIdx] ?? []).map((c) => String(c ?? '').toLowerCase().trim());
     row.forEach((cell, i) => {
+      if (!cell) return;
       if (cols.sr === undefined && /(sr\.?\s*no|s\.?\s*no|sl\.?\s*no|item\s*no|^#$)/.test(cell)) cols.sr = i;
       if (cols.desc === undefined && /(description|particular|item|activity|scope|work)/.test(cell)) cols.desc = i;
       if (cols.unit === undefined && /(unit|uom|u\.o\.m)/.test(cell)) cols.unit = i;
       if (cols.qty === undefined && /(qty|quantity|planned|nos\b)/.test(cell)) cols.qty = i;
+      if (cols.makeModel === undefined && /(make\s*&?\s*model|make\s*\/\s*model|make and model|^make$|^model$|brand)/.test(cell)) cols.makeModel = i;
+      if (cols.remarks === undefined && /(remark|^notes?$)/.test(cell)) cols.remarks = i;
     });
+  };
+
+  for (let r = 0; r < Math.min(rows.length, 25); r++) {
+    const cols: Cols = {};
+    scan(cols, r);
     if (cols.desc !== undefined && (cols.qty !== undefined || cols.unit !== undefined)) {
-      return { headerIdx: r, cols };
+      // Pick up split header labels (e.g. MAKE & MODEL) from the next two rows.
+      scan(cols, r + 1);
+      scan(cols, r + 2);
+
+      // Quantity is frequently a merged header spanning several columns; collect
+      // them so the row reader can take the value from whichever column holds it.
+      let qtyCols: number[] = cols.qty !== undefined ? [cols.qty] : [];
+      if (cols.qty !== undefined) {
+        const span = merges.find((m) => m.s.r <= r && m.e.r >= r && m.s.c <= cols.qty! && m.e.c >= cols.qty! && m.e.c > m.s.c);
+        if (span) {
+          qtyCols = [];
+          for (let c = span.s.c; c <= span.e.c; c++) qtyCols.push(c);
+        }
+      }
+      return { headerIdx: r, cols, qtyCols };
     }
   }
   return null;
@@ -82,6 +115,21 @@ function looksLikeGroup(desc: string, qty: number | null): boolean {
   return true;
 }
 
+// BOQ sheets merge cells like "Make & Model" / "Remarks" across the rows they
+// apply to; XLSX only stores the value in the merge's top-left cell, leaving the
+// spanned rows blank. This resolves a cell to its merged value so those columns
+// fill in for every line they cover. `merges` use the same 0-based row/col
+// indexing as a header:1 grid read with blankrows kept.
+type MergeRange = { s: { r: number; c: number }; e: { r: number; c: number } };
+function resolveMerged(rows: unknown[][], merges: MergeRange[], r: number, c: number): unknown {
+  const v = rows[r]?.[c];
+  if (v !== undefined && String(v).trim() !== '') return v;
+  for (const m of merges) {
+    if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) return rows[m.s.r]?.[m.s.c];
+  }
+  return v;
+}
+
 export function parseSpreadsheet(filePath: string): ParseResult {
   const warnings: string[] = [];
   const wb = XLSX.readFile(filePath, { cellDates: false });
@@ -89,38 +137,83 @@ export function parseSpreadsheet(filePath: string): ParseResult {
 
   for (const sheetName of wb.SheetNames) {
     const sheet = wb.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false, defval: '' });
+    // Keep blank rows so row indices stay aligned with the merge ranges.
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: true, defval: '' });
+    const merges = ((sheet['!merges'] as MergeRange[]) || []);
     if (!rows.length) continue;
-    const detected = detectColumns(rows);
+    const detected = detectColumns(rows, merges);
     if (!detected) {
       warnings.push(`Sheet "${sheetName}": could not detect a header row — skipped.`);
       continue;
     }
-    const { headerIdx, cols } = detected;
+    const { headerIdx, cols, qtyCols } = detected;
     let currentCategory: string | undefined = wb.SheetNames.length > 1 ? sheetName : undefined;
+    let flaggedCount = 0;
 
     for (let r = headerIdx + 1; r < rows.length; r++) {
       const row = rows[r];
       const desc = String(row[cols.desc ?? 1] ?? '').trim();
       if (!desc) continue;
-      const sr = cols.sr !== undefined ? String(row[cols.sr] ?? '').trim() : undefined;
-      const unit = cols.unit !== undefined ? normalizeUnit(row[cols.unit]) : undefined;
-      const qty = cols.qty !== undefined ? toNumber(row[cols.qty]) : null;
+      // Drop only obvious page-break / continuation artifacts. Subtotal & total
+      // rows ARE imported as line items (per project preference) — note this can
+      // double-count against the detailed lines in completion math.
+      if (/^(page\s*\d+|continued\b)/i.test(desc)) continue;
+
+      // srNo & unit may be merged down a block of rows (e.g. one "a" over 5 rows).
+      const srRaw = cols.sr !== undefined ? String(resolveMerged(rows, merges, r, cols.sr) ?? '').trim() : '';
+      const sr = srRaw || undefined;
+      const unit = cols.unit !== undefined ? normalizeUnit(resolveMerged(rows, merges, r, cols.unit)) : undefined;
+
+      // Quantity: read DIRECTLY from this row only (never filled down from a
+      // merge — each line keeps its own quantity, e.g. a/0/2 across a block).
+      // The labeled "Quantity" column (cols.qty) is authoritative. It is often a
+      // merged header spanning extra columns where a value occasionally lands; we
+      // use those only as a fallback and flag the row for manual review whenever
+      // the source is ambiguous (value only in a secondary column, or two columns
+      // disagree). This keeps the common case an exact 1:1 match.
+      const primaryQty = cols.qty !== undefined ? toNumber(row[cols.qty]) : null;
+      const otherQty = qtyCols.filter((c) => c !== cols.qty).map((c) => toNumber(row[c])).filter((n): n is number => n != null);
+      let qty: number | null;
+      let ambiguousQty = false;
+      if (primaryQty != null) {
+        qty = primaryQty;
+        if (otherQty.some((o) => o !== primaryQty)) ambiguousQty = true; // conflicting secondary value
+      } else if (otherQty.length) {
+        qty = otherQty[0]; // value sits only in a secondary column — use but flag
+        ambiguousQty = true;
+      } else {
+        qty = null;
+      }
+
+      // makeModel / remarks DO carry down merged blocks. Strip any header label
+      // that leaked into a data cell (e.g. the literal "MAKE & MODEL").
+      const HEADER_LEAK = /^(make\s*&?\s*model|make and model|make\s*\/\s*model|remarks?|units?|quantity|s\.?\s*no|sr\.?\s*no|description)$/i;
+      const cleanCell = (v: unknown): string | undefined => {
+        const s = String(v ?? '').trim();
+        return s && !HEADER_LEAK.test(s) ? s : undefined;
+      };
+      const makeModel = cols.makeModel !== undefined ? cleanCell(resolveMerged(rows, merges, r, cols.makeModel)) : undefined;
+      const remarks = cols.remarks !== undefined ? cleanCell(resolveMerged(rows, merges, r, cols.remarks)) : undefined;
 
       const isGroup = looksLikeGroup(desc, qty) && !unit;
       if (isGroup) {
         currentCategory = desc;
-        out.push({ srNo: sr || undefined, description: desc, category: currentCategory, isGroup: true, plannedQty: 0 });
+        out.push({ srNo: sr, description: desc, category: currentCategory, isGroup: true, plannedQty: 0 });
         continue;
       }
+      if (ambiguousQty) flaggedCount++;
       out.push({
-        srNo: sr || undefined,
+        srNo: sr,
         description: desc,
         category: currentCategory,
         unit,
+        makeModel,
+        remarks,
         plannedQty: qty ?? 0,
+        flagged: ambiguousQty || undefined,
       });
     }
+    if (flaggedCount > 0) warnings.push(`Sheet "${sheetName}": ${flaggedCount} row(s) had an ambiguous quantity (value in more than one column) — please review the highlighted rows.`);
   }
 
   if (out.length === 0) warnings.push('No BOQ rows could be extracted. You can add items manually.');
@@ -130,7 +223,9 @@ export function parseSpreadsheet(filePath: string): ParseResult {
 const AI_SYSTEM_PROMPT =
   'You are a BOQ (Bill of Quantities) extraction engine for cold-room construction projects. ' +
   'Extract EVERY priced line item from the document text. Return ONLY valid JSON of the form ' +
-  '{"rows":[{"srNo":string,"description":string,"category":string,"roomZone":string,"unit":string,"plannedQty":number,"isGroup":boolean}]}. ' +
+  '{"rows":[{"srNo":string,"description":string,"category":string,"roomZone":string,"unit":string,"makeModel":string,"remarks":string,"plannedQty":number,"isGroup":boolean}]}. ' +
+  'makeModel = the "Make & Model" / brand / equivalent text for the item if stated, else "". ' +
+  'remarks = the "Remarks" column text (specs/notes) for the item if stated, else "". ' +
   "Rules: units must be one of No's, mtr, Sq.M, RMT, MT, set, lot. " +
   'category = the section/heading the item belongs to (e.g. "Refrigerant Piping", "PUF Panels", "Insulated Doors"). ' +
   'roomZone = the cold-room/zone the item is for if stated (e.g. "Blast Freezer", "Freezer", "Chiller", "Ambient", "Anteroom"), else "". ' +
@@ -198,6 +293,8 @@ export async function aiParse(rawText: string): Promise<ParseResult | null> {
       category: r.category || undefined,
       roomZone: r.roomZone || undefined,
       unit: normalizeUnit(r.unit),
+      makeModel: r.makeModel ? String(r.makeModel).trim() : undefined,
+      remarks: r.remarks ? String(r.remarks).trim() : undefined,
       plannedQty: Number(r.plannedQty) || 0,
       isGroup: !!r.isGroup,
     })).filter((r: ParsedBOQRow) => r.description);

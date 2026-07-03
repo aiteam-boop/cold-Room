@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { Spinner } from '../components/ui';
-import { SECTION_HINTS, type PageKey, type SectionKey } from '../lib/permissions';
+import { SECTION_HINTS, APPROVAL_TYPE_LABELS, type PageKey, type SectionKey, type ApproverProfile } from '../lib/permissions';
 
 interface Meta {
   roles: string[];
@@ -10,6 +10,8 @@ interface Meta {
   projectRoles: string[];
   pages: { key: PageKey; label: string }[];
   sections: { key: SectionKey; label: string }[];
+  approvalRoles: string[];
+  approvalTypes: string[];
   projects: { id: string; name: string; clientName?: string }[];
 }
 interface UserRow {
@@ -17,6 +19,7 @@ interface UserRow {
   whatsapp: string;
   pageAccess: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sectionPerms: Partial<Record<SectionKey, boolean>>;
+  approver?: ApproverProfile;
 }
 interface UserDetail extends UserRow { projects: { projectId: string; role: string }[] }
 
@@ -95,6 +98,8 @@ export default function UsersAdmin() {
         </table>
       </div>
 
+      <ApprovalPermissions users={users} meta={meta} onSaved={() => qc.invalidateQueries({ queryKey: ['users'] })} />
+
       {editing && (
         <UserDrawer
           meta={meta}
@@ -105,6 +110,102 @@ export default function UsersAdmin() {
         />
       )}
     </div>
+  );
+}
+
+// ── Approval Permissions ──────────────────────────────────────────────────────
+// Designates which users are authorized approvers (the single source of truth
+// for approval chains). Below the Users list per the spec.
+const CUSTOM = '__custom__';
+
+function ApprovalPermissions({ users, meta, onSaved }: { users: UserRow[]; meta: Meta; onSaved: () => void }) {
+  return (
+    <div className="card overflow-hidden">
+      <div className="border-b border-slate-200 px-4 py-3">
+        <h2 className="text-sm font-semibold text-slate-700">Approval Permissions</h2>
+        <p className="text-xs text-slate-500">Mark who can approve documents and what they can approve. These users become selectable when building an approval chain on a PO / WO / GRN.</p>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
+          <tr><th className="px-4 py-2">User</th><th>Can approve</th><th>Approval role</th><th>Level</th><th>Types</th><th></th></tr>
+        </thead>
+        <tbody>
+          {users.map((u) => <ApproverRow key={u.id} user={u} meta={meta} onSaved={onSaved} />)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ApproverRow({ user, meta, onSaved }: { user: UserRow; meta: Meta; onSaved: () => void }) {
+  const base: ApproverProfile = user.approver ?? { canApprove: false, approvalRole: null, level: 1, types: [] };
+  const [draft, setDraft] = useState<ApproverProfile>(base);
+  const [savedMsg, setSavedMsg] = useState(false);
+  const isAdmin = user.role === 'ADMIN';
+  const presetMatch = draft.approvalRole && meta.approvalRoles.includes(draft.approvalRole);
+  const roleSelectValue = draft.approvalRole == null ? '' : presetMatch ? draft.approvalRole : CUSTOM;
+
+  const save = useMutation({
+    mutationFn: () => api.patch(`/users/${user.id}`, { approver: draft }),
+    onSuccess: () => { setSavedMsg(true); setTimeout(() => setSavedMsg(false), 1500); onSaved(); },
+  });
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(base);
+  const toggleType = (t: string) => {
+    if (t === 'ALL') { setDraft({ ...draft, types: draft.types.includes('ALL') ? [] : ['ALL'] }); return; }
+    const next = draft.types.filter((x) => x !== 'ALL');
+    setDraft({ ...draft, types: next.includes(t as never) ? next.filter((x) => x !== t) : [...next, t as never] });
+  };
+
+  if (isAdmin) {
+    return (
+      <tr className="border-b border-slate-100">
+        <td className="px-4 py-2"><div className="font-medium text-slate-800">{user.name}</div><div className="text-xs text-slate-400">{user.email}</div></td>
+        <td colSpan={5} className="text-xs text-purple-600">Admins can approve anything — no explicit approver setup needed.</td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr className="border-b border-slate-100 align-top">
+      <td className="px-4 py-2"><div className="font-medium text-slate-800">{user.name}</div><div className="text-xs text-slate-400">{user.email}</div></td>
+      <td className="py-2"><input type="checkbox" checked={draft.canApprove} onChange={(e) => setDraft({ ...draft, canApprove: e.target.checked })} /></td>
+      <td className="py-2 pr-2">
+        {draft.canApprove ? (
+          <div className="space-y-1">
+            <select className="input text-xs" value={roleSelectValue}
+              onChange={(e) => setDraft({ ...draft, approvalRole: e.target.value === CUSTOM ? '' : e.target.value || null })}>
+              <option value="">—</option>
+              {meta.approvalRoles.map((r) => <option key={r} value={r}>{r}</option>)}
+              <option value={CUSTOM}>Custom…</option>
+            </select>
+            {roleSelectValue === CUSTOM && (
+              <input className="input text-xs" placeholder="Custom role" value={draft.approvalRole ?? ''} onChange={(e) => setDraft({ ...draft, approvalRole: e.target.value })} />
+            )}
+          </div>
+        ) : <span className="text-xs text-slate-300">—</span>}
+      </td>
+      <td className="py-2 pr-2">
+        {draft.canApprove ? <input type="number" min={1} className="input w-16 text-xs" value={draft.level} onChange={(e) => setDraft({ ...draft, level: Number(e.target.value) || 1 })} /> : <span className="text-xs text-slate-300">—</span>}
+      </td>
+      <td className="py-2 pr-2">
+        {draft.canApprove ? (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            {(['ALL', ...meta.approvalTypes] as string[]).map((t) => (
+              <label key={t} className="flex items-center gap-1">
+                <input type="checkbox" checked={draft.types.includes('ALL') ? t === 'ALL' : draft.types.includes(t as never)} onChange={() => toggleType(t)} />
+                {APPROVAL_TYPE_LABELS[t] ?? t}
+              </label>
+            ))}
+          </div>
+        ) : <span className="text-xs text-slate-300">—</span>}
+      </td>
+      <td className="px-2 text-right">
+        {savedMsg ? <span className="text-xs text-green-600">Saved ✓</span> : (
+          <button className="text-xs font-medium text-navy hover:underline disabled:text-slate-300" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save'}</button>
+        )}
+      </td>
+    </tr>
   );
 }
 

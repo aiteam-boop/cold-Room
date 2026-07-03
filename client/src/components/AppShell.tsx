@@ -1,6 +1,7 @@
 import { Link, NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import NotificationBell from './NotificationBell';
+import ErrorBoundary from './ErrorBoundary';
 
 export default function AppShell() {
   const { user, logout, isAdmin, canView } = useAuth();
@@ -18,6 +19,7 @@ export default function AppShell() {
               <NavLink to="/" end className={navCls}>Projects</NavLink>
               {canView('vendors') && <NavLink to="/vendors" className={navCls}>Vendors</NavLink>}
               {canView('approvals') && <NavLink to="/approvals" className={navCls}>Approvals</NavLink>}
+              {canView('machinemodels') && <NavLink to="/settings/machine-models" className={navCls}>Machine Models</NavLink>}
               {isAdmin && <NavLink to="/settings/users" className={navCls}>Users</NavLink>}
             </nav>
           </div>
@@ -34,7 +36,9 @@ export default function AppShell() {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6">
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );

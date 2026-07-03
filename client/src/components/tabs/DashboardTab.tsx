@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, Cartes
 import { api, downloadFile } from '../../lib/api';
 import { Gauge, KPI, RiskBadge, Spinner } from '../ui';
 import { COLOR_HEX, colorFor, fmtDate, fmtNum, riskPill, titleize } from '../../lib/format';
+import DashboardExtras from './DashboardExtras';
 
 export default function DashboardTab({ projectId }: { projectId: string }) {
   const { data, isLoading } = useQuery({
@@ -143,6 +144,9 @@ export default function DashboardTab({ projectId }: { projectId: string }) {
           <button className="btn-primary" onClick={() => downloadFile(`/projects/${projectId}/reports/pdf?type=client`, 'client-report.pdf')}>Client PDF</button>
         </div>
       </div>
+
+      {/* NEW cards: Room-wise progress, Gantt summary, Change Orders (additive) */}
+      <DashboardExtras projectId={projectId} />
     </div>
   );
 }

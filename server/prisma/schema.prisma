@@ -27,6 +27,9 @@ model User {
   // IMS-style per-user grants (admin-controlled). JSON, parsed in permissions.ts.
   pageAccess   String?          // { [pageKey]: { view: bool, edit: bool } }
   sectionPerms String?          // { hideFinancials, canApprove, canMarkPaid }
+  // Approver registry profile (JSON): { canApprove, approvalRole, level, types[] }.
+  // Designates this user as a selectable approver for approval chains.
+  approver     String?
   twoFactor    Boolean          @default(false)
   createdAt    DateTime         @default(now())
 
@@ -86,6 +89,8 @@ model Project {
   procurementDocs ProcurementDoc[]
   grns          GRN[]
   procDocuments ProcurementDocument[]
+  ganttActivities GanttActivity[]
+  changeOrders  ChangeOrder[]
 }
 
 // ── Module C: Procurement & PO Management ───────────────────────────────────
@@ -98,9 +103,13 @@ model Vendor {
   type          String   @default("VENDOR")
   contactPerson String?
   phones        String?  // comma/JSON list
+  tel           String?
+  fax           String?
+  website       String?
   address       String?
   email         String?
-  gstin         String?
+  gstin         String?  // GSTN.NO
+  cin           String?
   pan           String?
   bankAccount   String?
   ifsc          String?
@@ -110,6 +119,7 @@ model Vendor {
   siteMappings  VendorSiteMapping[]
   docs          ProcurementDoc[]
   kycDocs       ProcurementDocument[]
+  itemLists     BOQItemList[]
 }
 
 model VendorSiteMapping {
@@ -341,7 +351,17 @@ model BOQItem {
   category    String?        // e.g. "Refrigeration Units", "PUF Panels"
   roomZone    String?        // e.g. "Blast Freezer (-30C)"
   unit        String?        // mtr, No's, Sq.M, RMT, MT
+  makeModel   String?        // "Make & Model" column from the BOQ sheet (brand/spec)
+  remarks     String?        // "Remarks" column from the BOQ sheet (specs/notes)
   plannedQty  Float          @default(0)
+
+  // ── BOQ Enhancements (Gantt/Room PRD) — all additive, optional ──
+  itemCategory     String?    // EQUIPMENT | MATERIAL | SERVICE (drives Make&Model UI)
+  machineModelId   String?
+  machineModel     MachineModel? @relation(fields: [machineModelId], references: [id])
+  makeModelRawText String?    // original model text from BOQ before matching to master
+  makeModelStatus  String?    // CONFIRMED | PARTIAL | MISSING | NOT_APPLICABLE
+  displaySequence  Int?       // numeric BOQ-document order (for dashboard sort fix)
 
   // Hierarchy (collapsible BOQ tree)
   parentId    String?
@@ -358,6 +378,9 @@ model BOQItem {
   createdAt   DateTime       @default(now())
 
   entries     ProgressEntry[]
+  itemLists       BOQItemList[]
+  ganttActivities GanttActivity[]
+  changeOrders    ChangeOrder[]
 
   @@index([projectId])
   @@index([parentId])
@@ -431,15 +454,166 @@ model ProjectZone {
   roomType    String?
   coordinates String?   // JSON polygon: [{x,y}, ...] in 0..100 floor-plan space
   heightM     Float?    // for 3D extrusion
+  temperatureRange String? // e.g. "-30C", "1-3C" (Room-wise tracking)
   sortOrder   Int       @default(0)
   createdAt   DateTime  @default(now())
 
   boqItems    BOQItem[]
+  ganttActivities GanttActivity[]
 
   @@index([projectId])
 }
 
 // ── Audit ────────────────────────────────────────────────────────────────────
+
+// ── BOQ Enhancements + Gantt + Room Tracking (PRD v1.0) ─────────────────────
+
+// Master list of equipment make/model options for BOQ equipment items.
+model MachineModel {
+  id              String   @id @default(cuid()) @map("_id")
+  make            String   // Bitzer, Copeland, Danfoss, Daikin, Haier
+  modelCode       String   // S6F-30.2Y-40P, ZB76, etc.
+  fullDisplayName String?  // "Bitzer — S6F-30.2Y-40P (27 kW, R404A)"
+  capacityKW      Float?
+  refrigerantType String?  // R404A, R134a, R407C, R448A
+  compressorType  String?  // Semi-hermetic, Scroll, VFD
+  applicableRooms String[] @default([])
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  boqItems        BOQItem[]
+}
+
+// Vendor sub-item breakdown for a BOQ category, validated against planned qty.
+model BOQItemList {
+  id              String   @id @default(cuid()) @map("_id")
+  boqItemId       String
+  boqItem         BOQItem  @relation(fields: [boqItemId], references: [id], onDelete: Cascade)
+  vendorId        String?
+  vendor          Vendor?  @relation(fields: [vendorId], references: [id])
+  purchaseOrderId String?
+  items           Json     // [{itemCode, description, unit, qty}]
+  totalQty        Float    @default(0)
+  matchesBoqQty   Boolean  @default(false)
+  toleranceUsed   Float    @default(10)   // % tolerance
+  overrideNote    String?                 // justification when outside tolerance
+  uploadedFileUrl String?
+  uploadedById    String?
+  uploadedAt      DateTime @default(now())
+
+  @@index([boqItemId])
+}
+
+// Gantt timeline activity. status: NOT_STARTED | IN_PROGRESS | COMPLETED | DELAYED
+model GanttActivity {
+  id                  String   @id @default(cuid()) @map("_id")
+  projectId           String
+  project             Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activityName        String
+  boqItemId           String?
+  boqItem             BOQItem? @relation(fields: [boqItemId], references: [id])
+  zoneId              String?
+  zone                ProjectZone? @relation(fields: [zoneId], references: [id])
+  plannedStartDate    DateTime
+  plannedDurationDays Int      @default(1)
+  plannedEndDate      DateTime
+  actualStartDate     DateTime?
+  actualEndDate       DateTime?
+  percentComplete     Float    @default(0)
+  percentCompleteAuto Boolean  @default(true) // true = pull from BOQ progress
+  status              String   @default("NOT_STARTED")
+  dependencies        String[] @default([])   // predecessor GanttActivity ids
+  assignedVendor      String?
+  sequence            Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+// Change Order. type: QTY_INCREASE | QTY_DECREASE | NEW_ITEM | SUBSTITUTION
+// status: DRAFT | PENDING | APPROVED | REJECTED (reuses the PO/WO approval pattern)
+model ChangeOrder {
+  id              String   @id @default(cuid()) @map("_id")
+  coNumber        String   @unique
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  boqItemId       String?
+  boqItem         BOQItem? @relation(fields: [boqItemId], references: [id])
+  type            String
+  description     String
+  originalQty     Float?
+  changeQty       Float    @default(0)
+  newTotalQty     Float?
+  unit            String?
+  costImpact      Float?
+  paidByClient    String?  // YES | NO | TBD
+  justification   String?
+  status          String   @default("DRAFT")
+  approvedById    String?
+  approvedAt      DateTime?
+  rejectionReason String?
+  history         Json?    // baseline-change audit trail
+  createdById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+// ── Sequential approval chain (PO / WO / GRN) ────────────────────────────────
+// Polymorphic by (docType, docId). One row per approver in the chain, ordered
+// by `order`. The current step = lowest-order row with status PENDING.
+// status: WAITING (not yet its turn) | PENDING (awaiting this approver) |
+//         APPROVED | REJECTED
+model ApprovalStep {
+  id            String    @id @default(cuid()) @map("_id")
+  docType       String    // PO | WO | GRN
+  docId         String
+  projectId     String
+  order         Int
+  approverId    String
+  approverName  String
+  approverEmail String?
+  approverRole  String?
+  status        String    @default("WAITING")
+  actedAt       DateTime?
+  remarks       String?
+  createdAt     DateTime  @default(now())
+
+  @@index([docType, docId])
+}
+
+// Immutable log of every approval-workflow action for the timeline / audit.
+// action: SUBMITTED | APPROVED | REJECTED | REMINDED
+model ApprovalAction {
+  id         String   @id @default(cuid()) @map("_id")
+  docType    String
+  docId      String
+  stepId     String?
+  actorId    String?
+  actorName  String
+  actorEmail String?
+  actorRole  String?
+  action     String
+  remarks    String?
+  at         DateTime @default(now())
+
+  @@index([docType, docId])
+}
+
+// Durable copy of every uploaded file, stored in the DB (so files survive a
+// disk wipe / redeploy). Bytes fit MongoDB's 16MB/doc limit — larger files
+// (e.g. big DXF drawings) stay disk-only and are skipped here.
+model StoredFile {
+  id        String   @id @default(cuid()) @map("_id")
+  filename  String   @unique
+  mimeType  String?
+  size      Int      @default(0)
+  data      Bytes
+  createdAt DateTime @default(now())
+}
 
 // In-app notifications (Module C). Email is a future add-on.
 model Notification {

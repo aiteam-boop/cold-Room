@@ -17,6 +17,11 @@ import {
 } from '../services/procurement';
 import { renderProcurementPdf, renderGRNPdf } from '../services/procurementPdf';
 import { notifyUser, notifyProjectRoles } from '../services/notify';
+import { hasSection } from '../lib/permissions';
+import {
+  buildChain, recordDecision, remindCurrent, finalizeApproval, markDocRejected,
+  getChainState, resolveActor, type DocType,
+} from '../services/approvalChain';
 
 const rs = (n: number) => 'Rs. ' + (n || 0).toLocaleString('en-IN');
 
@@ -27,19 +32,20 @@ router.use(requireAuth);
 const DOC_PAGES = ['pay', 'po', 'wo'] as const;
 function kyc(count: number) { return count >= 4 ? 'Complete' : count >= 1 ? 'Partial' : 'Missing'; }
 
-// ── Project-scoped vendor search (site-filtered) ────────────────────────────
+// ── Vendor list ─────────────────────────────────────────────────────────────
+// The vendor database is company-wide: every project sees all vendors, so a
+// vendor added in one project is immediately usable in all others.
 router.get('/vendors', requireProjectMember, requirePage('vendors'), asyncHandler(async (req, res) => {
   const vendors = await prisma.vendor.findMany({
-    where: { siteMappings: { some: { projectId: req.params.projectId } } },
     orderBy: { name: 'asc' },
     include: { _count: { select: { kycDocs: true } } },
   });
-  res.json({ vendors: vendors.map((v) => ({ id: v.id, name: v.name, type: v.type, address: v.address, gstin: v.gstin, contactPerson: v.contactPerson, phones: v.phones, email: v.email, kycStatus: kyc(v._count.kycDocs) })) });
+  res.json({ vendors: vendors.map((v) => ({ id: v.id, name: v.name, type: v.type, address: v.address, gstin: v.gstin, cin: v.cin, contactPerson: v.contactPerson, phones: v.phones, tel: v.tel, fax: v.fax, website: v.website, email: v.email, pan: v.pan, bankAccount: v.bankAccount, ifsc: v.ifsc, kycStatus: kyc(v._count.kycDocs) })) });
 }));
 
 // Inline create vendor + map to this project (FR-MC-27).
 router.post('/vendors', requireProjectMember, requireEdit('vendors'), asyncHandler(async (req, res) => {
-  const b = z.object({ name: z.string().min(1), type: z.enum(['VENDOR', 'CONTRACTOR']).default('VENDOR'), contactPerson: z.string().optional(), phones: z.string().optional(), address: z.string().optional(), email: z.string().optional(), gstin: z.string().optional(), pan: z.string().optional(), bankAccount: z.string().optional(), ifsc: z.string().optional() }).parse(req.body);
+  const b = z.object({ name: z.string().min(1), type: z.enum(['VENDOR', 'CONTRACTOR']).default('VENDOR'), contactPerson: z.string().optional(), phones: z.string().optional(), tel: z.string().optional(), fax: z.string().optional(), website: z.string().optional(), address: z.string().optional(), email: z.string().optional(), gstin: z.string().optional(), cin: z.string().optional(), pan: z.string().optional(), bankAccount: z.string().optional(), ifsc: z.string().optional() }).parse(req.body);
   const vendor = await prisma.vendor.create({ data: { ...b, createdById: req.user!.sub, siteMappings: { create: { projectId: req.params.projectId } } } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'VENDOR_CREATE_INLINE', entity: 'Vendor', entityId: vendor.id });
   res.status(201).json({ vendor });
@@ -101,7 +107,8 @@ router.get('/docs/:docId', requireProjectMember, requireAnyPage(...DOC_PAGES), a
     include: { lineItems: { orderBy: { sortOrder: 'asc' } }, milestones: { orderBy: { sortOrder: 'asc' } }, grns: { select: { id: true, grnNumber: true, status: true, invoiceValue: true } } },
   });
   if (!doc) throw notFound('Document not found');
-  res.json({ doc: maskFinancials(serializeDoc(doc), req.account) });
+  const approval = await getChainState(doc.type as DocType, doc.id);
+  res.json({ doc: maskFinancials(serializeDoc(doc), req.account), approval });
 }));
 
 const lineSchema = z.object({ id: z.string().optional(), srNo: z.coerce.number().optional(), description: z.string().default(''), uom: z.string().optional().nullable(), qty: z.coerce.number().catch(0).default(0), unitPrice: z.coerce.number().catch(0).default(0), totalPrice: z.coerce.number().optional(), isLeadTime: z.boolean().optional(), leadTimeText: z.string().optional().nullable() });
@@ -191,9 +198,17 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
   if (doc.status === 'APPROVED') throw badRequest('Already approved');
   const total = paymentTotalPct(doc);
   if (Math.abs(total - 100) > 0.01) throw badRequest(`Payment terms must total 100% (currently ${total}%).`);
+  const chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
   const updated = await prisma.procurementDoc.update({ where: { id: doc.id }, data: { status: 'PENDING_APPROVAL' } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_SUBMIT', entity: 'ProcurementDoc', entityId: doc.id });
-  await notifyProjectRoles(req.params.projectId, ['ADMIN'], { type: 'DOC_SUBMITTED', title: `${doc.type} pending approval`, message: `${doc.docNumber} (${doc.vendorName || 'vendor'}) for ${rs(doc.finalAmount)} needs approval.`, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_SUBMIT', entity: 'ProcurementDoc', entityId: doc.id, details: { chainLength: chain.length } });
+  if (chain.length) {
+    // Build the sequential approval chain; only the first approver is notified.
+    const actor = await resolveActor(req.account!.id);
+    await buildChain(doc.type as DocType, doc.id, req.params.projectId, chain, actor);
+  } else {
+    // No chain chosen → fall back to notifying project admins (legacy behaviour).
+    await notifyProjectRoles(req.params.projectId, ['ADMIN'], { type: 'DOC_SUBMITTED', title: `${doc.type} pending approval`, message: `${doc.docNumber} (${doc.vendorName || 'vendor'}) for ${rs(doc.finalAmount)} needs approval.`, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
+  }
   res.json({ doc: serializeDoc(updated) });
 }));
 
@@ -206,35 +221,57 @@ router.post('/docs/:docId/recall', requireProjectMember, requireAnyEdit(...DOC_P
   res.json({ doc: serializeDoc(updated) });
 }));
 
-// POST .../docs/:docId/approve — AA sir approves: e-sign, lock, milestones, PDF.
-router.post('/docs/:docId/approve', requireProjectMember, requireSection('canApprove'), asyncHandler(async (req, res) => {
+// POST .../docs/:docId/approve — approve the CURRENT chain step (or, if no chain
+// was set, a direct admin/canApprove approval). Final approval e-signs + builds
+// milestones via finalizeApproval(). requireProjectMember is intentionally NOT
+// applied so org-level approvers who aren't project members can still approve.
+router.post('/docs/:docId/approve', asyncHandler(async (req, res) => {
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound();
   if (doc.status !== 'PENDING_APPROVAL') throw badRequest('Document is not pending approval');
+  const remarks = (typeof req.body?.remarks === 'string' ? req.body.remarks : undefined) || undefined;
+  const actor = await resolveActor(req.account!.id);
+  const stepCount = await prisma.approvalStep.count({ where: { docType: doc.type, docId: doc.id } });
 
-  const milestones = buildMilestones(doc);
-  await prisma.$transaction([
-    prisma.paymentMilestone.deleteMany({ where: { docId: doc.id } }),
-    prisma.paymentMilestone.createMany({ data: milestones.map((m) => ({ ...m, docId: doc.id })) }),
-    prisma.procurementDoc.update({ where: { id: doc.id }, data: { status: 'APPROVED', esignApplied: true, approvedById: req.user!.sub, approvedAt: new Date(), lockedAt: new Date() } }),
-  ]);
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_APPROVE', entity: 'ProcurementDoc', entityId: doc.id, details: { milestones: milestones.length } });
+  if (stepCount > 0) {
+    const outcome = await recordDecision(doc.type as DocType, doc.id, actor, 'APPROVE', remarks);
+    if (outcome === 'COMPLETED') await finalizeApproval(doc.type as DocType, doc.id, actor.id);
+    await audit({ userId: actor.id, projectId: req.params.projectId, action: 'PROC_DOC_APPROVE', entity: 'ProcurementDoc', entityId: doc.id, details: { outcome } });
+    return res.json({ ok: true, outcome });
+  }
 
-  // Register the generated PDF in the repository.
-  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: doc.type, fileName: `${doc.docNumber}.pdf`, fileUrl: `/api/projects/${req.params.projectId}/procurement/docs/${doc.id}/pdf`, linkedDocNumber: doc.docNumber, vendorId: doc.vendorId, vendorName: doc.vendorName, uploadedById: req.user!.sub } });
-  if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_APPROVED', title: `${doc.type} approved`, message: `${doc.docNumber} has been approved and e-signed.`, projectId: req.params.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` });
-  await notifyProjectRoles(req.params.projectId, ['MANAGEMENT'], { type: 'DOC_APPROVED', title: `${doc.type} approved — payment pipeline active`, message: `${doc.docNumber} (${doc.vendorName || 'vendor'}) approved. ${milestones.length} payment milestone(s) ready.`, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
-  res.json({ ok: true });
+  // Legacy path (no chain): admin / canApprove approves directly.
+  if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
+  await finalizeApproval(doc.type as DocType, doc.id, actor.id);
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'PROC_DOC_APPROVE', entity: 'ProcurementDoc', entityId: doc.id, details: { outcome: 'COMPLETED', legacy: true } });
+  res.json({ ok: true, outcome: 'COMPLETED' });
 }));
 
-router.post('/docs/:docId/reject', requireProjectMember, requireSection('canApprove'), asyncHandler(async (req, res) => {
+router.post('/docs/:docId/reject', asyncHandler(async (req, res) => {
   const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound();
   if (doc.status !== 'PENDING_APPROVAL') throw badRequest('Document is not pending approval');
-  await prisma.procurementDoc.update({ where: { id: doc.id }, data: { status: 'DRAFT', rejectionReason: reason } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_REJECT', entity: 'ProcurementDoc', entityId: doc.id, details: { reason } });
-  if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_REJECTED', title: `${doc.type} rejected`, message: `${doc.docNumber} was rejected: ${reason}`, projectId: req.params.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` });
+  const actor = await resolveActor(req.account!.id);
+  const stepCount = await prisma.approvalStep.count({ where: { docType: doc.type, docId: doc.id } });
+  if (stepCount > 0) {
+    await recordDecision(doc.type as DocType, doc.id, actor, 'REJECT', reason);
+    await markDocRejected(doc.type as DocType, doc.id, reason);
+  } else {
+    if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
+    await markDocRejected(doc.type as DocType, doc.id, reason);
+    if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_REJECTED', title: `${doc.type} rejected`, message: `${doc.docNumber} was rejected: ${reason}`, projectId: req.params.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` });
+  }
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'PROC_DOC_REJECT', entity: 'ProcurementDoc', entityId: doc.id, details: { reason } });
+  res.json({ ok: true });
+}));
+
+// POST .../docs/:docId/remind — re-notify the current pending approver.
+router.post('/docs/:docId/remind', requireProjectMember, asyncHandler(async (req, res) => {
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
+  if (!doc) throw notFound();
+  const actor = await resolveActor(req.account!.id);
+  await remindCurrent(doc.type as DocType, doc.id, actor);
   res.json({ ok: true });
 }));
 
@@ -306,7 +343,8 @@ router.post('/grns', requireProjectMember, requireEdit('grn'), asyncHandler(asyn
 router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true } } } });
   if (!grn) throw notFound();
-  res.json({ grn: maskFinancials(grn, req.account) });
+  const approval = await getChainState('GRN', grn.id);
+  res.json({ grn: maskFinancials(grn, req.account), approval });
 }));
 
 const grnUpdate = z.object({
@@ -350,29 +388,59 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
   if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
+  const chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
   const updated = await prisma.gRN.update({ where: { id: grn.id }, data: { status: 'OPEN' } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id });
-  await notifyProjectRoles(req.params.projectId, ['ADMIN', 'SUPERVISOR'], { type: 'GRN_SUBMITTED', title: 'GRN awaiting approval', message: `${grn.grnNumber} (${grn.vendorName || 'vendor'}), invoice ${rs(grn.invoiceValue ?? 0)} — review needed.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id, details: { chainLength: chain.length } });
+  if (chain.length) {
+    const actor = await resolveActor(req.account!.id);
+    await buildChain('GRN', grn.id, req.params.projectId, chain, actor);
+  } else {
+    await notifyProjectRoles(req.params.projectId, ['ADMIN', 'SUPERVISOR'], { type: 'GRN_SUBMITTED', title: 'GRN awaiting approval', message: `${grn.grnNumber} (${grn.vendorName || 'vendor'}), invoice ${rs(grn.invoiceValue ?? 0)} — review needed.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
+  }
   res.json({ grn: updated });
 }));
 
-router.post('/grns/:grnId/approve', requireProjectMember, requireSection('canApprove'), asyncHandler(async (req, res) => {
+router.post('/grns/:grnId/approve', asyncHandler(async (req, res) => {
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
   if (grn.status !== 'OPEN') throw badRequest('GRN is not open for approval');
-  await prisma.gRN.update({ where: { id: grn.id }, data: { status: 'APPROVED', approvedById: req.user!.sub, approvedAt: new Date() } });
-  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'GRN', fileName: `${grn.grnNumber}.pdf`, fileUrl: `/api/projects/${req.params.projectId}/procurement/grns/${grn.id}/pdf`, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, uploadedById: req.user!.sub } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_APPROVE', entity: 'GRN', entityId: grn.id });
-  if (grn.raisedById) await notifyUser(grn.raisedById, { type: 'GRN_APPROVED', title: 'GRN approved', message: `${grn.grnNumber} has been approved.`, projectId: req.params.projectId, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` });
-  await notifyProjectRoles(req.params.projectId, ['MANAGEMENT'], { type: 'GRN_APPROVED', title: 'GRN approved — invoice received', message: `${grn.grnNumber} approved. Invoice ${rs(grn.invoiceValue ?? 0)} added to payment pipeline.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
-  res.json({ ok: true });
+  const remarks = (typeof req.body?.remarks === 'string' ? req.body.remarks : undefined) || undefined;
+  const actor = await resolveActor(req.account!.id);
+  const stepCount = await prisma.approvalStep.count({ where: { docType: 'GRN', docId: grn.id } });
+  if (stepCount > 0) {
+    const outcome = await recordDecision('GRN', grn.id, actor, 'APPROVE', remarks);
+    if (outcome === 'COMPLETED') await finalizeApproval('GRN', grn.id, actor.id);
+    await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_APPROVE', entity: 'GRN', entityId: grn.id, details: { outcome } });
+    return res.json({ ok: true, outcome });
+  }
+  if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
+  await finalizeApproval('GRN', grn.id, actor.id);
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_APPROVE', entity: 'GRN', entityId: grn.id, details: { legacy: true } });
+  res.json({ ok: true, outcome: 'COMPLETED' });
 }));
 
-router.post('/grns/:grnId/reject', requireProjectMember, requireSection('canApprove'), asyncHandler(async (req, res) => {
+router.post('/grns/:grnId/reject', asyncHandler(async (req, res) => {
   const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
-  await prisma.gRN.update({ where: { id: grn.id }, data: { status: 'REJECTED', rejectionReason: reason } });
+  const actor = await resolveActor(req.account!.id);
+  const stepCount = await prisma.approvalStep.count({ where: { docType: 'GRN', docId: grn.id } });
+  if (stepCount > 0) {
+    await recordDecision('GRN', grn.id, actor, 'REJECT', reason);
+    await markDocRejected('GRN', grn.id, reason);
+  } else {
+    if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
+    await markDocRejected('GRN', grn.id, reason);
+  }
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_REJECT', entity: 'GRN', entityId: grn.id, details: { reason } });
+  res.json({ ok: true });
+}));
+
+router.post('/grns/:grnId/remind', requireProjectMember, asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  const actor = await resolveActor(req.account!.id);
+  await remindCurrent('GRN', grn.id, actor);
   res.json({ ok: true });
 }));
 

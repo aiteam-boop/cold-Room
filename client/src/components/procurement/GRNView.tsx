@@ -4,6 +4,8 @@ import { api, errMsg, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
 import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
+import ApprovalTimeline from './ApprovalTimeline';
+import ChainBuilder from './ChainBuilder';
 
 export default function GRNView({ projectId }: { projectId: string; role: string }) {
   const qc = useQueryClient();
@@ -79,9 +81,12 @@ export default function GRNView({ projectId }: { projectId: string; role: string
 
 function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string; grnId: string; canApprove: boolean; onClose: () => void }) {
   const qc = useQueryClient();
+  const { user } = useAuth();
   const [g, setG] = useState<any>(null);
   const [msg, setMsg] = useState('');
-  const { isLoading } = useQuery({ queryKey: ['grn', grnId], queryFn: async () => { const d = (await api.get(`/projects/${projectId}/procurement/grns/${grnId}`)).data.grn; setG(structuredClone(d)); return d; } });
+  const [showChain, setShowChain] = useState(false);
+  const grnQ = useQuery({ queryKey: ['grn', grnId], queryFn: async () => { const res = (await api.get(`/projects/${projectId}/procurement/grns/${grnId}`)).data; setG(structuredClone(res.grn)); return res as { grn: any; approval?: any }; } });
+  const isLoading = grnQ.isLoading;
 
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/grns/${grnId}`, {
@@ -97,10 +102,21 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
     onSuccess: () => { setMsg('Invoice uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
     onError: (e) => setMsg(errMsg(e)),
   });
-  const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); onClose(); }, onError: (e) => setMsg(errMsg(e)) });
+  const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }, onError: (e) => setMsg(errMsg(e)) });
 
   if (isLoading || !g) return <Spinner label="Loading GRN…" />;
   const editable = g.status === 'DRAFT';
+
+  // Approval-chain state (mirrors DocBuilder).
+  const approval = grnQ.data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
+  const hasChain = (approval?.total ?? 0) > 0;
+  const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
+  const canAct = g.status === 'OPEN' && (hasChain ? (myTurn || canApprove) : canApprove);
+  const promptRemarks = (verb: 'approve' | 'reject') => {
+    const r = window.prompt(verb === 'reject' ? 'Rejection reason' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
+    if (verb === 'reject' && !r) return;
+    act.mutate({ verb, body: verb === 'reject' ? { reason: r } : { remarks: r } });
+  };
 
   return (
     <div className="space-y-4">
@@ -109,12 +125,22 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         <div className="flex gap-2">
           {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`)}>📄 PDF</button>}
           {editable && <button className="btn-primary text-sm" onClick={() => save.mutate()}>Save</button>}
-          {editable && <button className="btn-primary text-sm" onClick={async () => { await save.mutateAsync(); act.mutate({ verb: 'submit' }); }}>Submit</button>}
-          {canApprove && g.status === 'OPEN' && <button className="btn-primary text-sm" onClick={() => act.mutate({ verb: 'approve' })}>✓ Approve</button>}
-          {canApprove && g.status === 'OPEN' && <button className="btn-danger text-sm" onClick={() => { const r = prompt('Reason'); if (r) act.mutate({ verb: 'reject', body: { reason: r } }); }}>Reject</button>}
+          {editable && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit</button>}
+          {g.status === 'OPEN' && hasChain && <button className="btn-outline text-sm" disabled={act.isPending} onClick={() => act.mutate({ verb: 'remind' })}>Send Reminder</button>}
+          {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
+          {canAct && <button className="btn-danger text-sm" onClick={() => promptRemarks('reject')}>Reject</button>}
         </div>
       </div>
       {msg && <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{msg}</div>}
+      {hasChain && <ApprovalTimeline approval={approval as any} />}
+      {showChain && (
+        <ChainBuilder
+          docType="GRN"
+          busy={act.isPending || save.isPending}
+          onClose={() => setShowChain(false)}
+          onConfirm={async (chain) => { await save.mutateAsync(); act.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
+        />
+      )}
 
       <div className="card p-4">
         <div className="mb-3 text-sm font-semibold text-slate-600">Delivery Details</div>

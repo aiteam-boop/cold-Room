@@ -6,7 +6,7 @@ import { fmtNum } from '../../lib/format';
 
 interface Row {
   srNo?: string; description: string; category?: string; roomZone?: string;
-  unit?: string; plannedQty: number; isGroup?: boolean;
+  unit?: string; makeModel?: string; remarks?: string; plannedQty: number; isGroup?: boolean; flagged?: boolean;
 }
 
 export default function BOQImportModal({ projectId, onClose, onImported }: { projectId: string; onClose: () => void; onImported: () => void }) {
@@ -71,15 +71,18 @@ export default function BOQImportModal({ projectId, onClose, onImported }: { pro
           <div className="max-h-[50vh] overflow-auto rounded-lg border border-slate-200">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-slate-400">
-                <tr><th className="px-2 py-2">Category</th><th>Description</th><th>Unit</th><th className="text-right">Planned</th><th></th></tr>
+                <tr><th className="px-2 py-2">Sr.No</th><th>Category</th><th>Description</th><th>Make &amp; Model</th><th>Remarks</th><th>Unit</th><th className="text-right">Planned</th><th></th></tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={i} className={`border-b border-slate-100 ${r.isGroup ? 'bg-slate-50 font-medium' : ''}`}>
-                    <td className="px-2 py-1"><input className="w-28 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.category ?? ''} onChange={(e) => updateRow(i, { category: e.target.value })} /></td>
+                  <tr key={i} className={`border-b border-slate-100 ${r.isGroup ? 'bg-slate-50 font-medium' : r.flagged ? 'bg-amber-50' : ''}`} title={r.flagged ? 'Quantity is ambiguous in the source (value in more than one column) — please verify.' : undefined}>
+                    <td className="px-2 py-1"><input className="w-16 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.srNo ?? ''} onChange={(e) => updateRow(i, { srNo: e.target.value })} /></td>
+                    <td><input className="w-28 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.category ?? ''} onChange={(e) => updateRow(i, { category: e.target.value })} /></td>
                     <td><input className="w-full rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} /></td>
+                    <td><input className="w-40 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.makeModel ?? ''} onChange={(e) => updateRow(i, { makeModel: e.target.value })} /></td>
+                    <td><input className="w-40 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.remarks ?? ''} onChange={(e) => updateRow(i, { remarks: e.target.value })} /></td>
                     <td><input className="w-16 rounded border border-transparent bg-transparent px-1 hover:border-slate-300 focus:border-navy" value={r.unit ?? ''} onChange={(e) => updateRow(i, { unit: e.target.value })} /></td>
-                    <td className="text-right"><input className="w-20 rounded border border-transparent bg-transparent px-1 text-right hover:border-slate-300 focus:border-navy" type="number" step="any" value={r.plannedQty} onChange={(e) => updateRow(i, { plannedQty: Number(e.target.value) })} /></td>
+                    <td className="text-right"><div className="flex items-center justify-end gap-1">{r.flagged && <span className="text-amber-500" title="Ambiguous quantity — verify">⚠</span>}<input className={`w-20 rounded border bg-transparent px-1 text-right focus:border-navy ${r.flagged ? 'border-amber-300' : 'border-transparent hover:border-slate-300'}`} type="number" step="any" value={r.plannedQty} onChange={(e) => updateRow(i, { plannedQty: Number(e.target.value), flagged: false })} /></div></td>
                     <td className="text-right"><button className="px-1 text-slate-300 hover:text-red-500" onClick={() => removeRow(i)}>✕</button></td>
                   </tr>
                 ))}

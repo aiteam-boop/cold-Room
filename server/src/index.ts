@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
+import { streamFromDb } from './lib/fileStore';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
@@ -20,6 +22,10 @@ import procurementRoutes from './routes/procurement';
 import brandingRoutes from './routes/branding';
 import notificationRoutes from './routes/notifications';
 import approvalRoutes from './routes/approvals';
+import machineModelRoutes from './routes/machineModels';
+import boqEnhanceRoutes from './routes/boqEnhance';
+import ganttRoutes from './routes/gantt';
+import changeOrderRoutes from './routes/changeOrders';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -29,6 +35,15 @@ app.use(cors({ origin: ORIGIN === '*' ? true : ORIGIN.split(','), credentials: t
 app.use(express.json({ limit: '5mb' }));
 
 // Serve uploaded files (drawings + progress photos).
+// Serve uploads from local disk when present, else stream from MongoDB (GridFS)
+// — so files remain available even if the local cache is wiped on redeploy.
+app.get('/uploads/:filename', async (req, res, next) => {
+  const filename = path.basename(req.params.filename);
+  const local = path.join(UPLOADS_PATH, filename);
+  if (fs.existsSync(local)) return res.sendFile(local);
+  const served = await streamFromDb(filename, res);
+  if (!served) next();
+});
 app.use('/uploads', express.static(UPLOADS_PATH));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'CRMCTS', time: new Date().toISOString() }));
@@ -40,6 +55,7 @@ app.use('/api/vendors', vendorRoutes);
 app.use('/api/branding', brandingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/approvals', approvalRoutes);
+app.use('/api/machine-models', machineModelRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
@@ -49,6 +65,9 @@ app.use('/api/projects/:projectId/drawings', drawingRoutes);
 app.use('/api/projects/:projectId/dashboard', dashboardRoutes);
 app.use('/api/projects/:projectId/reports', reportRoutes);
 app.use('/api/projects/:projectId/procurement', procurementRoutes);
+app.use('/api/projects/:projectId/boq-items', boqEnhanceRoutes);
+app.use('/api/projects/:projectId/gantt', ganttRoutes);
+app.use('/api/projects/:projectId/change-orders', changeOrderRoutes);
 
 // 404
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));

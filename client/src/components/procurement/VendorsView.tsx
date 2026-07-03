@@ -11,6 +11,7 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   const { canEdit } = useAuth();
   const isAdmin = canEdit('vendors');
   const [show, setShow] = useState(false);
+  const [editing, setEditing] = useState<any | null>(null);
 
   const { data, isLoading } = useQuery({ queryKey: ['proc-vendors', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/vendors`)).data.vendors as any[] });
 
@@ -20,7 +21,7 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-slate-600">Vendors & Contractors mapped to this site ({vendors.length})</h3>
+        <h3 className="text-sm font-medium text-slate-600">Vendors & Contractors — company-wide ({vendors.length})</h3>
         {isAdmin && <button className="btn-primary text-sm" onClick={() => setShow(true)}>+ Add Vendor</button>}
       </div>
       {vendors.length === 0 ? (
@@ -31,7 +32,10 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
             <div key={v.id} className="card p-4">
               <div className="flex items-start justify-between">
                 <div className="font-semibold text-navy">{v.name}</div>
-                <span className="badge bg-slate-100 text-slate-600">{v.type}</span>
+                <div className="flex items-center gap-2">
+                  {isAdmin && <button className="text-xs font-medium text-navy hover:underline" onClick={() => setEditing(v)}>Edit</button>}
+                  <span className="badge bg-slate-100 text-slate-600">{v.type}</span>
+                </div>
               </div>
               <div className="mt-1 flex items-center gap-1 text-xs text-slate-500"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} /> KYC {v.kycStatus}</div>
               {v.address && <div className="mt-2 text-xs text-slate-500">{v.address}</div>}
@@ -43,26 +47,48 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
           ))}
         </div>
       )}
-      {show && <AddVendor projectId={projectId} onClose={() => setShow(false)} onDone={() => { setShow(false); qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] }); }} />}
+      {(show || editing) && (
+        <VendorModal
+          projectId={projectId}
+          vendor={editing}
+          onClose={() => { setShow(false); setEditing(null); }}
+          onDone={() => { setShow(false); setEditing(null); qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] }); }}
+        />
+      )}
     </div>
   );
 }
 
-function AddVendor({ projectId, onClose, onDone }: { projectId: string; onClose: () => void; onDone: () => void }) {
-  const [f, setF] = useState<any>({ name: '', type: 'VENDOR', contactPerson: '', phones: '', address: '', email: '', gstin: '', pan: '', bankAccount: '', ifsc: '' });
+// Add OR edit a vendor. Editing uses the global PATCH (vendors are company-wide,
+// so the change is visible in every project); adding posts to this project
+// (which also maps the new vendor to this site).
+function VendorModal({ projectId, vendor, onClose, onDone }: { projectId: string; vendor?: any; onClose: () => void; onDone: () => void }) {
+  const isEdit = !!vendor?.id;
+  const [f, setF] = useState<any>({
+    name: vendor?.name ?? '', type: vendor?.type ?? 'VENDOR', contactPerson: vendor?.contactPerson ?? '',
+    phones: vendor?.phones ?? '', tel: vendor?.tel ?? '', fax: vendor?.fax ?? '', website: vendor?.website ?? '',
+    address: vendor?.address ?? '', email: vendor?.email ?? '',
+    gstin: vendor?.gstin ?? '', cin: vendor?.cin ?? '', pan: vendor?.pan ?? '', bankAccount: vendor?.bankAccount ?? '', ifsc: vendor?.ifsc ?? '',
+  });
   const [err, setErr] = useState('');
-  const m = useMutation({ mutationFn: () => api.post(`/projects/${projectId}/procurement/vendors`, f), onSuccess: onDone, onError: (e) => setErr(errMsg(e)) });
+  const m = useMutation({
+    mutationFn: () => (isEdit ? api.patch(`/vendors/${vendor.id}`, f) : api.post(`/projects/${projectId}/procurement/vendors`, f)),
+    onSuccess: onDone,
+    onError: (e) => setErr(errMsg(e)),
+  });
   const F = (k: string, label: string) => <div><label className="label">{label}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>;
   return (
-    <Modal title="Add Vendor / Contractor" onClose={onClose} wide>
+    <Modal title={isEdit ? 'Edit Vendor / Contractor' : 'Add Vendor / Contractor'} onClose={onClose} wide>
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); m.mutate(); }} className="grid gap-3 sm:grid-cols-2">
         {F('name', 'Name *')}
         <div><label className="label">Type</label><select className="input" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}><option value="VENDOR">Vendor (material)</option><option value="CONTRACTOR">Contractor (labor)</option></select></div>
         {F('contactPerson', 'Contact Person')}{F('phones', 'Phone(s)')}
+        {F('tel', 'Tel')}{F('fax', 'Fax')}
+        {F('website', 'Website')}{F('email', 'Email')}
         <div className="sm:col-span-2"><label className="label">Address</label><textarea className="input" rows={2} value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} /></div>
-        {F('email', 'Email')}{F('gstin', 'GSTIN')}{F('pan', 'PAN')}{F('bankAccount', 'Bank Account')}{F('ifsc', 'IFSC')}
+        {F('gstin', 'GSTIN (GSTN.NO)')}{F('cin', 'CIN')}{F('pan', 'PAN')}{F('bankAccount', 'Bank Account')}{F('ifsc', 'IFSC')}
         {err && <div className="sm:col-span-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
-        <div className="sm:col-span-2 flex justify-end gap-2"><button type="button" className="btn-outline" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Adding…' : 'Add Vendor'}</button></div>
+        <div className="sm:col-span-2 flex justify-end gap-2"><button type="button" className="btn-outline" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Saving…' : isEdit ? 'Save Changes' : 'Add Vendor'}</button></div>
       </form>
     </Modal>
   );

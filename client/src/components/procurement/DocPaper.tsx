@@ -63,7 +63,17 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
   const selectVendor = (id: string) => {
     const v = vendors.find((x) => x.id === id);
     if (!v) { setD({ ...d, vendorId: id || null }); return; }
-    const block = [v.name, v.address, v.contactPerson, v.phones, v.gstin ? `GSTIN : ${v.gstin}` : ''].filter(Boolean).join('\n');
+    const telFax = [v.tel ? `Tel : ${v.tel}` : '', v.fax ? `Fax: ${v.fax}` : ''].filter(Boolean).join(', ');
+    const block = [
+      v.name,
+      v.address,
+      v.contactPerson || '',
+      v.phones ? `Phone: ${v.phones}` : '',
+      telFax,
+      v.website ? `Website: ${v.website}` : '',
+      v.gstin ? `GSTN.NO: ${v.gstin}` : '',
+      v.cin ? `CIN: ${v.cin}` : '',
+    ].filter(Boolean).join('\n');
     setD({ ...d, vendorId: id, vendorName: v.name, vendorAddress: block, vendorGstin: v.gstin, vendorContact: v.contactPerson, vendorPhone: v.phones });
   };
   const setVendorBlock = (x: string) => setD({ ...d, vendorAddress: x, vendorName: (x.split('\n')[0] || '').trim() });

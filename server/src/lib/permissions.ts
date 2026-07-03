@@ -14,7 +14,9 @@ import type { Role } from './enums';
 // The 12 CRMCTS pages (matches the client sidebar + top-nav + the admin grid).
 export const PAGE_KEYS = [
   'dashboard', 'boq', 'drawing',
+  'gantt', 'changeorders',
   'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
+  'machinemodels',
   'team', 'approvals', 'financials',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
@@ -23,12 +25,15 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   dashboard: 'Dashboard',
   boq: 'BOQ & Progress',
   drawing: 'Drawing & 3D',
+  gantt: 'Gantt / Timeline',
+  changeorders: 'Change Orders',
   pay: 'Payment Pipeline',
   po: 'Purchase Orders',
   wo: 'Work Orders',
   grn: 'GRNs',
   vendors: 'Vendors',
   documents: 'Documents',
+  machinemodels: 'Machine Models',
   team: 'Team',
   approvals: 'Approvals',
   financials: 'Financials',
@@ -47,6 +52,62 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
 export interface PageGrant { view: boolean; edit: boolean }
 export type Grants = Partial<Record<PageKey, PageGrant>>;
 export type SectionPerms = Partial<Record<SectionKey, boolean>>;
+
+// ── Approver registry ────────────────────────────────────────────────────────
+// A curated list of who may approve, used as the single source of truth when
+// building an approval chain on a PO/WO/GRN. Approval roles are a preset list
+// but a custom role string is allowed. Types gate which document kinds an
+// approver may be placed on ('ALL' = any).
+export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'] as const;
+export const APPROVAL_TYPES = ['PO', 'WO', 'GRN', 'VENDOR_PAYMENT'] as const;
+export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
+
+export interface ApproverProfile {
+  canApprove: boolean;
+  approvalRole: string | null; // preset or custom label
+  level: number;               // ordering hint (1 = first line, higher = senior)
+  types: ApprovalType[];       // allowed doc types, or ['ALL']
+}
+
+export const EMPTY_APPROVER: ApproverProfile = { canApprove: false, approvalRole: null, level: 1, types: [] };
+
+export function parseApprover(json: string | null | undefined): ApproverProfile {
+  if (!json) return { ...EMPTY_APPROVER };
+  try {
+    const raw = JSON.parse(json) as Partial<ApproverProfile> & { types?: unknown };
+    const types = Array.isArray(raw.types)
+      ? (raw.types.filter((t) => t === 'ALL' || (APPROVAL_TYPES as readonly string[]).includes(String(t))) as ApprovalType[])
+      : [];
+    return {
+      canApprove: !!raw.canApprove,
+      approvalRole: raw.approvalRole ? String(raw.approvalRole) : null,
+      level: Number.isFinite(raw.level) ? Number(raw.level) : 1,
+      types,
+    };
+  } catch {
+    return { ...EMPTY_APPROVER };
+  }
+}
+
+// Sanitise the approver profile coming from the admin UI before persisting.
+export function cleanApprover(input: unknown): ApproverProfile {
+  const raw = (input ?? {}) as Partial<ApproverProfile> & { types?: unknown };
+  const canApprove = !!raw.canApprove;
+  if (!canApprove) return { ...EMPTY_APPROVER };
+  const typesRaw = Array.isArray(raw.types) ? raw.types.map(String) : [];
+  const types = (typesRaw.includes('ALL')
+    ? ['ALL']
+    : APPROVAL_TYPES.filter((t) => typesRaw.includes(t))) as ApprovalType[];
+  const level = Number.isFinite(raw.level) ? Math.max(1, Math.round(Number(raw.level))) : 1;
+  const approvalRole = raw.approvalRole ? String(raw.approvalRole).trim().slice(0, 60) || null : null;
+  return { canApprove: true, approvalRole, level, types };
+}
+
+// Whether an approver profile is allowed to approve a given document type.
+export function approverHandlesType(p: ApproverProfile | null | undefined, type: ApprovalType): boolean {
+  if (!p?.canApprove) return false;
+  return p.types.includes('ALL') || p.types.includes(type);
+}
 
 // The enriched signed-in account resolved per request (from the DB, not the JWT)
 // so deactivation / permission edits take effect immediately.

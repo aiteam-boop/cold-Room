@@ -16,8 +16,10 @@ export default function Login() {
   const nav = useNavigate();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('admin@crmcts.dev');
-  const [password, setPassword] = useState('Password123');
+  // Fields start empty so credentials are never pre-filled for visitors. (The
+  // demo-account shortcuts below only exist in local dev.)
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -54,18 +56,22 @@ export default function Login() {
               and one-click reports.
             </p>
           </div>
-          <div className="rounded-xl bg-white/5 p-4 text-xs text-slate-300">
-            <div className="mb-2 font-medium text-slate-200">Demo accounts (password: Password123)</div>
-            {DEMO.map((d) => (
-              <button
-                key={d.email}
-                onClick={() => { setEmail(d.email); setMode('login'); }}
-                className="mr-1 mb-1 rounded bg-white/10 px-2 py-1 hover:bg-white/20"
-              >
-                {d.role}
-              </button>
-            ))}
-          </div>
+          {/* Demo-account shortcuts: local development only — never rendered in
+              the production build, so credentials are not exposed publicly. */}
+          {import.meta.env.DEV && (
+            <div className="rounded-xl bg-white/5 p-4 text-xs text-slate-300">
+              <div className="mb-2 font-medium text-slate-200">Demo accounts (password: Password123)</div>
+              {DEMO.map((d) => (
+                <button
+                  key={d.email}
+                  onClick={() => { setEmail(d.email); setPassword('Password123'); setMode('login'); }}
+                  className="mr-1 mb-1 rounded bg-white/10 px-2 py-1 hover:bg-white/20"
+                >
+                  {d.role}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="p-8">

@@ -3,7 +3,9 @@
 
 export const PAGE_KEYS = [
   'dashboard', 'boq', 'drawing',
+  'gantt', 'changeorders',
   'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
+  'machinemodels',
   'team', 'approvals', 'financials',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
@@ -12,12 +14,15 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   dashboard: 'Dashboard',
   boq: 'BOQ & Progress',
   drawing: 'Drawing & 3D',
+  gantt: 'Gantt / Timeline',
+  changeorders: 'Change Orders',
   pay: 'Payment Pipeline',
   po: 'Purchase Orders',
   wo: 'Work Orders',
   grn: 'GRNs',
   vendors: 'Vendors',
   documents: 'Documents',
+  machinemodels: 'Machine Models',
   team: 'Team',
   approvals: 'Approvals',
   financials: 'Financials',
@@ -41,6 +46,20 @@ export const SECTION_HINTS: Record<SectionKey, string> = {
 export interface PageGrant { view: boolean; edit: boolean }
 export type Grants = Partial<Record<PageKey, PageGrant>>;
 export type SectionPerms = Partial<Record<SectionKey, boolean>>;
+
+// Approver registry (mirror of server/lib/permissions.ts).
+export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'] as const;
+export const APPROVAL_TYPES = ['PO', 'WO', 'GRN', 'VENDOR_PAYMENT'] as const;
+export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
+export const APPROVAL_TYPE_LABELS: Record<string, string> = {
+  PO: 'Purchase Orders', WO: 'Work Orders', GRN: 'GRNs', VENDOR_PAYMENT: 'Vendor Payments', ALL: 'All',
+};
+export interface ApproverProfile {
+  canApprove: boolean;
+  approvalRole: string | null;
+  level: number;
+  types: ApprovalType[];
+}
 
 export interface PermUser {
   // ADMIN = full access; any other role is grant-based.

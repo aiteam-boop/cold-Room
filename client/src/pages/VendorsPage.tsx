@@ -13,6 +13,7 @@ export default function VendorsPage() {
   const { canEdit } = useAuth();
   const canManage = canEdit('vendors');
   const [show, setShow] = useState(false);
+  const [editing, setEditing] = useState<any | null>(null);
   const [q, setQ] = useState('');
 
   const { data, isLoading, error } = useQuery({
@@ -43,7 +44,7 @@ export default function VendorsPage() {
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-              <tr><th className="px-4 py-2">Name</th><th>Type</th><th>GSTIN</th><th>Sites</th><th>POs/WOs</th><th>KYC</th><th>Added</th></tr>
+              <tr><th className="px-4 py-2">Name</th><th>Type</th><th>GSTIN</th><th>Sites</th><th>POs/WOs</th><th>KYC</th><th>Added</th>{canManage && <th></th>}</tr>
             </thead>
             <tbody>
               {vendors.map((v) => (
@@ -55,32 +56,52 @@ export default function VendorsPage() {
                   <td className="text-slate-500">{v._count?.docs ?? 0}</td>
                   <td><span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} />{v.kycStatus}</span></td>
                   <td className="text-slate-400">{fmtDate(v.createdAt)}</td>
+                  {canManage && <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setEditing(v)}>Edit</button></td>}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-      {show && <AddVendor onClose={() => setShow(false)} onDone={() => { setShow(false); qc.invalidateQueries({ queryKey: ['all-vendors'] }); }} />}
+      {(show || editing) && (
+        <VendorModal
+          vendor={editing}
+          onClose={() => { setShow(false); setEditing(null); }}
+          onDone={() => { setShow(false); setEditing(null); qc.invalidateQueries({ queryKey: ['all-vendors'] }); }}
+        />
+      )}
     </div>
   );
 }
 
-function AddVendor({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [f, setF] = useState<any>({ name: '', type: 'VENDOR', contactPerson: '', phones: '', address: '', email: '', gstin: '', pan: '', bankAccount: '', ifsc: '' });
+// Add OR edit a vendor. Passing `vendor` prefills the form and switches to PATCH.
+function VendorModal({ vendor, onClose, onDone }: { vendor?: any; onClose: () => void; onDone: () => void }) {
+  const isEdit = !!vendor?.id;
+  const [f, setF] = useState<any>({
+    name: vendor?.name ?? '', type: vendor?.type ?? 'VENDOR', contactPerson: vendor?.contactPerson ?? '',
+    phones: vendor?.phones ?? '', tel: vendor?.tel ?? '', fax: vendor?.fax ?? '', website: vendor?.website ?? '',
+    address: vendor?.address ?? '', email: vendor?.email ?? '',
+    gstin: vendor?.gstin ?? '', cin: vendor?.cin ?? '', pan: vendor?.pan ?? '', bankAccount: vendor?.bankAccount ?? '', ifsc: vendor?.ifsc ?? '',
+  });
   const [err, setErr] = useState('');
-  const m = useMutation({ mutationFn: () => api.post('/vendors', f), onSuccess: onDone, onError: (e) => setErr(errMsg(e)) });
+  const m = useMutation({
+    mutationFn: () => (isEdit ? api.patch(`/vendors/${vendor.id}`, f) : api.post('/vendors', f)),
+    onSuccess: onDone,
+    onError: (e) => setErr(errMsg(e)),
+  });
   const F = (k: string, label: string) => <div><label className="label">{label}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>;
   return (
-    <Modal title="Add Vendor / Contractor" onClose={onClose} wide>
+    <Modal title={isEdit ? 'Edit Vendor / Contractor' : 'Add Vendor / Contractor'} onClose={onClose} wide>
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); m.mutate(); }} className="grid gap-3 sm:grid-cols-2">
         {F('name', 'Name *')}
         <div><label className="label">Type</label><select className="input" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}><option value="VENDOR">Vendor (material)</option><option value="CONTRACTOR">Contractor (labor)</option></select></div>
         {F('contactPerson', 'Contact Person')}{F('phones', 'Phone(s)')}
+        {F('tel', 'Tel')}{F('fax', 'Fax')}
+        {F('website', 'Website')}{F('email', 'Email')}
         <div className="sm:col-span-2"><label className="label">Address</label><textarea className="input" rows={2} value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} /></div>
-        {F('email', 'Email')}{F('gstin', 'GSTIN')}{F('pan', 'PAN')}{F('bankAccount', 'Bank Account')}{F('ifsc', 'IFSC')}
+        {F('gstin', 'GSTIN (GSTN.NO)')}{F('cin', 'CIN')}{F('pan', 'PAN')}{F('bankAccount', 'Bank Account')}{F('ifsc', 'IFSC')}
         {err && <div className="sm:col-span-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
-        <div className="sm:col-span-2 flex justify-end gap-2"><button type="button" className="btn-outline" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Adding…' : 'Add Vendor'}</button></div>
+        <div className="sm:col-span-2 flex justify-end gap-2"><button type="button" className="btn-outline" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Saving…' : isEdit ? 'Save Changes' : 'Add Vendor'}</button></div>
       </form>
     </Modal>
   );

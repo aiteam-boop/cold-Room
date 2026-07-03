@@ -9,10 +9,11 @@ import ApprovalQueue from './ApprovalQueue';
 import ProgressHistory from './ProgressHistory';
 import BOQImportModal from './BOQImportModal';
 import BOQAnalysisView from './BOQAnalysisView';
+import BOQEnhanceView from './BOQEnhanceView';
 
 interface BOQItem {
   id: string; srNo?: string; description: string; category?: string; roomZone?: string;
-  unit?: string; plannedQty: number; isGroup: boolean;
+  unit?: string; makeModel?: string; remarks?: string; plannedQty: number; isGroup: boolean;
   installedQty: number; remainingQty: number; completionPct: number; colorStatus: string;
 }
 
@@ -28,7 +29,7 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
   const [showEntry, setShowEntry] = useState(false);
   const [entryItem, setEntryItem] = useState<BOQItem | null>(null);
   const [showImport, setShowImport] = useState(false);
-  const [sub, setSub] = useState<'table' | 'analysis' | 'queue' | 'history'>('table');
+  const [sub, setSub] = useState<'table' | 'models' | 'analysis' | 'queue' | 'history'>('table');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const { data, isLoading } = useQuery({
@@ -78,9 +79,9 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
       {/* Action bar */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1 rounded-lg bg-slate-100 p-1 text-sm">
-          {(['table', 'analysis', 'queue', 'history'] as const).filter((s) => s !== 'queue' || isSupervisor).map((s) => (
+          {(['table', 'models', 'analysis', 'queue', 'history'] as const).filter((s) => s !== 'queue' || isSupervisor).map((s) => (
             <button key={s} onClick={() => setSub(s)} className={`rounded-md px-3 py-1.5 font-medium capitalize ${sub === s ? 'bg-white shadow-sm text-navy' : 'text-slate-500'}`}>
-              {s === 'queue' ? 'Approval Queue' : s === 'history' ? 'History' : s === 'analysis' ? '✨ AI Analysis' : 'BOQ Table'}
+              {s === 'queue' ? 'Approval Queue' : s === 'history' ? 'History' : s === 'analysis' ? '✨ AI Analysis' : s === 'models' ? 'Models & Item Lists' : 'BOQ Table'}
             </button>
           ))}
         </div>
@@ -103,6 +104,7 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
 
       {locked && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">BOQ baseline is locked. Progress can still be logged; structural edits require unlocking (versioned).</div>}
 
+      {sub === 'models' && <BOQEnhanceView projectId={projectId} canWrite={canWrite} />}
       {sub === 'analysis' && <BOQAnalysisView projectId={projectId} isAdmin={isAdmin} />}
       {sub === 'queue' && <ApprovalQueue projectId={projectId} canApprove={isSupervisor} />}
       {sub === 'history' && <ProgressHistory projectId={projectId} isAdmin={isSupervisor} />}
@@ -120,8 +122,11 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
                   <tr>
+                    <th className="px-2 py-2">Sr.No</th>
                     <th className="px-4 py-2">Description</th>
                     <th className="px-2">Room/Zone</th>
+                    <th className="px-2">Make &amp; Model</th>
+                    <th className="px-2">Remarks</th>
                     <th className="px-2 text-right">Planned</th>
                     <th className="px-2 text-right">Installed</th>
                     <th className="px-2 text-right">Remaining</th>
@@ -177,7 +182,7 @@ function CategoryGroup({ group, collapsed, toggle, canWrite, onAdd }: {
   return (
     <>
       <tr className="cursor-pointer bg-slate-100/60 font-semibold text-navy hover:bg-slate-100" onClick={toggle}>
-        <td className="px-4 py-2" colSpan={5}>
+        <td className="px-4 py-2" colSpan={8}>
           <span className="mr-2 inline-block w-3 text-slate-400">{collapsed ? '▶' : '▼'}</span>
           {group.category} <span className="ml-2 text-xs font-normal text-slate-400">({group.rows.length})</span>
         </td>
@@ -185,12 +190,14 @@ function CategoryGroup({ group, collapsed, toggle, canWrite, onAdd }: {
         {canWrite && <td></td>}
       </tr>
       {!collapsed && group.rows.map((it) => (
-        <tr key={it.id} className="border-b border-slate-100 hover:bg-slate-50">
+        <tr key={it.id} className="border-b border-slate-100 align-top hover:bg-slate-50">
+          <td className="px-2 py-2 text-xs text-slate-500 whitespace-nowrap">{it.srNo || '—'}</td>
           <td className="px-4 py-2">
             <div className="text-slate-700">{it.description}</div>
-            {it.srNo && <div className="text-xs text-slate-400">{it.srNo}</div>}
           </td>
           <td className="px-2 text-xs text-slate-500">{it.roomZone || '—'}</td>
+          <td className="px-2 text-xs text-slate-500">{it.makeModel || '—'}</td>
+          <td className="px-2 text-xs text-slate-500 max-w-[16rem] whitespace-pre-wrap">{it.remarks || '—'}</td>
           <td className="px-2 text-right">{fmtNum(it.plannedQty)} <span className="text-xs text-slate-400">{it.unit}</span></td>
           <td className="px-2 text-right text-navy">{fmtNum(it.installedQty)}</td>
           <td className="px-2 text-right">{fmtNum(it.remainingQty)}</td>

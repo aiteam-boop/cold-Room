@@ -8,6 +8,7 @@ import ProjectWorkspace from './pages/ProjectWorkspace';
 import VendorsPage from './pages/VendorsPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import UsersAdmin from './pages/UsersAdmin';
+import MachineModelsPage from './pages/MachineModelsPage';
 import AppShell from './components/AppShell';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/vendors" element={<RequirePage page="vendors"><VendorsPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
+        <Route path="/settings/machine-models" element={<RequirePage page="machinemodels"><MachineModelsPage /></RequirePage>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

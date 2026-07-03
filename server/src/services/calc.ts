@@ -153,7 +153,10 @@ export function computeCategories(items: ItemProgress[]): CategoryProgress[] {
       itemCount: list.length,
     });
   }
-  return out.sort((a, b) => a.category.localeCompare(b.category));
+  // Preserve BOQ document order (the order categories first appear in `items`,
+  // which the caller supplies sorted by sortOrder). The previous alphabetical
+  // sort was a reported bug — clients can re-sort A–Z client-side if wanted.
+  return out;
 }
 
 export interface OverallProgress {

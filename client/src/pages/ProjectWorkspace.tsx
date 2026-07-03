@@ -9,6 +9,8 @@ import { fmtDate, riskPill, projectStatusPill, titleize } from '../lib/format';
 import DashboardTab from '../components/tabs/DashboardTab';
 import BOQTab from '../components/tabs/BOQTab';
 import DrawingTab from '../components/tabs/DrawingTab';
+import GanttTab from '../components/tabs/GanttTab';
+import ChangeOrdersTab from '../components/tabs/ChangeOrdersTab';
 import TeamTab from '../components/tabs/TeamTab';
 import PaymentDashboard from '../components/procurement/PaymentDashboard';
 import DocList from '../components/procurement/DocList';
@@ -33,6 +35,8 @@ const MENU: { group: string; items: Item[] }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: 'grid' },
     { key: 'boq', label: 'BOQ & Progress', icon: 'list' },
     { key: 'drawing', label: 'Drawing & 3D', icon: 'cube' },
+    { key: 'gantt', label: 'Gantt / Timeline', icon: 'list' },
+    { key: 'changeorders', label: 'Change Orders', icon: 'doc' },
   ] },
   // Ordered + numbered to follow the real procurement workflow:
   // register vendor → raise PO/WO → receive goods → release payment → archive.
@@ -144,6 +148,8 @@ export default function ProjectWorkspace() {
         {current === 'dashboard' && <DashboardTab projectId={projectId!} />}
         {current === 'boq' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
         {current === 'drawing' && <DrawingTab projectId={projectId!} role={role} />}
+        {current === 'gantt' && <GanttTab projectId={projectId!} />}
+        {current === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}
         {current === 'pay' && <PaymentDashboard projectId={projectId!} role={role} />}
         {current === 'po' && <DocList projectId={projectId!} role={role} type="PO" />}
         {current === 'wo' && <DocList projectId={projectId!} role={role} type="WO" />}

@@ -63,6 +63,8 @@ const importSchema = z.object({
       category: z.string().optional(),
       roomZone: z.string().optional(),
       unit: z.string().optional(),
+      makeModel: z.string().optional(),
+      remarks: z.string().optional(),
       plannedQty: z.number().nonnegative().default(0),
       isGroup: z.boolean().optional(),
     })
@@ -82,28 +84,34 @@ router.post(
     if (project.boqLocked) throw forbidden('BOQ is locked. Unlock to make changes (versioned).');
 
     const body = importSchema.parse(req.body);
-    await prisma.$transaction(async (tx) => {
-      if (body.replace) {
-        await tx.progressEntry.deleteMany({ where: { projectId } });
-        await tx.bOQItem.deleteMany({ where: { projectId } });
-      }
-      let order = 0;
-      for (const it of body.items) {
-        await tx.bOQItem.create({
-          data: {
+    // Bulk-insert in one round trip. The old per-row create loop blew past the
+    // interactive-transaction timeout against a remote DB (Atlas), since 150
+    // sequential inserts × network latency > 5s (Prisma P2028). createMany is a
+    // single op; we also raise the tx timeout as a safety margin for large BOQs.
+    await prisma.$transaction(
+      async (tx) => {
+        if (body.replace) {
+          await tx.progressEntry.deleteMany({ where: { projectId } });
+          await tx.bOQItem.deleteMany({ where: { projectId } });
+        }
+        await tx.bOQItem.createMany({
+          data: body.items.map((it, idx) => ({
             projectId,
             srNo: it.srNo,
             description: it.description,
             category: it.category,
             roomZone: it.roomZone,
             unit: it.unit,
+            makeModel: it.makeModel,
+            remarks: it.remarks,
             plannedQty: it.plannedQty,
             isGroup: it.isGroup ?? false,
-            sortOrder: order++,
-          },
+            sortOrder: idx,
+          })),
         });
-      }
-    });
+      },
+      { timeout: 30000, maxWait: 10000 }
+    );
     await audit({ userId: req.user!.sub, projectId, action: 'BOQ_IMPORT', entity: 'Project', details: { count: body.items.length, replace: !!body.replace } });
     const count = await prisma.bOQItem.count({ where: { projectId } });
     res.status(201).json({ ok: true, count });
@@ -118,6 +126,8 @@ const itemSchema = z.object({
   category: z.string().optional(),
   roomZone: z.string().optional(),
   unit: z.string().optional(),
+  makeModel: z.string().optional(),
+  remarks: z.string().optional(),
   plannedQty: z.number().nonnegative().optional(),
   isGroup: z.boolean().optional(),
   zoneId: z.string().nullable().optional(),
