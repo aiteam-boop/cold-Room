@@ -3,9 +3,14 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
 import { requireAuth, requireProjectMember, requireAdmin, requireEdit } from '../middleware/authMiddleware';
+import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
-import { PROJECT_STATUSES, PROJECT_ROLES, isAdmin } from '../lib/enums';
+import { PROJECT_STATUSES, PROJECT_ROLES, DRAWING_APPROVAL_TYPES, DRAWING_APPROVAL_STATUSES, isAdmin } from '../lib/enums';
 import { loadProjectProgress } from '../services/projectProgress';
+import {
+  computeOfficialStartDate, normalizeDrawingApprovals, summarizeDrawingApprovals,
+  defaultDrawingApprovals,
+} from '../services/drawingApprovals';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,7 +26,11 @@ async function visibleProjectIds(userId: string, role: string): Promise<string[]
   return memberships.map((m) => m.projectId);
 }
 
-// GET /api/projects — list with computed completion + risk for cards.
+const MS_DAY = 86_400_000;
+
+// GET /api/projects — the multi-project dashboard (Sprint PRD §10.1). Each card
+// carries everything it renders: completion gauge, days remaining, delay-risk
+// badge, item quick-stats and a timeline mini-bar.
 router.get(
   '/',
   asyncHandler(async (req, res) => {
@@ -32,9 +41,48 @@ router.get(
       include: { _count: { select: { boqItems: true, entries: true, members: true } } },
     });
 
+    // One query for every project's activities rather than one per project.
+    const acts = await prisma.ganttActivity.findMany({
+      where: { projectId: { in: projects.map((p) => p.id) } },
+      select: { projectId: true, plannedEndDate: true, actualEndDate: true, actualStartDate: true, percentComplete: true },
+    });
+    const actsByProject = new Map<string, typeof acts>();
+    for (const a of acts) {
+      const list = actsByProject.get(a.projectId) ?? [];
+      list.push(a);
+      actsByProject.set(a.projectId, list);
+    }
+
+    const now = new Date();
     const cards = await Promise.all(
       projects.map(async (p) => {
         const prog = await loadProjectProgress(p.id);
+        const drawing = summarizeDrawingApprovals(normalizeDrawingApprovals(p.drawingApprovals), now);
+
+        // Gantt delay: an activity is delayed only when it is past its planned
+        // end AND has no recorded completion. Same rule as routes/gantt.ts.
+        const mine = actsByProject.get(p.id) ?? [];
+        const delayedActs = mine.filter((a) => !a.actualEndDate && a.percentComplete < 100 && now > a.plannedEndDate);
+        const worstDelay = delayedActs.reduce((m, a) => Math.max(m, Math.ceil((now.getTime() - a.plannedEndDate.getTime()) / MS_DAY)), 0);
+
+        // The card's badge is driven by real Gantt delay when a timeline exists,
+        // and falls back to the BOQ burn-rate estimate when it doesn't.
+        const delayRisk = delayedActs.length > 0
+          ? { level: 'DELAYED', message: `${delayedActs.length} activity(ies) delayed · worst ${worstDelay}d` }
+          : prog.risk;
+
+        const target = p.targetCompletionDate;
+        const daysRemaining = target ? Math.ceil((target.getTime() - now.getTime()) / MS_DAY) : null;
+
+        // Mini-bar: how far through the planned calendar we are, start → target.
+        const start = p.officialStartDate ?? p.startDate;
+        let timelinePct: number | null = null;
+        if (start && target && target.getTime() > start.getTime()) {
+          const raw = ((now.getTime() - start.getTime()) / (target.getTime() - start.getTime())) * 100;
+          timelinePct = Math.round(Math.min(Math.max(raw, 0), 100) * 10) / 10;
+        }
+
+        const items = prog.items; // loadProjectProgress already excludes group rows
         return {
           id: p.id,
           name: p.name,
@@ -42,15 +90,29 @@ router.get(
           siteLocation: p.siteLocation,
           status: p.status,
           startDate: p.startDate,
-          targetCompletionDate: p.targetCompletionDate,
+          officialStartDate: p.officialStartDate,
+          targetCompletionDate: target,
           boqLocked: p.boqLocked,
           counts: p._count,
           completionPct: prog.overall.completionPct,
           estimatedCompletionDate: prog.overall.estimatedCompletionDate,
-          delayRisk: prog.risk,
+          delayRisk,
+          daysRemaining,
+          timelinePct,
+          pendingDrawingApproval: !drawing.allApproved,
+          drawingApprovalLabel: drawing.label,
+          stats: {
+            completed: items.filter((i) => i.completionPct >= 100).length,
+            inProgress: items.filter((i) => i.completionPct > 0 && i.completionPct < 100).length,
+            notStarted: items.filter((i) => i.completionPct === 0).length,
+          },
+          gantt: { total: mine.length, delayed: delayedActs.length, worstDelay },
         };
       })
     );
+
+    // Returned newest-first (the query's order). The dashboard re-sorts client
+    // side — its default is delay severity, but "last updated" needs this order.
     res.json({ projects: cards });
   })
 );
@@ -100,12 +162,23 @@ router.get(
     });
     if (!project) throw notFound('Project not found');
     const prog = await loadProjectProgress(project.id);
-    res.json({ project, progress: prog.overall, risk: prog.risk, role: req.projectRole });
+    const drawingApproval = summarizeDrawingApprovals(normalizeDrawingApprovals(project.drawingApprovals));
+    res.json({ project, progress: prog.overall, risk: prog.risk, role: req.projectRole, drawingApproval });
   })
 );
 
 const updateSchema = createSchema.partial().extend({
   status: z.enum(PROJECT_STATUSES).optional(),
+  // On edit these dates must also accept `null` so the owner can CLEAR a date
+  // that was set at creation — the create schema only allowed a string.
+  clientName: z.string().nullable().optional(),
+  siteLocation: z.string().nullable().optional(),
+  startDate: z.string().min(1).nullable().optional(),
+  targetCompletionDate: z.string().min(1).nullable().optional(),
+  // Two of the three start-date parameters (the third — drawing approval — is
+  // computed from the checklist, never set directly). See PRD §2.1.
+  orderReceiveDate: z.string().nullable().optional(),
+  advanceReceiveDate: z.string().nullable().optional(),
 });
 
 // PATCH /api/projects/:projectId — ADMIN of project (FR-PM-04 status).
@@ -126,10 +199,115 @@ router.patch(
           targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
         }),
         ...(body.status !== undefined && { status: body.status }),
+        ...(body.orderReceiveDate !== undefined && { orderReceiveDate: body.orderReceiveDate ? new Date(body.orderReceiveDate) : null }),
+        ...(body.advanceReceiveDate !== undefined && { advanceReceiveDate: body.advanceReceiveDate ? new Date(body.advanceReceiveDate) : null }),
       },
     });
     await audit({ userId: req.user!.sub, projectId: project.id, action: 'PROJECT_UPDATE', entity: 'Project', entityId: project.id, details: body });
     res.json({ project });
+  })
+);
+
+// ── Drawing Approval checklist (Sprint PRD §2.2) ─────────────────────────────
+// Reachable from both project settings and the Gantt view. Editing is gated on
+// the Gantt edit grant — the same person (Amisha) owns the timeline anchor.
+
+async function drawingApprovalPayload(projectId: string) {
+  const p = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { drawingApprovals: true, orderReceiveDate: true, advanceReceiveDate: true, officialStartDate: true },
+  });
+  if (!p) throw notFound('Project not found');
+  return {
+    ...summarizeDrawingApprovals(normalizeDrawingApprovals(p.drawingApprovals)),
+    orderReceiveDate: p.orderReceiveDate,
+    advanceReceiveDate: p.advanceReceiveDate,
+  };
+}
+
+router.get(
+  '/:projectId/drawing-approvals',
+  requireProjectMember,
+  asyncHandler(async (req, res) => {
+    res.json(await drawingApprovalPayload(req.params.projectId));
+  })
+);
+
+const nullableDate = z.string().nullable().optional();
+const approvalItemSchema = z.object({
+  id: z.string().optional(),
+  type: z.enum(DRAWING_APPROVAL_TYPES).optional(),
+  name: z.string().trim().min(1),
+  tatDays: z.coerce.number().int().min(1).default(4),
+  drawingReceivedDate: nullableDate,
+  plannedDate: nullableDate,
+  actualDate: nullableDate,
+  responsibleUserId: z.string().nullable().optional(),
+  responsibleName: z.string().optional(),
+  documentUrl: z.string().nullable().optional(),
+  status: z.enum(DRAWING_APPROVAL_STATUSES).optional(),
+});
+
+// PUT — replace the whole checklist. The client always sends the full array
+// (add / remove / tick are all one save), and officialStartDate is recomputed
+// from it here, so the stored date and the checklist can never drift apart.
+router.put(
+  '/:projectId/drawing-approvals',
+  requireProjectMember,
+  requireEdit('gantt'),
+  asyncHandler(async (req, res) => {
+    const { items } = z.object({ items: z.array(approvalItemSchema).min(1, 'At least one drawing is required.') }).parse(req.body);
+    const normalized = normalizeDrawingApprovals(items);
+    const officialStartDate = computeOfficialStartDate(normalized);
+
+    await prisma.project.update({
+      where: { id: req.params.projectId },
+      data: { drawingApprovals: normalized as unknown as object, officialStartDate },
+    });
+    await audit({
+      userId: req.user!.sub, projectId: req.params.projectId, action: 'DRAWING_APPROVAL_UPDATE',
+      entity: 'Project', entityId: req.params.projectId,
+      details: { approved: normalized.filter((i) => i.status === 'APPROVED').length, total: normalized.length, officialStartDate },
+    });
+    res.json(await drawingApprovalPayload(req.params.projectId));
+  })
+);
+
+// POST — reset the checklist back to the 4 standard drawings.
+router.post(
+  '/:projectId/drawing-approvals/reset',
+  requireProjectMember,
+  requireEdit('gantt'),
+  asyncHandler(async (req, res) => {
+    await prisma.project.update({
+      where: { id: req.params.projectId },
+      data: { drawingApprovals: defaultDrawingApprovals() as unknown as object, officialStartDate: null },
+    });
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'DRAWING_APPROVAL_RESET', entity: 'Project', entityId: req.params.projectId });
+    res.json(await drawingApprovalPayload(req.params.projectId));
+  })
+);
+
+// POST — attach the final approved drawing PDF to one checklist row.
+router.post(
+  '/:projectId/drawing-approvals/:itemId/document',
+  requireProjectMember,
+  requireEdit('gantt'),
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw badRequest('No file uploaded (field: file)');
+    if (req.file.mimetype !== 'application/pdf') throw badRequest('Only PDF drawings can be attached.');
+    const p = await prisma.project.findUnique({ where: { id: req.params.projectId }, select: { drawingApprovals: true } });
+    if (!p) throw notFound('Project not found');
+
+    const items = normalizeDrawingApprovals(p.drawingApprovals);
+    const target = items.find((i) => i.id === req.params.itemId);
+    if (!target) throw notFound('Drawing checklist item not found');
+    target.documentUrl = `/uploads/${req.file.filename}`;
+
+    await prisma.project.update({ where: { id: req.params.projectId }, data: { drawingApprovals: items as unknown as object } });
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'DRAWING_APPROVAL_DOC', entity: 'Project', entityId: req.params.projectId, details: { itemId: target.id, fileName: req.file.originalname } });
+    res.status(201).json(await drawingApprovalPayload(req.params.projectId));
   })
 );
 

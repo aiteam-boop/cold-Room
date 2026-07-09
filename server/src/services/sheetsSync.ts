@@ -7,6 +7,7 @@
 
 import { google, sheets_v4 } from 'googleapis';
 import { MongoClient, Db } from 'mongodb';
+import { signApiPath } from '../lib/signedUrl';
 
 // ── Entity → tab config ─────────────────────────────────────────────────────
 // `collection` is the MongoDB collection name (same as the Prisma model name).
@@ -214,12 +215,31 @@ async function writeTab(tab: string, headers: string[], rows: (string | number |
 
 export type ExportResult = { tab: string; rows: number }[];
 
-/** Export one entity by tab name. Reads via the native MongoDB driver. */
+// Base URL for turning stored file paths (e.g. "/uploads/xyz.pdf") into full,
+// clickable links in the sheet. Set APP_URL to your public domain
+// (e.g. https://coldroom.crystalgrp.xyz) for the links to open.
+function fileBaseUrl(): string {
+  return (process.env.APP_URL || (process.env.CLIENT_ORIGIN || '').split(',')[0] || '').replace(/\/$/, '');
+}
+
+/** Export one entity by tab name. Reads via the native MongoDB driver. Any
+ *  column whose name ends in "Url"/"url" is emitted as an absolute link. */
 export async function exportEntity(cfg: EntityConfig): Promise<number> {
   const db = await getDb();
+  const base = fileBaseUrl();
   const records = await db.collection(cfg.collection).find({}).toArray();
   const rows = records.map((r) =>
-    cfg.fields.map((f) => toCell(f === 'id' ? r._id : (r as Record<string, unknown>)[f])),
+    cfg.fields.map((f) => {
+      const raw = f === 'id' ? r._id : (r as Record<string, unknown>)[f];
+      if (base && /url$/i.test(f) && typeof raw === 'string' && raw.startsWith('/')) {
+        // API links (server-rendered PDFs) require auth, but a link clicked from
+        // the sheet can't send a bearer token — so sign them so they open. Static
+        // /uploads/* files are already public and need no signature.
+        const link = raw.startsWith('/api/') ? signApiPath(raw) : raw;
+        return `${base}${link}`;
+      }
+      return toCell(raw);
+    }),
   );
   await writeTab(cfg.tab, cfg.fields, rows);
   return rows.length;
@@ -235,4 +255,34 @@ export async function exportAll(): Promise<ExportResult> {
     result.push({ tab: cfg.tab, rows: count });
   }
   return result;
+}
+
+// ── Live (debounced) auto-sync ──────────────────────────────────────────────
+// Called from audit() after every create/update. Coalesces a burst of changes
+// into a single background export a few seconds later, so we don't hammer the
+// Sheets API. Never throws into the request path.
+let debounceTimer: NodeJS.Timeout | null = null;
+let running = false;
+let queued = false;
+const DEBOUNCE_MS = Number(process.env.SHEETS_SYNC_DEBOUNCE_MS) || 8000;
+
+async function runAutoSync(): Promise<void> {
+  if (running) { queued = true; return; }
+  running = true;
+  try {
+    await exportAll();
+  } catch (err) {
+    console.error('[sheetsSync] auto export failed:', (err as Error).message);
+  } finally {
+    running = false;
+    if (queued) { queued = false; scheduleSheetSync(2000); }
+  }
+}
+
+/** Debounced background sync. No-op when sync is disabled. Fire-and-forget. */
+export function scheduleSheetSync(delayMs = DEBOUNCE_MS): void {
+  if (!sheetsEnabled()) return;
+  if (process.env.SHEETS_LIVE_SYNC === 'off') return;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => { void runAutoSync(); }, delayMs);
 }

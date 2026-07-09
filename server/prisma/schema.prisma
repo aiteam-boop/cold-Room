@@ -76,6 +76,14 @@ model Project {
 
   boqAnalyzedAt        DateTime?
 
+  // ── Project start-date anchor (Sprint PRD §2) ──
+  // The project "officially starts" only when EVERY drawing approval is ticked.
+  // Order receipt and advance payment are recorded but do not start the clock.
+  orderReceiveDate     DateTime?   // order / LOI received from the client
+  advanceReceiveDate   DateTime?   // advance payment landed in the company account
+  officialStartDate    DateTime?   // = max(actualDate) over drawingApprovals; null until all approved
+  drawingApprovals     Json?       // DrawingApproval[] — see services/drawingApprovals.ts
+
   members   ProjectMember[]
   boqItems  BOQItem[]
   boqAnalysis BOQAnalysisItem[]
@@ -83,6 +91,11 @@ model Project {
   zones     ProjectZone[]
   entries   ProgressEntry[]
   auditLogs AuditLog[]
+
+  // Room-wise DPR (replaces DPR_Cold_Storage_RoomWise.xlsx)
+  scopeItems  RoomScopeItem[]
+  dprEntries  DPREntry[]
+  milestones  ProjectMilestone[]
 
   // Module C — Procurement
   vendorSites   VendorSiteMapping[]
@@ -97,6 +110,12 @@ model Project {
 
 // Vendor / Contractor master (KYC stored once, site-wise mapped).
 // type: VENDOR | CONTRACTOR
+//
+// The legacy single-contact / single-bank columns below are kept as the
+// denormalized "primary" values (POs snapshot them, and old records still
+// populate only these). The Sprint PRD §5 profile lives in the Json columns:
+// contacts[], plants[], bankAccounts[], rateChart[] — each a superset of the
+// legacy field it replaces. Writers keep both in sync (see routes/vendors.ts).
 model Vendor {
   id            String   @id @default(cuid()) @map("_id")
   name          String
@@ -115,6 +134,20 @@ model Vendor {
   ifsc          String?
   createdById   String?
   createdAt     DateTime @default(now())
+
+  // ── Full vendor profile (Sprint PRD §5) ──
+  legalName       String?   // full registered name, e.g. "Kingspan Jindal Pvt. Ltd."
+  tradeName       String?   // brand, if it differs from the legal name
+  vendorType      String?   // MANUFACTURER | TRADER | CONTRACTOR | SERVICE_PROVIDER
+  boqCategories   String[] @default([])  // which BOQ categories this vendor supplies
+  workCategories  String[] @default([])  // contractors only: which work types they do
+  contacts        Json?     // [{ id, name, designation, authorityLevel, phones[], email, isPrimary }] — max 10
+  plants          Json?     // [{ id, address, address2, city, state, pin, gstin }]
+  billingAddress  Json?     // { address, city, state, pin } — used on the PO "Invoice To"
+  bankAccounts    Json?     // [{ id, bankName, branch, ifsc, accountNo, accountType, beneficiaryName, isPrimary }]
+  rateChart       Json?     // [{ id, itemDescription, unit, rate, effectiveFrom, effectiveTo, notes }]
+  registeredSince DateTime?
+  isActive        Boolean  @default(true)  // inactive vendors are hidden from PO/WO search
 
   siteMappings  VendorSiteMapping[]
   docs          ProcurementDoc[]
@@ -158,6 +191,14 @@ model ProcurementDoc {
   shipTo        String?  // PO ship-to
   siteAddress   String?  // WO site address
 
+  // ── Delivery commitment (DPR PRD §3.2 G7 / transcript R12) ──
+  // "Delivery date ka ek time aayega. Kab delivery karna hai usko maal ko?"
+  // `promisedDeliveryDate` is what the vendor committed on the PO; `requiredByDate`
+  // is what site needs. The ACTUAL delivery date is never stored — it is derived
+  // as MIN(grnDate) over this doc's APPROVED GRNs, so it can never drift.
+  promisedDeliveryDate DateTime?
+  requiredByDate       DateTime?
+
   // Totals
   basicAmount   Float    @default(0)
   gstEnabled    Boolean  @default(true)
@@ -175,7 +216,10 @@ model ProcurementDoc {
   payRetentionPct      Float @default(0)
   payTriggers          String? // JSON: per-field trigger condition notes + INR overrides
 
-  termsSections String?  // JSON array [{title, text}]
+  // JSON array of T&C clauses. Each: { title, text, isStruckOff?, struckOffAt?,
+  // isLocked?, isCustom? }. Struck-off clauses stay in the document (rendered
+  // with a strikethrough) — they are never deleted. See services/procurement.ts.
+  termsSections String?
 
   createdById   String?
   approvedById  String?
@@ -209,9 +253,15 @@ model ProcurementLineItem {
   leadTimeText String?
   sortOrder   Int     @default(0)
 
+  // Back-link to the BOQ line this item fulfils. Drives the BOQ Cost view:
+  // one BOQ item may be covered by several POs. Null = "unlinked PO line".
+  boqItemId   String?
+  boqItem     BOQItem? @relation(fields: [boqItemId], references: [id])
+
   grnLines    GRNLineItem[]
 
   @@index([docId])
+  @@index([boqItemId])
 }
 
 // Auto-generated from 6-field payment terms (one per non-zero field).
@@ -231,6 +281,10 @@ model PaymentMilestone {
   accountsNotifiedAt DateTime?
   paymentDate   DateTime?
   paymentReference String?
+  // UTR captured by Accounts on "Mark as Paid". Manual today; FMS auto-fetch is
+  // a Phase-2 item (Sprint PRD §9).
+  utrNumber       String?
+  paymentProofUrl String?   // NEFT receipt / bank transfer screenshot
   remarks       String?
   sortOrder     Int     @default(0)
 
@@ -260,6 +314,7 @@ model GRN {
   invoicePdfUrl String?
   ewayBillNumber String?
   packingListUrl String?
+  photoUrl      String?   // optional photo of the received material
 
   status        String  @default("DRAFT")
   approvedById  String?
@@ -301,6 +356,10 @@ model ProcurementDocument {
   projectId     String
   project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   type          String
+  // Which KYC document this is, when type = 'KYC'. Drives the vendor's KYC
+  // status badge (COMPLETE needs GST + PAN + cancelled cheque). Null on legacy
+  // rows uploaded before the kind was captured. See lib/enums.ts KYC_KINDS.
+  kycKind       String?
   fileName      String
   fileUrl       String
   mimeType      String?
@@ -381,6 +440,10 @@ model BOQItem {
   itemLists       BOQItemList[]
   ganttActivities GanttActivity[]
   changeOrders    ChangeOrder[]
+  // PO/WO lines that fulfil this BOQ item — the cost side of the BOQ Cost view.
+  poLineItems     ProcurementLineItem[]
+  // Room-wise breakup of this line's plannedQty (DPR).
+  scopeItems      RoomScopeItem[]
 
   @@index([projectId])
   @@index([parentId])
@@ -421,6 +484,17 @@ model ProgressEntry {
 // ── Drawings & Zones ─────────────────────────────────────────────────────────
 // status: PROCESSING | APPROVED | ARCHIVED
 
+// A drawing, and — through `parentId` — every revision of it.
+//
+// AA sir (transcript P11): "ye base drawing hai, then revision, revision,
+// revision, final drawing. Jo final drawing hota hai usi ke base pe ye saare
+// calculation honge."
+//
+// So a drawing family is a chain: the root (version 1) holds the base upload and
+// each later revision points at the root via `parentId`. Exactly one drawing in a
+// family may be `isFinal` — that is the approved drawing every room-wise target
+// quantity is derived from. `discipline` says which of the four approval
+// checklist rows this family satisfies.
 model Drawing {
   id             String         @id @default(cuid()) @map("_id")
   projectId      String
@@ -437,9 +511,22 @@ model Drawing {
   classification String?        // JSON: AI classification of which part/rooms this diagram covers
   uploadedAt     DateTime       @default(now())
 
+  // ── Revision chain (DPR PRD §3.2 G10 / transcript R4) ──
+  parentId       String?        // null on the base drawing; else the family root
+  parent         Drawing?       @relation("DrawingRevisions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  revisions      Drawing[]      @relation("DrawingRevisions")
+  revisionNotes  String?        // what changed in this revision
+  isFinal        Boolean        @default(false) // the approved drawing calculations derive from
+  finalisedAt    DateTime?
+  finalisedById  String?
+  // PUF_PANEL | REFRIGERATION | DOOR | ELECTRICAL | CUSTOM — ties the family to a
+  // row of Project.drawingApprovals (see services/drawingApprovals.ts).
+  discipline     String?
+
   zones          ProjectZone[]
 
   @@index([projectId])
+  @@index([parentId])
 }
 
 model ProjectZone {
@@ -458,8 +545,130 @@ model ProjectZone {
   sortOrder   Int       @default(0)
   createdAt   DateTime  @default(now())
 
+  // ── Room-wise DPR (Room_Handover tab) ──
+  // `isCommonBucket` marks the single pseudo-room that holds plant-wide
+  // Refrigeration/Electrical work — the sheet's "Common / Plant-wide" dropdown
+  // value. It has no geometry and never appears on the handover tracker.
+  isCommonBucket      Boolean   @default(false)
+  plannedHandoverDate DateTime?
+  // Recorded by an explicit sign-off, NEVER derived. The sheet computes this as
+  // MAXIFS(lastUpdated WHERE status="Completed"), which reports Ambient as
+  // "handed over 3 days early" while the room is 30% built (PRD §4 bug B3).
+  actualHandoverDate  DateTime?
+  handoverById        String?
+  handoverCertUrl     String?
+
   boqItems    BOQItem[]
   ganttActivities GanttActivity[]
+  scopeItems  RoomScopeItem[]
+
+  @@index([projectId])
+}
+
+// ── Room-wise DPR ────────────────────────────────────────────────────────────
+// A faithful, DB-backed replacement for DPR_Cold_Storage_RoomWise.xlsx.
+// See lib/dprCatalog.ts for the activity catalogue and services/dprRollup.ts for
+// the calculation chain (which reproduces the sheet's formulas exactly, and also
+// offers a corrected mode — PRD §4).
+
+// One row per (room × category × activity) — the 118 rows of the room sheets.
+// `zoneId` = null is not allowed; the Common / Plant-wide bucket is a real
+// ProjectZone with isCommonBucket = true, so the unique index stays simple.
+model RoomScopeItem {
+  id              String   @id @default(cuid()) @map("_id")
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  zoneId          String
+  zone            ProjectZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  category        String    // PUF Panel | Door Work | Floor & Racking | Refrigeration | Electrical
+  activity        String    // from ROOM_ACTIVITIES / COMMON_ACTIVITIES
+  uom             String    // owned here — never typed on the daily entry (bug B5)
+
+  // The drawing team's room-wise breakup of the BOQ quantity. Null = "not yet
+  // broken up". The sheet leaves this blank, which makes % blank, which makes
+  // AVERAGE() skip the row — the 89% illusion (bug B1). We count null as 0%.
+  targetQty       Float?
+  targetSource    String?   // DRAWING | BOQ_SPLIT | MANUAL
+  weight          Float    @default(1)   // rollup weight, corrected mode (bug B2)
+
+  plannedStart    DateTime?
+  plannedFinish   DateTime?
+  plannedHandover DateTime?
+
+  // Reconciliation link: Σ(targetQty) across rooms should equal BOQItem.plannedQty.
+  boqItemId       String?
+  boqItem         BOQItem? @relation(fields: [boqItemId], references: [id])
+
+  sortOrder       Int      @default(0)
+  remarks         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  entries         DPREntry[]
+
+  @@unique([projectId, zoneId, activity])
+  @@index([projectId])
+  @@index([boqItemId])
+}
+
+// The Daily_Entry tab: one shared log for the whole project, one row per
+// activity done today. Deliberately a separate table from ProgressEntry —
+// ProgressEntry records progress against a *project-wide BOQ line*, whereas this
+// records it against a *room × activity*. They are different granularities and
+// merging them now would break calc.ts / boqCost.ts. The bridge is
+// RoomScopeItem.boqItemId (see PRD §5.1).
+//
+// `qtyDoneToday` is TODAY'S quantity, not cumulative — the cumulative figure is
+// always SUM(qtyDoneToday) over approved entries, exactly like the sheet's SUMIFS.
+//
+// `kind` exists because in the real workbook people type straight over the
+// SUMIFS formula: 'Ambient Room'!I8 reads 200 with no formula at all, while the
+// Daily_Entry log only accounts for 55 (PRD §4 bug B11). That override is a
+// legitimate need — a cumulative figure known from the site that was never
+// logged day-by-day — but destroying the formula makes it unauditable.
+// An ADJUSTMENT/OPENING entry gives the same result with a who, a when and a why.
+//   DAILY      — normal day's work
+//   OPENING    — cumulative carried in from before the app was used
+//   ADJUSTMENT — a correction to the running total (reason mandatory)
+model DPREntry {
+  id              String   @id @default(cuid()) @map("_id")
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  roomScopeItemId String
+  roomScopeItem   RoomScopeItem @relation(fields: [roomScopeItemId], references: [id], onDelete: Cascade)
+
+  kind            String   @default("DAILY")  // DAILY | OPENING | ADJUSTMENT
+  date            DateTime
+  qtyDoneToday    Float                       // may be negative on an ADJUSTMENT
+  labourTeam      String?   // sheet column G — "Team A", "Rehman"
+  remarks         String?
+  photoUrl        String?
+
+  submittedById   String
+  status          String   @default("APPROVED")  // PENDING | APPROVED | REJECTED
+  createdAt       DateTime @default(now())
+
+  @@index([projectId])
+  @@index([roomScopeItemId])
+  @@index([date])
+}
+
+// The Milestones tab. `fkiFreezeDate` is a real date — the sheet stores "7th",
+// "10th" as text, which is why its Delay formula ignores it (bug B8).
+model ProjectMilestone {
+  id                  String   @id @default(cuid()) @map("_id")
+  projectId           String
+  project             Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name                String   // "Ambient" | "Refrigeration Piping Completion" | "Final Handover (HO)"
+  zoneId              String?  // set when the milestone IS a room
+  committedDateVendor DateTime?
+  fkiFreezeDate       DateTime?
+  actualDate          DateTime?
+  remarks             String?
+  sortOrder           Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   @@index([projectId])
 }
@@ -506,6 +715,10 @@ model BOQItemList {
 }
 
 // Gantt timeline activity. status: NOT_STARTED | IN_PROGRESS | COMPLETED | DELAYED
+//
+// Plan vs actual (Sprint PRD §3): delay is only meaningful once actual dates are
+// captured. `plannedDurationDays` IS the activity's TAT (working days) — it is
+// the value shown on the bar tooltip; there is no separate `tatDays` column.
 model GanttActivity {
   id                  String   @id @default(cuid()) @map("_id")
   projectId           String
@@ -516,10 +729,15 @@ model GanttActivity {
   zoneId              String?
   zone                ProjectZone? @relation(fields: [zoneId], references: [id])
   plannedStartDate    DateTime
-  plannedDurationDays Int      @default(1)
+  plannedDurationDays Int      @default(1)   // TAT in working days
   plannedEndDate      DateTime
-  actualStartDate     DateTime?
-  actualEndDate       DateTime?
+  actualStartDate     DateTime?              // set by "Mark Started"
+  actualEndDate       DateTime?              // set by "Mark Complete" — clears the delay
+  completedAt         DateTime?              // immutable stamp of WHEN completion was recorded
+  completedById       String?                // who recorded it
+  completionNotes     String?
+  responsibleUserId   String?                // project user accountable for this activity
+  responsibleName     String?                // free-text fallback (e.g. "Kingspan", "Site Engineer")
   percentComplete     Float    @default(0)
   percentCompleteAuto Boolean  @default(true) // true = pull from BOQ progress
   status              String   @default("NOT_STARTED")
@@ -585,6 +803,33 @@ model ApprovalStep {
   @@index([docType, docId])
 }
 
+// ── Value-threshold approval matrix (DPR PRD §3.2 G6 / transcript R13) ───────
+// "Kitne ka PO kaun approve karega? Amit 10,000 ka approve karega, Manish utna
+//  karega, phir finance involve hoyega."
+//
+// One row per (docType, amount band, approver). The chain for a document of
+// value V is every ACTIVE rule of that docType whose band contains V, ordered by
+// `order`. `maxAmount = null` means "no upper bound" — the final approver.
+//
+// `projectId = null` is the org-wide default; a project-specific rule set, when
+// present, replaces the defaults for that project entirely.
+model ApprovalRule {
+  id           String   @id @default(cuid()) @map("_id")
+  projectId    String?
+  docType      String            // PO | WO | GRN
+  minAmount    Float    @default(0)   // rule applies when docValue >= minAmount
+  maxAmount    Float?            // ...and (maxAmount == null || docValue <= maxAmount)
+  approverId   String
+  approverName String
+  approverRole String?
+  order        Int      @default(1)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([docType, projectId])
+}
+
 // Immutable log of every approval-workflow action for the timeline / audit.
 // action: SUBMITTED | APPROVED | REJECTED | REMINDED
 model ApprovalAction {
@@ -603,9 +848,12 @@ model ApprovalAction {
   @@index([docType, docId])
 }
 
-// Durable copy of every uploaded file, stored in the DB (so files survive a
-// disk wipe / redeploy). Bytes fit MongoDB's 16MB/doc limit — larger files
-// (e.g. big DXF drawings) stay disk-only and are skipped here.
+// LEGACY durable file store — a single Bytes column, capped at Mongo's 16MB
+// per-document limit (so big DXF drawings never fit). Superseded by GridFS
+// (bucket "uploads", see lib/fileStore.ts), which chunks files and handles any
+// size. Kept only so the handful of files saved here before the switch stay
+// readable; `streamFromDb` falls back to it after GridFS. New writes never land
+// here.
 model StoredFile {
   id        String   @id @default(cuid()) @map("_id")
   filename  String   @unique

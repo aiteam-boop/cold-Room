@@ -5,7 +5,7 @@ import { Gauge, KPI, RiskBadge, Spinner } from '../ui';
 import { COLOR_HEX, colorFor, fmtDate, fmtNum, riskPill, titleize } from '../../lib/format';
 import DashboardExtras from './DashboardExtras';
 
-export default function DashboardTab({ projectId }: { projectId: string }) {
+export default function DashboardTab({ projectId, onOpenGantt }: { projectId: string; onOpenGantt?: () => void }) {
   const { data, isLoading } = useQuery({
     queryKey: ['dashboard', projectId],
     queryFn: async () => (await api.get(`/projects/${projectId}/dashboard`)).data,
@@ -146,7 +146,7 @@ export default function DashboardTab({ projectId }: { projectId: string }) {
       </div>
 
       {/* NEW cards: Room-wise progress, Gantt summary, Change Orders (additive) */}
-      <DashboardExtras projectId={projectId} />
+      <DashboardExtras projectId={projectId} onOpenGantt={onOpenGantt} />
     </div>
   );
 }

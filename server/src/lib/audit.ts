@@ -1,4 +1,5 @@
 import { prisma } from './prisma';
+import { scheduleSheetSync } from '../services/sheetsSync';
 
 // Append-only audit trail (PRD §8.2). Never throws into the request path.
 export async function audit(params: {
@@ -24,4 +25,6 @@ export async function audit(params: {
     // Auditing must not break the operation it records.
     console.error('[audit] failed to write log:', err);
   }
+  // Every audited mutation triggers a debounced live push to Google Sheets.
+  scheduleSheetSync();
 }

@@ -18,7 +18,9 @@ export default function AppShell() {
             <nav className="hidden items-center gap-1 text-sm md:flex">
               <NavLink to="/" end className={navCls}>Projects</NavLink>
               {canView('vendors') && <NavLink to="/vendors" className={navCls}>Vendors</NavLink>}
-              {canView('approvals') && <NavLink to="/approvals" className={navCls}>Approvals</NavLink>}
+              {/* Approvals is a personal queue — always reachable so designated
+                  approvers (who may lack the page grant) can act on their items. */}
+              <NavLink to="/approvals" className={navCls}>Approvals</NavLink>
               {canView('machinemodels') && <NavLink to="/settings/machine-models" className={navCls}>Machine Models</NavLink>}
               {isAdmin && <NavLink to="/settings/users" className={navCls}>Users</NavLink>}
             </nav>

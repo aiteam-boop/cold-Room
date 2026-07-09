@@ -39,7 +39,7 @@ export default function NotificationBell() {
               {items.length === 0 ? (
                 <div className="p-6 text-center text-sm text-slate-400">No notifications yet.</div>
               ) : items.map((n) => (
-                <button key={n.id} onClick={() => { if (!n.isRead) markRead.mutate(n.id); setOpen(false); if (n.link) nav(n.link); }}
+                <button key={n.id} onClick={() => { if (!n.isRead) markRead.mutate(n.id); setOpen(false); const dest = n.type === 'APPROVAL_PENDING' ? '/approvals' : n.link; if (dest) nav(dest); }}
                   className={`block w-full border-b border-slate-50 px-3 py-2 text-left hover:bg-slate-50 ${n.isRead ? '' : 'bg-blue-50/40'}`}>
                   <div className="flex items-start gap-2">
                     {!n.isRead && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500" />}

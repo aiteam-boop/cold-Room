@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { forbidden } from '../lib/errors';
 
 // ── Company constants (from PO_Format_Final_PO_Doors.pdf) ───────────────────
 export const COMPANY = {
@@ -95,7 +96,104 @@ export function paymentTotalPct(d: { payAdvancePct: number; payBeforeDeliveryPct
 
 function safeJson(s: string): any { try { return JSON.parse(s); } catch { return {}; } }
 
+// ── Terms & Conditions ───────────────────────────────────────────────────────
+// A clause is never deleted from an issued document — it is STRUCK OFF: kept in
+// the PDF with a strikethrough plus a footnote, which is the commercial practice
+// for "considered but struck off by mutual agreement" (Sprint PRD §7).
+//
+//   isCustom    — added by Amisha, so it may be deleted outright.
+//   isLocked    — legal/compliance boilerplate: no edit, no strike-off, no delete.
+//   isStruckOff — rendered greyed + struck through; reversible before approval.
+
+export interface TermsSection {
+  title: string;
+  text: string;
+  isStruckOff: boolean;
+  struckOffAt: string | null;
+  isLocked: boolean;
+  isCustom: boolean;
+}
+
+// Clause titles that are legally load-bearing and must survive untouched. Edit
+// this list (not the PDF renderer) if legal wants a different set locked.
+const LOCKED_CLAUSE_TITLES = new Set(['Force Majeure', 'Jurisdiction']);
+
+/** Stamp a raw {title, text} preload with its strike-off metadata. */
+function asSections(raw: { title: string; text: string }[]): TermsSection[] {
+  return raw.map((s) => ({
+    ...s,
+    isStruckOff: false,
+    struckOffAt: null,
+    isLocked: LOCKED_CLAUSE_TITLES.has(s.title),
+    isCustom: false,
+  }));
+}
+
+/**
+ * Coerce whatever is stored (or posted) into well-formed clauses. Documents
+ * created before this sprint have bare {title, text} objects — they default to
+ * "standard, not struck off", and their locked flag is re-derived from the title
+ * so the 18 preloaded clauses stay undeletable after the upgrade.
+ */
+export function normalizeTermsSections(raw: unknown): TermsSection[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((r) => {
+    const o = (r ?? {}) as Record<string, unknown>;
+    const title = typeof o.title === 'string' ? o.title : '';
+    if (!title.trim()) return [];
+    const isCustom = o.isCustom === true;
+    const isLocked = o.isLocked === true || (!isCustom && LOCKED_CLAUSE_TITLES.has(title));
+    // A locked clause can never be struck off, whatever the client claims.
+    const isStruckOff = !isLocked && o.isStruckOff === true;
+    return [{
+      title,
+      text: typeof o.text === 'string' ? o.text : '',
+      isStruckOff,
+      struckOffAt: isStruckOff ? (typeof o.struckOffAt === 'string' && o.struckOffAt ? o.struckOffAt : new Date().toISOString()) : null,
+      isLocked,
+      isCustom,
+    }];
+  });
+}
+
+/**
+ * Guard the immutability rules on save. `next` is what the client sent; `prev`
+ * is what is on the document today. Standard clauses may be edited and struck
+ * off but never removed; locked clauses may not even be edited.
+ *
+ * A standard clause is identified by its TITLE — clauses have no stable id, and
+ * adding one would not migrate the documents already stored. The editors
+ * therefore make the title read-only for non-custom clauses (only the body text
+ * is editable, which is exactly what PRD §8.2 grants); renaming one here would
+ * otherwise read as a deletion and be rejected below.
+ */
+export function assertTermsMutationsAllowed(prev: TermsSection[], next: TermsSection[]): void {
+  const nextByTitle = new Map(next.map((s) => [s.title, s]));
+  for (const before of prev) {
+    if (before.isCustom) continue; // custom clauses are fully removable
+    const after = nextByTitle.get(before.title);
+    if (!after) {
+      throw forbidden(`Standard clause "${before.title}" cannot be deleted — strike it off instead.`);
+    }
+    if (before.isLocked && after.text.trim() !== before.text.trim()) {
+      throw forbidden(`Clause "${before.title}" is locked (legal/compliance) and cannot be edited.`);
+    }
+  }
+}
+
+/** Footnote rendered under the T&C block when anything was struck off. */
+export function strikeOffFootnote(sections: TermsSection[]): string | null {
+  const struck = sections.filter((s) => s.isStruckOff);
+  if (struck.length === 0) return null;
+  const dates = [...new Set(struck.map((s) => (s.struckOffAt ? new Date(s.struckOffAt).toLocaleDateString('en-GB') : '')).filter(Boolean))];
+  const when = dates.length === 1 ? dates[0] : dates.join(', ');
+  return `* ${struck.length} clause${struck.length > 1 ? 's' : ''} struck off by mutual agreement${when ? ` — ${when}` : ''}`;
+}
+
 // ── Default Terms & Conditions ──────────────────────────────────────────────
+export const defaultPOSections = (): TermsSection[] => asSections(defaultPOTerms());
+export const defaultWOSections = (): TermsSection[] => asSections(defaultWOTerms());
+
 export function defaultPOTerms(): { title: string; text: string }[] {
   return [
     { title: 'Delivery Schedule', text: 'Material should be delivered on site in good condition within 3 weeks after PO and advance received by purchaser. Risk of loss / title to goods shall not shift to the Purchaser until the Goods have been delivered to and accepted at the Purchaser\'s applicable facility.' },

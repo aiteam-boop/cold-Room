@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import * as XLSX from 'xlsx';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
-import { requireAuth, requireProjectMember, requirePage, requireEdit } from '../middleware/authMiddleware';
+import { requireAuth, requireProjectMember, requirePage, requireEdit, requireFinancialView } from '../middleware/authMiddleware';
 import { upload } from '../middleware/upload';
 import { parseBOQFile } from '../services/boqParser';
 import { aiProvider } from '../services/boqParser';
 import { analyzeBOQ } from '../services/boqAnalyzer';
 import { audit } from '../lib/audit';
+import { maskFinancials } from '../lib/financial';
 import { loadProjectProgress } from '../services/projectProgress';
+import { buildCostSheet, type CostPORow } from '../services/boqCost';
 
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
@@ -37,6 +40,91 @@ router.get(
       };
     });
     res.json({ items: merged, locked: project?.boqLocked ?? false, lockedAt: project?.boqLockedAt ?? null, categories: prog.categories });
+  })
+);
+
+// GET /api/projects/:projectId/boq/cost — the BOQ Cost sheet (Sprint PRD §6).
+// Same BOQ rows as the progress view, different columns. Read-only by design:
+// costs are derived from approved POs, never entered here.
+//
+// Site engineers (hideFinancials) get the tab with every rupee value nulled —
+// they see quantity columns only. maskFinancials handles that at the payload
+// level, so prices never reach the browser.
+router.get(
+  '/cost',
+  requireProjectMember,
+  requirePage('boq'),
+  asyncHandler(async (req, res) => {
+    const sheet = await buildCostSheet(req.params.projectId);
+    res.json(maskFinancials(sheet, req.account));
+  })
+);
+
+// GET .../boq/cost/export — the same sheet as an .xlsx. Behind requireFinancialView
+// because an export with the money columns stripped would be misleading.
+router.get(
+  '/cost/export',
+  requireProjectMember,
+  requirePage('boq'),
+  requireFinancialView,
+  asyncHandler(async (req, res) => {
+    const [{ items, unlinked }, project] = await Promise.all([
+      buildCostSheet(req.params.projectId),
+      prisma.project.findUnique({ where: { id: req.params.projectId }, select: { name: true } }),
+    ]);
+
+    // Only APPROVED GRNs are receipts, so only they name a GRN in the export.
+    const approvedGrnNumbers = (pos: CostPORow[]) =>
+      [...new Set(pos.flatMap((p) => p.grns.filter((g) => g.status === 'APPROVED').map((g) => g.grnNumber)))].join(', ');
+    const invoiceNumbers = (pos: CostPORow[]) =>
+      [...new Set(pos.flatMap((p) => p.grns.map((g) => g.invoiceNumber).filter(Boolean) as string[]))].join(', ');
+
+    // One row per BOQ item, then one indented row per linked PO beneath it —
+    // mirroring how the sub-rows render on screen.
+    const rows: Record<string, unknown>[] = [];
+    for (const it of items) {
+      rows.push({
+        'Sr. No.': it.srNo ?? '', Description: it.description, 'Room / Zone': it.roomZone ?? '',
+        'Make & Model': it.makeModel ?? '', Unit: it.unit ?? '',
+        'Planned Qty': it.plannedQty, 'Installed Qty': it.installedQty,
+        'PO Number(s)': it.pos.map((p) => p.docNumber).join(', '),
+        'Vendor Name': [...new Set(it.pos.map((p) => p.vendorName).filter(Boolean))].join(', '),
+        'Qty Ordered': it.totalOrderedQty, 'Unit Price': '',
+        'Total Cost': it.totalOrderedCost, 'Advance Paid': it.totalAdvancePaid,
+        'Balance Pending': it.totalBalancePending, 'Payment Status': it.paymentStatus,
+        'Qty Received': it.totalReceivedQty, 'Receipt Status': it.receiptStatus,
+        'GRN No(s).': approvedGrnNumbers(it.pos), 'Invoice No(s).': invoiceNumbers(it.pos),
+      });
+      if (it.pos.length > 1) {
+        for (const p of it.pos) {
+          rows.push({
+            'Sr. No.': '', Description: `    ↳ ${p.docNumber}`, 'Room / Zone': '', 'Make & Model': '', Unit: '',
+            'Planned Qty': '', 'Installed Qty': '',
+            'PO Number(s)': p.docNumber, 'Vendor Name': p.vendorName ?? '',
+            'Qty Ordered': p.qtyOrdered, 'Unit Price': p.unitPrice,
+            'Total Cost': p.totalCost, 'Advance Paid': p.advancePaid,
+            'Balance Pending': p.balancePending, 'Payment Status': p.paymentStatus,
+            'Qty Received': p.qtyReceived, 'Receipt Status': p.receiptStatus,
+            'GRN No(s).': approvedGrnNumbers([p]), 'Invoice No(s).': invoiceNumbers([p]),
+          });
+        }
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'BOQ Cost');
+    if (unlinked.length) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unlinked.map((u) => ({
+        'PO Number': u.docNumber, Status: u.docStatus, Vendor: u.vendorName ?? '', Description: u.description,
+        Qty: u.qtyOrdered, 'Unit Price': u.unitPrice, 'Total Cost': u.totalCost,
+      }))), 'Unlinked POs');
+    }
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+
+    const safeName = (project?.name ?? 'project').replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}-BOQ-Cost.xlsx"`);
+    res.send(buf);
   })
 );
 

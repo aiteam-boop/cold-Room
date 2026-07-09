@@ -13,6 +13,12 @@ const MONEY_FIELDS = new Set([
   'totalValue', 'totalWithGst',
   'amountInvoiced', 'amountAdvanced', 'amountPaid', 'amountPending',
   'totalPO', 'totalWO', 'totalInvoiced', 'totalPaid', 'totalPending',
+  // BOQ Cost view (Sprint PRD §6): site engineers see quantities, never prices.
+  'totalCost', 'advancePaid', 'balancePending',
+  'totalOrderedCost', 'totalAdvancePaid', 'totalBalancePending',
+  'grandTotalCost', 'grandAdvancePaid', 'grandBalancePending',
+  // Vendor rate chart (Sprint PRD §5.1.5).
+  'rate',
 ]);
 
 // Deep-clone, replacing any known monetary field's value with null. Arrays and

@@ -1,39 +1,104 @@
 // Modal to pick the ordered approval chain before submitting a PO/WO/GRN.
-// Approvers come from the registry (GET /api/approvals/approvers); only those
-// whose allowed types include this document type (or 'ALL') are selectable.
+//
+// Where a value-threshold matrix is configured (Settings · Approval Matrix), it
+// decides the chain: the required approvers are pre-filled, ordered and locked —
+// you may add extra reviewers, never drop a mandatory one. That is what stops a
+// ₹2,00,000 PO being routed around Finance.
+//
+// Where no matrix exists, this falls back to the original free-form picker so
+// nothing breaks for projects that have not set one up.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { Modal, Spinner } from '../ui';
+import { inr } from '../../lib/format';
 
-interface Approver { id: string; name: string; email: string; approvalRole?: string | null; level?: number; types: string[] }
+interface Approver { id: string; name: string; email: string; approvalRole?: string | null; level?: number; types: string[]; isAdmin?: boolean }
 
-export default function ChainBuilder({ docType, onConfirm, onClose, busy }: {
-  docType: 'PO' | 'WO' | 'GRN'; onConfirm: (chain: string[]) => void; onClose: () => void; busy?: boolean;
+interface MatrixStep {
+  approverId: string; approverName: string; approverRole: string | null; order: number;
+  band: { minAmount: number; maxAmount: number | null };
+}
+interface MatrixPreview {
+  steps: MatrixStep[];
+  configured: boolean;
+  scope: 'project' | 'global' | 'none';
+  amount: number;
+}
+
+const bandLabel = (min: number, max: number | null) =>
+  min <= 0 && max != null ? `up to ${inr(max)}` : max == null ? `${inr(min)} and above` : `${inr(min)} – ${inr(max)}`;
+
+export default function ChainBuilder({ docType, projectId, amount, onConfirm, onClose, busy }: {
+  docType: 'PO' | 'WO' | 'GRN';
+  projectId: string;
+  /** The document's value — what the matrix bands are compared against. */
+  amount: number;
+  onConfirm: (chain: string[]) => void;
+  onClose: () => void;
+  busy?: boolean;
 }) {
   const [chain, setChain] = useState<string[]>([]);
+
   const { data, isLoading } = useQuery({
     queryKey: ['approvers'],
     queryFn: async () => (await api.get('/approvals/approvers')).data.approvers as Approver[],
   });
 
+  const { data: matrix, isLoading: matrixLoading } = useQuery({
+    queryKey: ['approval-preview', docType, projectId, amount],
+    queryFn: async () =>
+      (await api.get(`/approval-rules/preview?docType=${docType}&projectId=${projectId}&amount=${amount}`)).data as MatrixPreview,
+  });
+
+  const required = matrix?.configured ? matrix.steps : [];
+  const requiredIds = new Set(required.map((s) => s.approverId));
+
+  // Seed the chain with the mandatory approvers, in matrix order.
+  useEffect(() => {
+    if (!required.length) return;
+    setChain((c) => {
+      const extras = c.filter((id) => !requiredIds.has(id));
+      return [...required.map((s) => s.approverId), ...extras];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matrix]);
+
   const eligible = (data ?? []).filter((a) => a.types.includes('ALL') || a.types.includes(docType));
   const byId = new Map(eligible.map((a) => [a.id, a]));
+  const bandOf = new Map(required.map((s) => [s.approverId, s.band]));
   const available = eligible.filter((a) => !chain.includes(a.id));
 
   const add = (id: string) => setChain((c) => [...c, id]);
-  const remove = (id: string) => setChain((c) => c.filter((x) => x !== id));
+  const remove = (id: string) => { if (!requiredIds.has(id)) setChain((c) => c.filter((x) => x !== id)); };
   const move = (i: number, dir: -1 | 1) => setChain((c) => {
     const j = i + dir; if (j < 0 || j >= c.length) return c;
+    // A mandatory approver's position is set by the matrix, not by the creator.
+    if (requiredIds.has(c[i]) || requiredIds.has(c[j])) return c;
     const next = [...c]; [next[i], next[j]] = [next[j], next[i]]; return next;
   });
 
+  const loading = isLoading || matrixLoading;
+
   return (
     <Modal title="Choose approval chain" onClose={onClose} wide>
-      {isLoading ? <Spinner label="Loading approvers…" /> : (
+      {loading ? <Spinner label="Loading approvers…" /> : (
         <div className="space-y-4">
           <p className="text-sm text-slate-500">Approvers are notified <strong>one at a time, in order</strong>. Only the first is notified now; each subsequent approver is notified once the previous approves.</p>
+
+          {matrix?.configured ? (
+            <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">
+              This {docType} is worth <strong>{inr(amount)}</strong>. The{' '}
+              {matrix.scope === 'project' ? 'project’s' : 'company'} approval matrix requires{' '}
+              <strong>{required.length} approver{required.length === 1 ? '' : 's'}</strong> at this value. They are locked into the chain below.
+            </div>
+          ) : (
+            <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+              No approval matrix is configured for {docType}, so you may pick any chain. An admin can set value thresholds in{' '}
+              <strong>Users → Approval Matrix</strong>.
+            </div>
+          )}
 
           {eligible.length === 0 && (
             <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
@@ -50,13 +115,23 @@ export default function ChainBuilder({ docType, onConfirm, onClose, busy }: {
               <ol className="space-y-1">
                 {chain.map((id, i) => {
                   const a = byId.get(id);
+                  const mandatory = requiredIds.has(id);
+                  const band = bandOf.get(id);
                   return (
-                    <li key={id} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
-                      <span className="text-sm text-slate-700">{i + 1}. {a?.name} {a?.approvalRole && <span className="text-xs text-slate-400">· {a.approvalRole}</span>}</span>
+                    <li key={id} className={`flex items-center justify-between rounded-lg border px-3 py-2 ${mandatory ? 'border-blue-200 bg-blue-50/50' : 'border-slate-200'}`}>
+                      <span className="text-sm text-slate-700">
+                        {i + 1}. {a?.name ?? required.find((s) => s.approverId === id)?.approverName}
+                        {a?.approvalRole && <span className="text-xs text-slate-400"> · {a.approvalRole}</span>}
+                        {mandatory && band && (
+                          <span className="ml-2 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700" title="Required by the approval matrix">
+                            {bandLabel(band.minAmount, band.maxAmount)}
+                          </span>
+                        )}
+                      </span>
                       <span className="flex items-center gap-1">
-                        <button className="px-1 text-slate-400 hover:text-navy disabled:opacity-30" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
-                        <button className="px-1 text-slate-400 hover:text-navy disabled:opacity-30" disabled={i === chain.length - 1} onClick={() => move(i, 1)}>↓</button>
-                        <button className="px-1 text-slate-300 hover:text-red-500" onClick={() => remove(id)}>✕</button>
+                        <button className="px-1 text-slate-400 hover:text-navy disabled:opacity-30" disabled={i === 0 || mandatory} onClick={() => move(i, -1)}>↑</button>
+                        <button className="px-1 text-slate-400 hover:text-navy disabled:opacity-30" disabled={i === chain.length - 1 || mandatory} onClick={() => move(i, 1)}>↓</button>
+                        <button className="px-1 text-slate-300 hover:text-red-500 disabled:opacity-20" disabled={mandatory} title={mandatory ? 'Required by the approval matrix' : 'Remove'} onClick={() => remove(id)}>✕</button>
                       </span>
                     </li>
                   );
@@ -68,10 +143,13 @@ export default function ChainBuilder({ docType, onConfirm, onClose, busy }: {
           {/* Available approvers */}
           {available.length > 0 && (
             <div>
-              <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Add approver</div>
+              <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Add another reviewer</div>
               <div className="flex flex-wrap gap-2">
                 {available.map((a) => (
-                  <button key={a.id} className="btn-outline text-xs" onClick={() => add(a.id)}>+ {a.name}{a.approvalRole ? ` (${a.approvalRole})` : ''}</button>
+                  <button key={a.id} className="btn-outline text-xs" onClick={() => add(a.id)}>
+                    + {a.name}{a.approvalRole ? ` (${a.approvalRole})` : ''}
+                    {a.isAdmin && <span className="ml-1 rounded bg-purple-100 px-1 py-0.5 text-[10px] font-semibold text-purple-700">Admin</span>}
+                  </button>
                 ))}
               </div>
             </div>

@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { streamFromDb } from './lib/fileStore';
+import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
@@ -26,6 +26,9 @@ import machineModelRoutes from './routes/machineModels';
 import boqEnhanceRoutes from './routes/boqEnhance';
 import ganttRoutes from './routes/gantt';
 import changeOrderRoutes from './routes/changeOrders';
+import syncRoutes from './routes/sync';
+import dprRoutes from './routes/dpr';
+import approvalRuleRoutes from './routes/approvalRules';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -56,6 +59,8 @@ app.use('/api/branding', brandingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/machine-models', machineModelRoutes);
+app.use('/api/sync-sheets', syncRoutes);
+app.use('/api/approval-rules', approvalRuleRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
@@ -68,6 +73,7 @@ app.use('/api/projects/:projectId/procurement', procurementRoutes);
 app.use('/api/projects/:projectId/boq-items', boqEnhanceRoutes);
 app.use('/api/projects/:projectId/gantt', ganttRoutes);
 app.use('/api/projects/:projectId/change-orders', changeOrderRoutes);
+app.use('/api/projects/:projectId/dpr', dprRoutes);
 
 // 404
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -100,4 +106,7 @@ app.listen(PORT, () => {
   console.log(`  CORS origin → ${ORIGIN}`);
   const aiProv = process.env.GROQ_API_KEY ? `ENABLED (Groq · ${process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'})` : process.env.ANTHROPIC_API_KEY ? 'ENABLED (Claude)' : 'disabled (set GROQ_API_KEY or ANTHROPIC_API_KEY)';
   console.log(`  AI parsing → ${aiProv}\n`);
+  // Pull the branding logo/signature back from Atlas if the disk cache is cold
+  // (e.g. after a redeploy), so generated PO/GRN PDFs keep their logo.
+  restoreBrandingCache(path.resolve(process.cwd(), 'assets')).catch(() => {});
 });

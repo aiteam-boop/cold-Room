@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword, signToken, validatePassword } from '../li
 import { requireAuth } from '../middleware/authMiddleware';
 import { audit } from '../lib/audit';
 import { parseGrants, parseSections } from '../lib/permissions';
+import { isDprOwner } from '../lib/dprAccess';
 
 const router = Router();
 
@@ -24,6 +25,8 @@ function publicUser(u: {
     active: u.active ?? true,
     pageAccess: parseGrants(u.pageAccess),
     sectionPerms: parseSections(u.sectionPerms),
+    // Room-wise DPR is limited to specific owner accounts, not all admins.
+    dprOwner: isDprOwner(u.email),
   };
 }
 

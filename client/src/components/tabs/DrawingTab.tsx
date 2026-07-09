@@ -16,7 +16,14 @@ interface Zone {
 interface Drawing {
   id: string; fileName: string; fileUrl: string; mimeType?: string;
   version: number; status: string; uploadedAt: string; classification?: string | null;
+  // Revision chain (transcript R4): base → rev → rev → final.
+  parentId?: string | null; isFinal?: boolean; revisionNotes?: string | null; discipline?: string | null;
 }
+
+const DISCIPLINES = ['PUF_PANEL', 'REFRIGERATION', 'DOOR', 'ELECTRICAL', 'CUSTOM'] as const;
+const DISCIPLINE_LABEL: Record<string, string> = {
+  PUF_PANEL: 'PUF Panel', REFRIGERATION: 'Refrigeration', DOOR: 'Door', ELECTRICAL: 'Electrical', CUSTOM: 'Other',
+};
 
 const ext = (n: string) => n.toLowerCase().split('.').pop() || '';
 const isPdf = (d: Drawing) => ext(d.fileName) === 'pdf';
@@ -32,6 +39,10 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
   const [roomPopup, setRoomPopup] = useState<any>(null);
   const [file, setFile] = useState<File | null>(null);
   const [editing, setEditing] = useState(false);
+  // Upload panel: which family (if any) this file revises, and how to label it.
+  const [revisionOf, setRevisionOf] = useState('');
+  const [discipline, setDiscipline] = useState('');
+  const [revisionNotes, setRevisionNotes] = useState('');
 
   const drawingsQ = useQuery({
     queryKey: ['drawings', projectId],
@@ -52,8 +63,16 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
   const selectedDrawing = drawingsQ.data?.find((d) => d.id === selectedDrawingId);
 
   const upload = useMutation({
-    mutationFn: async () => { const fd = new FormData(); fd.append('file', file!); return api.post(`/projects/${projectId}/drawings`, fd); },
-    onSuccess: (r) => { setFile(null); setSelectedDrawingId(r.data.drawing.id); qc.invalidateQueries({ queryKey: ['drawings', projectId] }); },
+    mutationFn: async () => {
+      const fd = new FormData();
+      fd.append('file', file!);
+      // Empty parent → a new drawing family; otherwise the next revision of one.
+      if (revisionOf) fd.append('parentId', revisionOf);
+      if (discipline) fd.append('discipline', discipline);
+      if (revisionNotes.trim()) fd.append('revisionNotes', revisionNotes.trim());
+      return api.post(`/projects/${projectId}/drawings`, fd);
+    },
+    onSuccess: (r) => { setFile(null); setRevisionNotes(''); setSelectedDrawingId(r.data.drawing.id); qc.invalidateQueries({ queryKey: ['drawings', projectId] }); },
     onError: (e) => alert(errMsg(e)),
   });
 
@@ -77,6 +96,23 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
     onError: (e) => setMsg({ ok: false, text: errMsg(e) }),
   });
 
+  const finalise = useMutation({
+    mutationFn: (drawingId: string) => api.post(`/projects/${projectId}/drawings/${drawingId}/finalise`, {}),
+    onSuccess: () => { setMsg({ ok: true, text: 'Marked as the final approved drawing.' }); qc.invalidateQueries({ queryKey: ['drawings', projectId] }); qc.invalidateQueries({ queryKey: ['project', projectId] }); },
+    onError: (e) => setMsg({ ok: false, text: errMsg(e) }),
+  });
+
+  // Group into families: a root drawing plus its revisions, newest revision first.
+  // "Base drawing, then revision, revision, revision, final drawing."
+  const families = useMemo(() => {
+    const all = drawingsQ.data ?? [];
+    const roots = all.filter((d) => !d.parentId);
+    return roots.map((root) => ({
+      root,
+      revisions: all.filter((d) => d.parentId === root.id).sort((a, b) => b.version - a.version),
+    }));
+  }, [drawingsQ.data]);
+
   if (drawingsQ.isLoading) return <Spinner label="Loading drawings…" />;
   const drawings = drawingsQ.data ?? [];
   const zones = zonesQ.data ?? [];
@@ -96,36 +132,69 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
             )}
           </div>
           {drawings.length ? (
-            <ul className="space-y-2 text-sm">
-              {drawings.map((d) => {
-                const sel = d.id === selectedDrawingId;
-                const cls = d.classification ? JSON.parse(d.classification) : null;
-                const busy = analyze.isPending && analyze.variables === d.id;
-                return (
-                  <li key={d.id}>
-                    <button
-                      onClick={() => { setSelectedDrawingId(d.id); setMode('diagram'); }}
-                      className={`w-full rounded-lg border p-2 text-left transition ${sel ? 'border-navy bg-navy/5' : 'border-slate-200 hover:bg-slate-50'}`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <span className="mt-0.5 text-base">{isPdf(d) ? '📄' : isDxf(d) ? '📐' : '🖼️'}</span>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-medium text-navy">{d.fileName}</div>
-                          <div className="text-xs text-slate-400">v{d.version} · {fmtDate(d.uploadedAt)}</div>
-                          {cls && (
-                            <div className="mt-1 flex flex-wrap gap-1">
-                              <span className="badge bg-blue-100 text-blue-700">{cls.part}</span>
-                              {cls.discipline && <span className="badge bg-slate-100 text-slate-600">{cls.discipline}</span>}
+            <ul className="space-y-3 text-sm">
+              {families.map(({ root, revisions }) => {
+                // The whole family shares a "final" flag — at most one member has it.
+                const familyFinal = [root, ...revisions].find((d) => d.isFinal);
+                const item = (d: Drawing, isRevision: boolean) => {
+                  const sel = d.id === selectedDrawingId;
+                  const cls = d.classification ? JSON.parse(d.classification) : null;
+                  const busy = analyze.isPending && analyze.variables === d.id;
+                  return (
+                    <div key={d.id} className={isRevision ? 'ml-3 border-l-2 border-slate-100 pl-2' : ''}>
+                      <button
+                        onClick={() => { setSelectedDrawingId(d.id); setMode('diagram'); }}
+                        className={`w-full rounded-lg border p-2 text-left transition ${sel ? 'border-navy bg-navy/5' : d.isFinal ? 'border-green-200 bg-green-50/40' : 'border-slate-200 hover:bg-slate-50'}`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <span className="mt-0.5 text-base">{isPdf(d) ? '📄' : isDxf(d) ? '📐' : '🖼️'}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-medium text-navy">{d.fileName}</div>
+                            <div className="text-xs text-slate-400">
+                              {isRevision ? `Rev ${d.version}` : `Base · v${d.version}`} · {fmtDate(d.uploadedAt)}
                             </div>
-                          )}
-                          {cls?.rooms?.length > 0 && <div className="mt-0.5 text-[11px] text-slate-400">Rooms: {cls.rooms.join(', ')}</div>}
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {d.isFinal && <span className="badge bg-green-100 text-green-700">✓ Final approved</span>}
+                              {d.discipline && <span className="badge bg-slate-100 text-slate-600">{DISCIPLINE_LABEL[d.discipline] ?? d.discipline}</span>}
+                              {cls && <span className="badge bg-blue-100 text-blue-700">{cls.part}</span>}
+                            </div>
+                            {d.revisionNotes && <div className="mt-0.5 text-[11px] italic text-slate-400">{d.revisionNotes}</div>}
+                            {cls?.rooms?.length > 0 && <div className="mt-0.5 text-[11px] text-slate-400">Rooms: {cls.rooms.join(', ')}</div>}
+                          </div>
                         </div>
-                      </div>
-                    </button>
-                    {isAdmin && isDxf(d) && (
-                      <button className="mt-1 inline-flex items-center gap-1 rounded-md bg-navy/5 px-2 py-1 text-xs font-medium text-navy hover:bg-navy/10 disabled:opacity-50" disabled={busy} onClick={() => { setMsg(null); analyze.mutate(d.id); }}>
-                        {busy ? '⏳ Analyzing…' : d.status === 'APPROVED' ? '🤖 Re-analyze rooms' : '🤖 Analyze rooms & build 3D'}
                       </button>
+                      {isAdmin && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {isDxf(d) && (
+                            <button className="inline-flex items-center gap-1 rounded-md bg-navy/5 px-2 py-1 text-xs font-medium text-navy hover:bg-navy/10 disabled:opacity-50" disabled={busy} onClick={() => { setMsg(null); analyze.mutate(d.id); }}>
+                              {busy ? '⏳ Analyzing…' : d.status === 'APPROVED' ? '🤖 Re-analyze rooms' : '🤖 Analyze rooms & build 3D'}
+                            </button>
+                          )}
+                          {!d.isFinal && (
+                            <button
+                              className="rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                              disabled={finalise.isPending}
+                              title="Every room-wise quantity is derived from the final approved drawing"
+                              onClick={() => { setMsg(null); finalise.mutate(d.id); }}
+                            >
+                              ✓ Mark as final
+                            </button>
+                          )}
+                          <button className="rounded-md bg-slate-50 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                            onClick={() => { setRevisionOf(root.id); setDiscipline(d.discipline ?? ''); }}>
+                            + Revision
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                };
+                return (
+                  <li key={root.id} className="space-y-1.5">
+                    {item(root, false)}
+                    {revisions.map((r) => item(r, true))}
+                    {!familyFinal && revisions.length > 0 && (
+                      <div className="ml-3 text-[11px] text-amber-600">No revision marked final yet — quantities have no approved source.</div>
                     )}
                   </li>
                 );
@@ -137,8 +206,31 @@ export default function DrawingTab({ projectId }: { projectId: string; role: str
           {msg && <div className={`mt-2 rounded-lg px-2 py-1.5 text-xs ${msg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{msg.text}</div>}
           {isAdmin && (
             <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                {revisionOf ? 'Upload revision' : 'Upload new drawing'}
+              </div>
               <input className="input text-xs" type="file" accept=".dxf,.dwg,.pdf,.png,.jpg,.jpeg" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-              <button className="btn-primary w-full text-sm" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>{upload.isPending ? 'Uploading…' : 'Upload Drawing'}</button>
+
+              <select className="input text-xs" value={revisionOf} onChange={(e) => setRevisionOf(e.target.value)}>
+                <option value="">New drawing (starts its own revision chain)</option>
+                {families.map(({ root }) => <option key={root.id} value={root.id}>Revision of · {root.fileName}</option>)}
+              </select>
+
+              <select className="input text-xs" value={discipline} onChange={(e) => setDiscipline(e.target.value)}>
+                <option value="">Discipline (optional)</option>
+                {DISCIPLINES.map((x) => <option key={x} value={x}>{DISCIPLINE_LABEL[x]}</option>)}
+              </select>
+
+              {revisionOf && (
+                <input className="input text-xs" placeholder="What changed in this revision?" value={revisionNotes} onChange={(e) => setRevisionNotes(e.target.value)} />
+              )}
+
+              <button className="btn-primary w-full text-sm" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>
+                {upload.isPending ? 'Uploading…' : revisionOf ? 'Upload Revision' : 'Upload Drawing'}
+              </button>
+              <p className="text-[11px] text-slate-400">
+                Room-wise target quantities are derived from the drawing marked <strong>final</strong> in each chain.
+              </p>
             </div>
           )}
         </div>

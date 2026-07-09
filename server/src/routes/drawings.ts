@@ -5,10 +5,12 @@ import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
 import { requireAuth, requireProjectMember, requirePage, requireEdit } from '../middleware/authMiddleware';
 import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
+import { persistBufferToDb } from '../lib/fileStore';
 import { loadProjectProgress } from '../services/projectProgress';
 import { buildFocusedPlan, pickFootprint, pointInPolygon } from '../services/dxfRenderer';
 import { classifyRooms, classifyDrawings, extractRoomDetails } from '../services/aiClassify';
 import { extractPdfText } from '../services/pdfText';
+import { normalizeDrawingApprovals } from '../services/drawingApprovals';
 import { aiProvider } from '../services/boqParser';
 import path from 'path';
 import fs from 'fs';
@@ -31,7 +33,24 @@ router.get(
   })
 );
 
-// POST .../drawings — upload PDF/JPG/PNG (FR-DM-01). Versioned per filename.
+// ── Revision chain (DPR PRD §3.2 G10 / transcript R4) ────────────────────────
+// "Ye base drawing hai, then revision, revision, revision, final drawing. Jo
+//  final drawing hota hai usi ke base pe ye saare calculation honge."
+//
+// A family is identified by its root drawing (`parentId == null`); every revision
+// carries `parentId = root.id`. Uploading with no parentId starts a new family.
+const familyRoot = (d: { id: string; parentId: string | null }) => d.parentId ?? d.id;
+
+/** Everything in the same family as `rootId`, root included. */
+const familyWhere = (projectId: string, rootId: string) => ({
+  projectId,
+  OR: [{ id: rootId }, { parentId: rootId }],
+});
+
+// POST .../drawings — upload PDF/JPG/PNG (FR-DM-01).
+// Pass `parentId` to file this upload as the next revision of an existing
+// drawing; omit it to start a new family. `version` counts within the family, so
+// two unrelated drawings that happen to share a filename no longer collide.
 router.post(
   '/',
   requireProjectMember,
@@ -39,21 +58,110 @@ router.post(
   upload.single('file'),
   asyncHandler(async (req, res) => {
     if (!req.file) throw badRequest('No file uploaded (field: file)');
-    const prior = await prisma.drawing.count({ where: { projectId: req.params.projectId, fileName: req.file.originalname } });
+    const projectId = req.params.projectId;
+    const b = z.object({
+      parentId: z.string().optional(),
+      discipline: z.enum(['PUF_PANEL', 'REFRIGERATION', 'DOOR', 'ELECTRICAL', 'CUSTOM']).optional(),
+      revisionNotes: z.string().trim().max(2000).optional(),
+    }).parse(req.body ?? {});
+
+    let parentId: string | null = null;
+    // A revision inherits its family's discipline unless it overrides it. Legacy
+    // rows may carry any string here, so keep the field wide.
+    let discipline: string | null = b.discipline ?? null;
+    let version = 1;
+
+    if (b.parentId) {
+      const parent = await prisma.drawing.findFirst({ where: { id: b.parentId, projectId } });
+      if (!parent) throw notFound('The drawing this revises was not found in this project');
+      // Revisions always hang off the family ROOT, so the chain stays one level
+      // deep and "latest revision" is a simple max(version).
+      parentId = familyRoot(parent);
+      version = (await prisma.drawing.count({ where: familyWhere(projectId, parentId) })) + 1;
+      discipline = discipline ?? parent.discipline;
+    }
+
     const drawing = await prisma.drawing.create({
       data: {
-        projectId: req.params.projectId,
+        projectId,
         fileName: req.file.originalname,
         fileUrl: `/uploads/${req.file.filename}`,
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
         uploadedById: req.user!.sub,
-        version: prior + 1,
+        version,
         status: 'APPROVED',
+        parentId,
+        discipline,
+        revisionNotes: b.revisionNotes ?? null,
       },
     });
-    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'DRAWING_UPLOAD', entity: 'Drawing', entityId: drawing.id, details: { file: req.file.originalname } });
+    await audit({ userId: req.user!.sub, projectId, action: parentId ? 'DRAWING_REVISION' : 'DRAWING_UPLOAD', entity: 'Drawing', entityId: drawing.id, details: { file: req.file.originalname, version } });
     res.status(201).json({ drawing });
+  })
+);
+
+// POST .../drawings/:drawingId/finalise — "this is THE approved drawing".
+//
+// Exactly one drawing per family may be final: quantities, room-wise breakups and
+// the drawing-approval checklist all point at it. Finalising a revision demotes
+// whichever one was final before, and the checklist row for the same discipline
+// picks up its URL.
+router.post(
+  '/:drawingId/finalise',
+  requireProjectMember,
+  requireEdit('drawing'),
+  asyncHandler(async (req, res) => {
+    const projectId = req.params.projectId;
+    const drawing = await prisma.drawing.findFirst({ where: { id: req.params.drawingId, projectId } });
+    if (!drawing) throw notFound('Drawing not found');
+
+    const rootId = familyRoot(drawing);
+    await prisma.drawing.updateMany({ where: familyWhere(projectId, rootId), data: { isFinal: false, finalisedAt: null, finalisedById: null } });
+    const updated = await prisma.drawing.update({
+      where: { id: drawing.id },
+      data: { isFinal: true, finalisedAt: new Date(), finalisedById: req.user!.sub },
+    });
+
+    // Keep the drawing-approval checklist pointing at the real file (Sprint PRD
+    // §2.2) — the row is matched on discipline, so an unclassified drawing is
+    // finalised without touching the checklist.
+    if (updated.discipline) {
+      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { drawingApprovals: true } });
+      const items = normalizeDrawingApprovals(project?.drawingApprovals);
+      let touched = false;
+      for (const it of items) {
+        if (it.type === updated.discipline) { it.documentUrl = updated.fileUrl; touched = true; }
+      }
+      if (touched) await prisma.project.update({ where: { id: projectId }, data: { drawingApprovals: items as unknown as object[] } });
+    }
+
+    await audit({ userId: req.user!.sub, projectId, action: 'DRAWING_FINALISE', entity: 'Drawing', entityId: drawing.id, details: { version: drawing.version, discipline: updated.discipline } });
+    res.json({ drawing: updated });
+  })
+);
+
+// PATCH .../drawings/:drawingId — classify or annotate a drawing.
+router.patch(
+  '/:drawingId/meta',
+  requireProjectMember,
+  requireEdit('drawing'),
+  asyncHandler(async (req, res) => {
+    const projectId = req.params.projectId;
+    const b = z.object({
+      discipline: z.enum(['PUF_PANEL', 'REFRIGERATION', 'DOOR', 'ELECTRICAL', 'CUSTOM']).nullable().optional(),
+      revisionNotes: z.string().trim().max(2000).nullable().optional(),
+    }).parse(req.body);
+    const existing = await prisma.drawing.findFirst({ where: { id: req.params.drawingId, projectId } });
+    if (!existing) throw notFound('Drawing not found');
+    const drawing = await prisma.drawing.update({
+      where: { id: existing.id },
+      data: {
+        ...(b.discipline !== undefined && { discipline: b.discipline }),
+        ...(b.revisionNotes !== undefined && { revisionNotes: b.revisionNotes }),
+      },
+    });
+    res.json({ drawing });
   })
 );
 
@@ -382,9 +490,14 @@ router.post(
       }
     }
 
-    // 6. Save the focused plan SVG paths to disk for the "Real Plan" view.
+    // 6. Save the focused plan SVG for the "Real Plan" view — to disk (fast
+    //    cache) AND to Atlas GridFS, so it survives a redeploy like every other
+    //    file. It is generated here rather than uploaded, so it does not pass
+    //    through the multer middleware and must be persisted explicitly.
     const planFile = `${drawing.id}_plan.svg`;
-    fs.writeFileSync(path.resolve(process.cwd(), 'uploads', planFile), plan.pathsMarkup);
+    const planBuf = Buffer.from(plan.pathsMarkup);
+    fs.writeFileSync(path.resolve(process.cwd(), 'uploads', planFile), planBuf);
+    await persistBufferToDb(planFile, planBuf, 'image/svg+xml');
 
     await prisma.drawing.update({
       where: { id: drawing.id },

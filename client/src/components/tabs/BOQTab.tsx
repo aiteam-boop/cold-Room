@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -10,6 +11,26 @@ import ProgressHistory from './ProgressHistory';
 import BOQImportModal from './BOQImportModal';
 import BOQAnalysisView from './BOQAnalysisView';
 import BOQEnhanceView from './BOQEnhanceView';
+import BOQCostView from './BOQCostView';
+import BOQMasterView from './BOQMasterView';
+
+// Sub-views of the BOQ page. The same underlying rows, three different lenses
+// (DPR PRD §3.2 G9 / transcript R10-R11):
+//   master → the contracted scope, immutable, no money
+//   table  → how much of it is built  (BOQ & Progress)
+//   cost   → what it cost to buy      (BOQ & Cost)
+const SUBS = ['master', 'table', 'cost', 'models', 'analysis', 'queue', 'history'] as const;
+type Sub = (typeof SUBS)[number];
+
+const SUB_LABEL: Record<Sub, string> = {
+  master: 'BOQ (Master)',
+  table: 'BOQ & Progress',
+  cost: 'BOQ & Cost',
+  models: 'Models & Item Lists',
+  analysis: '✨ AI Analysis',
+  queue: 'Approval Queue',
+  history: 'History',
+};
 
 interface BOQItem {
   id: string; srNo?: string; description: string; category?: string; roomZone?: string;
@@ -29,8 +50,18 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
   const [showEntry, setShowEntry] = useState(false);
   const [entryItem, setEntryItem] = useState<BOQItem | null>(null);
   const [showImport, setShowImport] = useState(false);
-  const [sub, setSub] = useState<'table' | 'models' | 'analysis' | 'queue' | 'history'>('table');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  // The active sub-view lives in the URL so a cost sheet can be bookmarked and
+  // shared (PRD §6.2: "URL updates for bookmarking").
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('boq') as Sub | null;
+  const sub: Sub = raw && SUBS.includes(raw) ? raw : 'table';
+  const setSub = (s: Sub) => setParams((p) => {
+    const next = new URLSearchParams(p);
+    if (s === 'table') next.delete('boq'); else next.set('boq', s);
+    return next;
+  }, { replace: true });
 
   const { data, isLoading } = useQuery({
     queryKey: ['boq', projectId],
@@ -68,28 +99,33 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
 
   return (
     <div className="space-y-4">
-      {/* Summary KPIs (PRD §10.4) */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KPI label="Total Items" value={kpis.total} />
-        <KPI label="Completed" value={kpis.done} accent="#16a34a" />
-        <KPI label="In Progress" value={kpis.inProgress} accent="#d97706" />
-        <KPI label="Not Started" value={kpis.notStarted} accent="#dc2626" />
-      </div>
+      {/* Summary KPIs (PRD §10.4). The cost view brings its own financial KPIs,
+          and the master view is deliberately free of derived numbers. */}
+      {sub !== 'cost' && sub !== 'master' && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <KPI label="Total Items" value={kpis.total} />
+          <KPI label="Completed" value={kpis.done} accent="#16a34a" />
+          <KPI label="In Progress" value={kpis.inProgress} accent="#d97706" />
+          <KPI label="Not Started" value={kpis.notStarted} accent="#dc2626" />
+        </div>
+      )}
 
       {/* Action bar */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-1 rounded-lg bg-slate-100 p-1 text-sm">
-          {(['table', 'models', 'analysis', 'queue', 'history'] as const).filter((s) => s !== 'queue' || isSupervisor).map((s) => (
-            <button key={s} onClick={() => setSub(s)} className={`rounded-md px-3 py-1.5 font-medium capitalize ${sub === s ? 'bg-white shadow-sm text-navy' : 'text-slate-500'}`}>
-              {s === 'queue' ? 'Approval Queue' : s === 'history' ? 'History' : s === 'analysis' ? '✨ AI Analysis' : s === 'models' ? 'Models & Item Lists' : 'BOQ Table'}
+        <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 text-sm">
+          {SUBS.filter((s) => s !== 'queue' || isSupervisor).map((s) => (
+            <button key={s} onClick={() => setSub(s)} className={`rounded-md px-3 py-1.5 font-medium ${sub === s ? 'bg-white shadow-sm text-navy' : 'text-slate-500'}`}>
+              {SUB_LABEL[s]}
             </button>
           ))}
         </div>
         <div className="flex flex-wrap gap-2">
-          {canWrite && hasItems && (
+          {canWrite && hasItems && sub === 'table' && (
             <button className="btn-primary" onClick={() => { setEntryItem(null); setShowEntry(true); }}>+ Add Progress</button>
           )}
-          {isAdmin && (
+          {/* Import and locking act on the master document, so they only make
+              sense on the master / progress views. */}
+          {isAdmin && (sub === 'master' || sub === 'table') && (
             <>
               <button className="btn-outline" onClick={() => setShowImport(true)}>Upload / Import BOQ</button>
               {hasItems && (
@@ -102,8 +138,11 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
         </div>
       </div>
 
-      {locked && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">BOQ baseline is locked. Progress can still be logged; structural edits require unlocking (versioned).</div>}
+      {/* The master view states the lock rule itself, in its own words. */}
+      {locked && sub !== 'master' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">BOQ baseline is locked. Progress can still be logged; structural edits require unlocking (versioned).</div>}
 
+      {sub === 'master' && <BOQMasterView items={items} locked={locked} />}
+      {sub === 'cost' && <BOQCostView projectId={projectId} />}
       {sub === 'models' && <BOQEnhanceView projectId={projectId} canWrite={canWrite} />}
       {sub === 'analysis' && <BOQAnalysisView projectId={projectId} isAdmin={isAdmin} />}
       {sub === 'queue' && <ApprovalQueue projectId={projectId} canApprove={isSupervisor} />}

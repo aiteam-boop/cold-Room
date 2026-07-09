@@ -3,12 +3,40 @@ import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
 import { prisma } from '../lib/prisma';
 import { asyncHandler } from '../lib/errors';
-import { requireAuth, requireProjectMember, requirePage } from '../middleware/authMiddleware';
+import { requireAuth, requireProjectMember, requirePage, requireFinancialView } from '../middleware/authMiddleware';
 import { loadProjectProgress } from '../services/projectProgress';
+import { buildProcurementRegister, buildVendorOutstanding } from '../services/procurementRegister';
 import { audit } from '../lib/audit';
 
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
+
+// ── Procurement register (DPR PRD §3.2 G11 / transcript R14) ─────────────────
+// PO → GRN → Invoice → Payment in one payload, plus on-time delivery/payment.
+// Behind requireFinancialView: a register with every ₹ stripped would be a
+// misleading answer to "vendor koi paisa baaki hai kya?".
+
+// GET .../reports/procurement-register
+router.get(
+  '/procurement-register',
+  requireProjectMember,
+  requirePage('reports'),
+  requireFinancialView,
+  asyncHandler(async (req, res) => {
+    res.json(await buildProcurementRegister(req.params.projectId));
+  }),
+);
+
+// GET .../reports/vendor-outstanding
+router.get(
+  '/vendor-outstanding',
+  requireProjectMember,
+  requirePage('reports'),
+  requireFinancialView,
+  asyncHandler(async (req, res) => {
+    res.json({ vendors: await buildVendorOutstanding(req.params.projectId) });
+  }),
+);
 
 function fmtDate(d: Date | string | null | undefined): string {
   if (!d) return '—';

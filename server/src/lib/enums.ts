@@ -35,6 +35,54 @@ export type DrawingStatus = (typeof DRAWING_STATUSES)[number];
 // Per-project roles that can never modify data (read-only).
 export const READ_ONLY_ROLES: ProjectRole[] = ['CLIENT', 'MANAGEMENT'];
 
+// ── Vendor master (Sprint PRD §5) ────────────────────────────────────────────
+export const VENDOR_TYPES = ['MANUFACTURER', 'TRADER', 'CONTRACTOR', 'SERVICE_PROVIDER'] as const;
+export type VendorType = (typeof VENDOR_TYPES)[number];
+
+// The 9 BOQ categories a vendor may supply.
+export const BOQ_CATEGORIES = [
+  'PUF Panels', 'Refrigeration Units', 'Refrigerant Piping', 'Insulated Doors',
+  'Air Curtains', 'MS Structure', 'Drain Piping', 'Electrical', 'Other',
+] as const;
+
+// Work categories, shown only when vendorType = CONTRACTOR.
+export const WORK_CATEGORIES = [
+  'Panel Erection', 'Refrigeration Installation', 'Electrical Works', 'Plumbing', 'Civil', 'Other',
+] as const;
+
+// KYC document kinds. A vendor's KYC is COMPLETE only with the first three.
+export const KYC_KINDS = [
+  'GST_CERTIFICATE', 'PAN_CARD', 'CANCELLED_CHEQUE',
+  'MSME_CERTIFICATE', 'INCORPORATION_CERTIFICATE', 'TRADE_LICENCE', 'OTHER',
+] as const;
+export type KycKind = (typeof KYC_KINDS)[number];
+
+export const KYC_KIND_LABELS: Record<KycKind, string> = {
+  GST_CERTIFICATE: 'GST Certificate',
+  PAN_CARD: 'PAN Card',
+  CANCELLED_CHEQUE: 'Cancelled Cheque',
+  MSME_CERTIFICATE: 'MSME Certificate',
+  INCORPORATION_CERTIFICATE: 'Incorporation Certificate',
+  TRADE_LICENCE: 'Trade Licence',
+  OTHER: 'Other Document',
+};
+
+/** The three documents that make a vendor's KYC COMPLETE. */
+export const KYC_REQUIRED_KINDS: KycKind[] = ['GST_CERTIFICATE', 'PAN_CARD', 'CANCELLED_CHEQUE'];
+
+export const CONTACT_AUTHORITY_LEVELS = ['Decision Maker', 'Technical', 'Commercial', 'Operations', 'Other'] as const;
+export const BANK_ACCOUNT_TYPES = ['Current', 'Savings'] as const;
+export const MAX_VENDOR_CONTACTS = 10;
+export const MAX_CONTACT_PHONES = 3;
+
+// ── Drawing approval checklist (Sprint PRD §2.2) ─────────────────────────────
+// The 4 standard drawings. Admins may add custom types ('Custom') — no limit.
+export const DRAWING_APPROVAL_TYPES = ['PUF_PANEL', 'REFRIGERATION', 'DOOR', 'ELECTRICAL', 'CUSTOM'] as const;
+export type DrawingApprovalType = (typeof DRAWING_APPROVAL_TYPES)[number];
+
+export const DRAWING_APPROVAL_STATUSES = ['PENDING', 'IN_REVIEW', 'APPROVED'] as const;
+export type DrawingApprovalStatus = (typeof DRAWING_APPROVAL_STATUSES)[number];
+
 export function isRole(v: unknown): v is Role {
   return typeof v === 'string' && (ROLES as readonly string[]).includes(v);
 }

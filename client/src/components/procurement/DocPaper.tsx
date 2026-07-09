@@ -14,6 +14,10 @@ const PAY = [
 
 const B = 'border-slate-400';
 
+// Struck-off clauses remain part of the document (Sprint PRD §8) — this only
+// drives the footnote that explains the crossed-out text.
+const struckCount = (d: any) => (d.termsSections || []).filter((s: any) => s.isStruckOff).length;
+
 // Common units of measure for line items. The line's existing value is merged
 // in at render time so custom / legacy units (e.g. "Ltr", "Nos.") are kept.
 const UOM_OPTIONS = [
@@ -154,6 +158,13 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           <div className="flex min-w-0 flex-1 flex-col items-center justify-center overflow-hidden px-2 pb-3 pt-1 text-center">
             <div className="text-[10px] leading-tight">Against Quotation:</div>
             <T value={d.againstQuotation} onChange={(x: string) => setD({ ...d, againstQuotation: x })} className="mb-1 w-full break-all text-center text-[10px] font-semibold" placeholder="—" />
+            {/* Mirrors the PDF, which prints the delivery commitment here. It is
+                edited on the Form tab, not on the document itself. */}
+            {d.promisedDeliveryDate && (
+              <div className="text-[10px] font-semibold leading-tight">
+                Delivery Date: {new Date(d.promisedDeliveryDate).toLocaleDateString('en-GB')}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -245,20 +256,46 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
         </div>
       </div>
 
-      {/* Terms & Conditions */}
+      {/* Terms & Conditions — struck-off clauses stay in the document, greyed and
+          crossed out, with a footnote. Only custom clauses can be deleted; locked
+          (legal/compliance) clauses can neither be edited nor struck off. */}
       <div className="mt-4 text-center text-[12px] font-bold text-slate-800">TERMS &amp; CONDITIONS</div>
       <div className={`mt-1 border ${B} p-3`}>
         <div className="space-y-2">
-          {(d.termsSections || []).map((s: any, i: number) => (
-            <div key={i}>
-              <div className="flex items-center gap-1">
-                <T value={s.title} onChange={(x: string) => { const t = [...d.termsSections]; t[i] = { ...t[i], title: x }; setD({ ...d, termsSections: t }); }} className="text-[11px] font-bold text-slate-800" />
-                {editable && <button className="text-[10px] text-slate-300 hover:text-red-500" onClick={() => setD({ ...d, termsSections: d.termsSections.filter((_: any, idx: number) => idx !== i) })}>✕</button>}
+          {(d.termsSections || []).map((s: any, i: number) => {
+            const struck = !!s.isStruckOff;
+            const patch = (p: any) => { const t = [...d.termsSections]; t[i] = { ...t[i], ...p }; setD({ ...d, termsSections: t }); };
+            return (
+              <div key={i} className={struck ? 'opacity-60' : ''}>
+                <div className="flex items-center gap-1">
+                  {/* Standard clause titles are read-only: the title is the clause's
+                      identity on save. Only the body text is editable. */}
+                  {s.isCustom ? (
+                    <T value={s.title} onChange={(x: string) => patch({ title: x })} className={`text-[11px] font-bold ${struck ? 'text-slate-500 line-through' : 'text-slate-800'}`} />
+                  ) : (
+                    <span className={`flex-1 text-[11px] font-bold ${struck ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{s.title}</span>
+                  )}
+                  {s.isLocked && <span className="shrink-0 text-[9px] text-slate-400" title="Legal / compliance clause — cannot be edited or struck off">🔒</span>}
+                  {editable && !s.isLocked && (
+                    <button className={`shrink-0 text-[9px] ${struck ? 'text-blue-600' : 'text-slate-400'} hover:underline`}
+                      onClick={() => patch({ isStruckOff: !struck, struckOffAt: struck ? null : new Date().toISOString() })}>
+                      {struck ? 'Undo Strike-off' : 'Strike off'}
+                    </button>
+                  )}
+                  {/* Standard clauses are never deletable — strike them off instead. */}
+                  {editable && s.isCustom && <button className="shrink-0 text-[10px] text-slate-300 hover:text-red-500" onClick={() => setD({ ...d, termsSections: d.termsSections.filter((_: any, idx: number) => idx !== i) })}>✕</button>}
+                </div>
+                <TA value={s.text} onChange={(x: string) => patch({ text: x })} rows={Math.min(Math.ceil((s.text || '').length / 95) + 1, 8)}
+                  className={`text-[10px] ${struck ? 'text-slate-400 line-through' : 'text-slate-600'}`} />
               </div>
-              <TA value={s.text} onChange={(x: string) => { const t = [...d.termsSections]; t[i] = { ...t[i], text: x }; setD({ ...d, termsSections: t }); }} rows={Math.min(Math.ceil((s.text || '').length / 95) + 1, 8)} className="text-[10px] text-slate-600" />
+            );
+          })}
+          {struckCount(d) > 0 && (
+            <div className="pt-1 text-[9px] italic text-slate-500">
+              * {struckCount(d)} clause{struckCount(d) > 1 ? 's' : ''} struck off by mutual agreement — appears crossed out in the PDF, not removed.
             </div>
-          ))}
-          {editable && <button className="text-[11px] text-navy hover:underline" onClick={() => setD({ ...d, termsSections: [...(d.termsSections || []), { title: 'New Section', text: '' }] })}>+ Add section</button>}
+          )}
+          {editable && <button className="text-[11px] text-navy hover:underline" onClick={() => setD({ ...d, termsSections: [...(d.termsSections || []), { title: 'New Section', text: '', isCustom: true, isLocked: false, isStruckOff: false, struckOffAt: null }] })}>+ Add section</button>}
         </div>
       </div>
 

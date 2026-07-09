@@ -5,8 +5,9 @@ import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
 import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import DocBuilder from './DocBuilder';
+import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
-interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; }
+interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; }
 
 export default function DocList({ projectId, role, type }: { projectId: string; role: string; type: 'PO' | 'WO' }) {
   const qc = useQueryClient();
@@ -42,7 +43,7 @@ export default function DocList({ projectId, role, type }: { projectId: string; 
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-              <tr><th className="px-4 py-2">{type} No.</th><th>Vendor</th><th>Date</th><th className="text-right">Basic</th><th className="text-right">Final</th><th>Status</th><th></th></tr>
+              <tr><th className="px-4 py-2">{type} No.</th><th>Vendor</th><th>Date</th><th className="text-right">Basic</th><th className="text-right">Final</th><th>Status</th><th>Delivery</th><th></th></tr>
             </thead>
             <tbody>
               {docs.map((d) => (
@@ -53,6 +54,7 @@ export default function DocList({ projectId, role, type }: { projectId: string; 
                   <td className="text-right">{money(d.basicAmount)}</td>
                   <td className="text-right font-medium">{money(d.finalAmount)}</td>
                   <td><span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}</span></td>
+                  <td><DeliveryPill delivery={d.delivery} /></td>
                   <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(d.id)}>Open →</button></td>
                 </tr>
               ))}

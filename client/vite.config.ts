@@ -9,6 +9,8 @@ export default defineConfig({
     // (e.g. the Spares-IMS project uses 5173). strictPort makes the URL stable.
     port: 5180,
     strictPort: true,
+    // Allow ngrok tunnels (any *.ngrok-free.dev subdomain) to reach the dev server.
+    allowedHosts: ['.ngrok-free.dev'],
     proxy: {
       '/api': { target: 'http://localhost:4100', changeOrigin: true },
       '/uploads': { target: 'http://localhost:4100', changeOrigin: true },

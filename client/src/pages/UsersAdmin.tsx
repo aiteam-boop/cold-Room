@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { Spinner } from '../components/ui';
+import ApprovalMatrix from '../components/ApprovalMatrix';
 import { SECTION_HINTS, APPROVAL_TYPE_LABELS, type PageKey, type SectionKey, type ApproverProfile } from '../lib/permissions';
 
 interface Meta {
@@ -76,7 +77,10 @@ export default function UsersAdmin() {
 
       <div className="flex items-center justify-between gap-2">
         <input className="input w-72" placeholder="Search users…" value={q} onChange={(e) => setQ(e.target.value)} type="search" name="user-search" autoComplete="off" />
-        <button className="btn-primary" onClick={openNew}>+ New user</button>
+        <div className="flex items-center gap-2">
+          <SyncSheetsButton />
+          <button className="btn-primary" onClick={openNew}>+ New user</button>
+        </div>
       </div>
 
       <div className="card overflow-hidden">
@@ -100,6 +104,9 @@ export default function UsersAdmin() {
 
       <ApprovalPermissions users={users} meta={meta} onSaved={() => qc.invalidateQueries({ queryKey: ['users'] })} />
 
+      {/* Who may approve is set above; at what value they must approve is set here. */}
+      <ApprovalMatrix />
+
       {editing && (
         <UserDrawer
           meta={meta}
@@ -110,6 +117,21 @@ export default function UsersAdmin() {
         />
       )}
     </div>
+  );
+}
+
+// Manual "Sync now" — pushes the whole database to the Google Sheet on demand
+// (live auto-sync also runs after every change).
+function SyncSheetsButton() {
+  const sync = useMutation({
+    mutationFn: async () => (await api.post('/sync-sheets/sheets')).data as { total: number },
+    onSuccess: (d) => alert(`Synced to Google Sheets — ${d.total} rows updated.`),
+    onError: (e) => alert(errMsg(e)),
+  });
+  return (
+    <button className="btn-outline" disabled={sync.isPending} onClick={() => sync.mutate()} title="Push all data to Google Sheets now">
+      {sync.isPending ? 'Syncing…' : '⟳ Sync Sheets'}
+    </button>
   );
 }
 

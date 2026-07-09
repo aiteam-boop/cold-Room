@@ -15,6 +15,8 @@ export interface User {
   active: boolean;
   pageAccess: Grants;
   sectionPerms: SectionPerms;
+  // Room-wise DPR is limited to specific owner accounts (server-computed).
+  dprOwner?: boolean;
 }
 
 interface AuthCtx {
@@ -25,6 +27,8 @@ interface AuthCtx {
   logout: () => void;
   // Permission helpers (ADMIN always passes; never hides financials).
   isAdmin: boolean;
+  // True only for the room-wise DPR owner account(s), not every admin.
+  isDprOwner: boolean;
   canView: (page: PageKey) => boolean;
   canEdit: (page: PageKey) => boolean;
   can: (flag: SectionKey) => boolean;
@@ -73,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     register,
     logout,
     isAdmin: user?.role === 'ADMIN',
+    isDprOwner: !!user?.dprOwner,
     canView: (page) => canViewPage(user, page),
     canEdit: (page) => canEditPage(user, page),
     can: (flag) => hasSection(user, flag),

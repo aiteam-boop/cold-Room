@@ -17,19 +17,34 @@ import DocList from '../components/procurement/DocList';
 import GRNView from '../components/procurement/GRNView';
 import VendorsView from '../components/procurement/VendorsView';
 import DocumentsView from '../components/procurement/DocumentsView';
+import ReportsTab from '../components/tabs/ReportsTab';
+import DprDashboard from '../components/dpr/DprDashboard';
+import DailyEntryTab from '../components/dpr/DailyEntryTab';
+import RoomSheet from '../components/dpr/RoomSheet';
+import RoomHandoverTab from '../components/dpr/RoomHandoverTab';
+import MilestonesTab from '../components/dpr/MilestonesTab';
+import type { DprSummary } from '../components/dpr/shared';
 
 export interface WorkspaceData {
   project: {
     id: string; name: string; clientName?: string; siteLocation?: string;
     status: string; startDate?: string; targetCompletionDate?: string; boqLocked: boolean;
+    officialStartDate?: string | null;
     members: { id: string; role: string; user: { id: string; name: string; email: string; role: string } }[];
   };
   progress: { completionPct: number; estimatedCompletionDate?: string | null };
   risk: { level: string; message: string };
   role: string;
+  drawingApproval: { allApproved: boolean; label: string; officialStartDate: string | null; worstDelayDays: number };
 }
 
-type Item = { key: PageKey; label: string; icon: keyof typeof ICONS };
+// `view` distinguishes the tabs that share one PageKey — the whole room-wise DPR
+// module is gated by the single 'dpr' grant but renders as one sidebar entry per
+// tab of the original workbook.
+type Item = { key: PageKey; label: string; icon: keyof typeof ICONS; view?: string };
+type Nav = { key: PageKey; view?: string };
+const navId = (n: Nav) => (n.view ? `${n.key}:${n.view}` : n.key);
+
 const MENU: { group: string; items: Item[] }[] = [
   { group: 'Project', items: [
     { key: 'dashboard', label: 'Dashboard', icon: 'grid' },
@@ -47,6 +62,9 @@ const MENU: { group: string; items: Item[] }[] = [
     { key: 'grn', label: '4. Goods Receipt (GRN)', icon: 'truck' },
     { key: 'pay', label: '5. Payment Pipeline', icon: 'wallet' },
     { key: 'documents', label: '6. Documents', icon: 'folder' },
+    // The registers above stay flat; the PO → GRN → invoice → payment drill-down
+    // and vendor outstanding live here (transcript R14/R15).
+    { key: 'reports', label: '7. Reports & Registers', icon: 'chart' },
   ] },
   { group: 'Team', items: [
     { key: 'team', label: 'Team', icon: 'people' },
@@ -55,12 +73,23 @@ const MENU: { group: string; items: Item[] }[] = [
 
 export default function ProjectWorkspace() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { canView } = useAuth();
-  const [active, setActive] = useState<PageKey | null>(null);
+  const { canView, isDprOwner } = useAuth();
+  // The room-wise DPR is the owner's personal cockpit — shown only to the DPR
+  // owner account(s), NOT every admin and never via the 'dpr' grant.
+  const showDpr = isDprOwner;
+  const [active, setActive] = useState<Nav | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project', projectId],
     queryFn: async () => (await api.get(`/projects/${projectId}`)).data as WorkspaceData,
+  });
+
+  // The DPR sidebar mirrors the workbook's tab strip, so it needs the real room
+  // list. Sheet mode is used purely to enumerate rooms — no numbers are read here.
+  const { data: dpr } = useQuery({
+    queryKey: ['dpr', projectId, 'sheet'],
+    queryFn: async () => (await api.get(`/projects/${projectId}/dpr/summary?mode=sheet`)).data as DprSummary,
+    enabled: showDpr,
   });
 
   if (isLoading) return <Spinner label="Loading project…" />;
@@ -69,12 +98,33 @@ export default function ProjectWorkspace() {
   const role = data.role;
   const p = data.project;
 
+  // One sidebar entry per tab of DPR_Cold_Storage_RoomWise.xlsx, in sheet order.
+  // Before the scope is seeded there are no rooms, so a single entry lands the
+  // user on the dashboard's set-up screen.
+  const dprItems: Item[] = showDpr
+    ? [
+        { key: 'dpr' as PageKey, label: 'Dashboard', icon: 'grid', view: 'dashboard' },
+        { key: 'dpr' as PageKey, label: 'Daily Entry', icon: 'pencil', view: 'entry' },
+        ...(dpr?.rooms ?? []).map((r): Item => ({ key: 'dpr' as PageKey, label: r.roomName, icon: 'room', view: `room:${r.zoneId}` })),
+        ...(dpr?.common ? [{ key: 'dpr' as PageKey, label: 'Common Works', icon: 'wrench' as const, view: `room:${dpr.common.zoneId}` }] : []),
+        ...(dpr?.rooms.length ? [
+          { key: 'dpr' as PageKey, label: 'Room Handover', icon: 'people' as const, view: 'handover' },
+          { key: 'dpr' as PageKey, label: 'Milestones', icon: 'flag' as const, view: 'milestones' },
+        ] : []),
+      ]
+    : [];
+
+  const fullMenu = [...MENU, ...(dprItems.length ? [{ group: 'DPR (Room-wise)', items: dprItems }] : [])];
+
   // Only the pages this user is granted (admins see all). Empty groups drop out.
-  const menu = MENU
+  const menu = fullMenu
     .map((g) => ({ group: g.group, items: g.items.filter((it) => canView(it.key)) }))
     .filter((g) => g.items.length > 0);
-  const visibleKeys = menu.flatMap((g) => g.items.map((it) => it.key));
-  const current: PageKey | null = active && visibleKeys.includes(active) ? active : visibleKeys[0] ?? null;
+  const allNavs: Nav[] = menu.flatMap((g) => g.items.map((it) => ({ key: it.key, view: it.view })));
+  const visibleIds = new Set(allNavs.map(navId));
+  const current: Nav | null = active && visibleIds.has(navId(active)) ? active : allNavs[0] ?? null;
+
+  const openRoom = (zoneId: string) => setActive({ key: 'dpr', view: `room:${zoneId}` });
 
   let daysLabel = '—';
   if (p.targetCompletionDate) {
@@ -82,20 +132,37 @@ export default function ProjectWorkspace() {
     daysLabel = days >= 0 ? `${days} days left` : `${Math.abs(days)} days over`;
   }
 
-  // Metric bar shown at the top of the content area.
+  // Metric bar shown at the top of the content area. The project's official
+  // start date is the drawing-approval date — before that it reads "pending"
+  // in orange, wherever the start date is shown (Sprint PRD §2.3).
+  const dwg = data.drawingApproval;
   const metricBar = (
-    <div className="card mb-5 flex flex-wrap items-center justify-between gap-4 px-5 py-3">
-      <div className="flex items-center gap-2">
-        <h1 className="text-base font-bold text-navy">{p.name}</h1>
-        <span className={`badge ${projectStatusPill(p.status)}`}>{p.status}</span>
-        <span className="hidden text-sm text-slate-400 sm:inline">· {p.siteLocation || '—'}</span>
+    <div className="card mb-5 space-y-2 px-5 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-2">
+          <h1 className="text-base font-bold text-navy">{p.name}</h1>
+          <span className={`badge ${projectStatusPill(p.status)}`}>{p.status}</span>
+          <span className="hidden text-sm text-slate-400 sm:inline">· {p.siteLocation || '—'}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-5 text-sm">
+          <Metric label="Completion" value={`${data.progress.completionPct}%`} />
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Project Start</div>
+            <div className={`mt-0.5 text-sm font-semibold ${dwg?.allApproved ? 'text-navy' : 'text-amber-600'}`}>
+              {dwg?.allApproved ? fmtDate(dwg.officialStartDate) : 'Pending drawings'}
+            </div>
+          </div>
+          <Metric label="Target" value={fmtDate(p.targetCompletionDate)} />
+          <Metric label="Timeline" value={daysLabel} />
+          <div><div className="text-xs uppercase tracking-wide text-slate-400">Delay Risk</div><span className={`badge mt-0.5 ${riskPill(data.risk.level)}`}>{titleize(data.risk.level)}</span></div>
+        </div>
       </div>
-      <div className="flex flex-wrap items-center gap-5 text-sm">
-        <Metric label="Completion" value={`${data.progress.completionPct}%`} />
-        <Metric label="Target" value={fmtDate(p.targetCompletionDate)} />
-        <Metric label="Timeline" value={daysLabel} />
-        <div><div className="text-xs uppercase tracking-wide text-slate-400">Delay Risk</div><span className={`badge mt-0.5 ${riskPill(data.risk.level)}`}>{titleize(data.risk.level)}</span></div>
-      </div>
+      {dwg && !dwg.allApproved && (
+        <div className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">
+          {dwg.label}
+          {dwg.worstDelayDays > 0 && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-red-700">Drawing Approval — {dwg.worstDelayDays} days delayed</span>}
+        </div>
+      )}
     </div>
   );
 
@@ -127,9 +194,10 @@ export default function ProjectWorkspace() {
               <div key={g.group} className="mb-1">
                 <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{g.group}</div>
                 {g.items.map((it) => {
-                  const on = current === it.key;
+                  const nav: Nav = { key: it.key, view: it.view };
+                  const on = current != null && navId(current) === navId(nav);
                   return (
-                    <button key={it.key} onClick={() => setActive(it.key)}
+                    <button key={navId(nav)} onClick={() => setActive(nav)}
                       className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition ${on ? 'bg-navy/10 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
                       <span className={on ? 'text-navy' : 'text-slate-400'}>{ICONS[it.icon]}</span>
                       {it.label}
@@ -145,18 +213,28 @@ export default function ProjectWorkspace() {
       {/* Main content */}
       <main className="min-w-0 flex-1">
         {metricBar}
-        {current === 'dashboard' && <DashboardTab projectId={projectId!} />}
-        {current === 'boq' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
-        {current === 'drawing' && <DrawingTab projectId={projectId!} role={role} />}
-        {current === 'gantt' && <GanttTab projectId={projectId!} />}
-        {current === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}
-        {current === 'pay' && <PaymentDashboard projectId={projectId!} role={role} />}
-        {current === 'po' && <DocList projectId={projectId!} role={role} type="PO" />}
-        {current === 'wo' && <DocList projectId={projectId!} role={role} type="WO" />}
-        {current === 'grn' && <GRNView projectId={projectId!} role={role} />}
-        {current === 'vendors' && <VendorsView projectId={projectId!} role={role} />}
-        {current === 'documents' && <DocumentsView projectId={projectId!} role={role} />}
-        {current === 'team' && <TeamTab projectId={projectId!} role={role} members={p.members} />}
+        {current.key === 'dashboard' && <DashboardTab projectId={projectId!} onOpenGantt={canView('gantt') ? () => setActive({ key: 'gantt' }) : undefined} />}
+        {current.key === 'boq' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
+        {current.key === 'drawing' && <DrawingTab projectId={projectId!} role={role} />}
+        {current.key === 'gantt' && <GanttTab projectId={projectId!} />}
+        {current.key === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}
+        {current.key === 'pay' && <PaymentDashboard projectId={projectId!} role={role} />}
+        {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" />}
+        {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" />}
+        {current.key === 'grn' && <GRNView projectId={projectId!} role={role} />}
+        {current.key === 'vendors' && <VendorsView projectId={projectId!} role={role} />}
+        {current.key === 'documents' && <DocumentsView projectId={projectId!} role={role} />}
+        {current.key === 'reports' && <ReportsTab projectId={projectId!} />}
+        {current.key === 'team' && <TeamTab projectId={projectId!} role={role} members={p.members} />}
+
+        {/* Room-wise DPR — one view per tab of the original workbook. */}
+        {current.key === 'dpr' && (!current.view || current.view === 'dashboard') && <DprDashboard projectId={projectId!} onOpenRoom={openRoom} />}
+        {current.key === 'dpr' && current.view === 'entry' && <DailyEntryTab projectId={projectId!} />}
+        {current.key === 'dpr' && current.view?.startsWith('room:') && (
+          <RoomSheet key={current.view} projectId={projectId!} zoneId={current.view.slice(5)} />
+        )}
+        {current.key === 'dpr' && current.view === 'handover' && <RoomHandoverTab projectId={projectId!} onOpenRoom={openRoom} />}
+        {current.key === 'dpr' && current.view === 'milestones' && <MilestonesTab projectId={projectId!} />}
       </main>
     </div>
   );
@@ -186,4 +264,8 @@ const ICONS = {
   users: I('M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75'),
   folder: I('M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'),
   people: I('M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75'),
+  chart: I('M3 3v18h18M7 15l3-4 3 3 5-7'),
+  pencil: I('M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z'),
+  room: I('M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6'),
+  flag: I('M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7'),
 };

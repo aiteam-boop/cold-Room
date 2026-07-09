@@ -7,6 +7,7 @@ import { docStatusPill, inr, titleize } from '../../lib/format';
 import DocPaper from './DocPaper';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
+import { DeliveryBadge, isoDay } from '../DeliveryBadge';
 
 // Common units of measure for Work Order line items. The line's existing value
 // is merged in at render time so custom / legacy units are never dropped.
@@ -36,6 +37,9 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const { data, isLoading } = useQuery({ queryKey: ['proc-doc', docId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs/${docId}`)).data as { doc: any; approval?: any } });
   const vendorsQ = useQuery({ queryKey: ['proc-vendors', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/vendors`)).data.vendors as any[] });
+  // Same queryKey + shape as BOQTab so the React Query cache isn't corrupted.
+  const boqQ = useQuery({ queryKey: ['boq', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/boq`)).data });
+  const boqItems: any[] = (boqQ.data?.items ?? []).filter((i: any) => !i.isGroup);
   useEffect(() => { if (data?.doc) setD(structuredClone(data.doc)); }, [data]);
 
   const save = useMutation({
@@ -43,13 +47,28 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       docNumber: d.docNumber,
       vendorId: d.vendorId, vendorName: d.vendorName, vendorAddress: d.vendorAddress, vendorGstin: d.vendorGstin, vendorContact: d.vendorContact, vendorPhone: d.vendorPhone,
       againstQuotation: d.againstQuotation, invoiceTo: d.invoiceTo, shipTo: d.shipTo, siteAddress: d.siteAddress,
+      promisedDeliveryDate: d.promisedDeliveryDate || null, requiredByDate: d.requiredByDate || null,
       gstEnabled: d.gstEnabled, gstPct: Number(d.gstPct),
       payAdvancePct: Number(d.payAdvancePct), payBeforeDeliveryPct: Number(d.payBeforeDeliveryPct), payRunningPct: Number(d.payRunningPct),
       payPostDeliveryPct: Number(d.payPostDeliveryPct), payPostCompletionPct: Number(d.payPostCompletionPct), payRetentionPct: Number(d.payRetentionPct),
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, leadTimeText: l.leadTimeText })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, leadTimeText: l.leadTimeText, boqItemId: l.boqItemId ?? null })),
     })).data.doc,
-    onSuccess: (doc) => { setD(structuredClone(doc)); setMsg({ ok: true, t: 'Saved.' }); qc.invalidateQueries({ queryKey: ['proc-doc', docId] }); },
+    onSuccess: (doc) => { setD(structuredClone(doc)); setMsg({ ok: true, t: 'Saved.' }); qc.invalidateQueries({ queryKey: ['proc-doc', docId] }); qc.invalidateQueries({ queryKey: ['boq-cost', projectId] }); },
+    onError: (e) => setMsg({ ok: false, t: errMsg(e) }),
+  });
+
+  // Backfill the delivery commitment on a document that was approved before this
+  // field existed. Its own endpoint, because PATCH refuses approved documents.
+  const setDelivery = useMutation({
+    mutationFn: async (body: { promisedDeliveryDate: string | null; requiredByDate: string | null }) =>
+      (await api.post(`/projects/${projectId}/procurement/docs/${docId}/delivery`, body)).data.doc,
+    onSuccess: (doc) => {
+      setD(structuredClone(doc));
+      setMsg({ ok: true, t: 'Delivery date recorded.' });
+      qc.invalidateQueries({ queryKey: ['proc-doc', docId] });
+      qc.invalidateQueries({ queryKey: ['proc-docs', projectId] });
+    },
     onError: (e) => setMsg({ ok: false, t: errMsg(e) }),
   });
 
@@ -80,6 +99,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p.key]) || 0), 0);
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+  const struck = (d.termsSections || []).filter((s: any) => s.isStruckOff).length;
 
   function setLine(i: number, patch: any) {
     setD((p: any) => { const li = [...p.lineItems]; li[i] = { ...li[i], ...patch }; return { ...p, lineItems: li }; });
@@ -90,6 +110,25 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   function selectVendor(id: string) {
     const v = vendorsQ.data?.find((x) => x.id === id);
     setD((p: any) => ({ ...p, vendorId: id || null, vendorName: v?.name ?? p.vendorName, vendorAddress: v?.address ?? p.vendorAddress, vendorGstin: v?.gstin ?? p.vendorGstin, vendorContact: v?.contactPerson ?? p.vendorContact, vendorPhone: v?.phones ?? p.vendorPhone }));
+  }
+
+  // Linking a PO line to a BOQ item is what makes the BOQ Cost view work
+  // (Sprint PRD §6.3). Description, unit and model are pulled from the BOQ so
+  // they match exactly — Amisha never re-types them.
+  async function selectBoqItem(i: number, boqItemId: string) {
+    if (!boqItemId) { setLine(i, { boqItemId: null }); return; }
+    const b = boqItems.find((x) => x.id === boqItemId);
+    if (!b) return;
+    const description = [b.description, b.makeModel].filter(Boolean).join('\n');
+    setLine(i, { boqItemId, description, uom: b.unit ?? null });
+
+    // Auto-suggest this vendor's current rate for the item; Amisha can override.
+    if (!d.vendorId) return;
+    try {
+      const r = await api.get(`/projects/${projectId}/procurement/vendors/${d.vendorId}/rate`, { params: { item: b.description } });
+      const rate = r.data?.suggested?.rate;
+      if (rate != null) setLine(i, { unitPrice: rate });
+    } catch { /* no rate chart / no permission — leave the price as typed */ }
   }
 
   return (
@@ -121,6 +160,8 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       {showChain && (
         <ChainBuilder
           docType={isWO ? 'WO' : 'PO'}
+          projectId={projectId}
+          amount={Number(d.finalAmount) || 0}
           busy={doAction.isPending || save.isPending}
           onClose={() => setShowChain(false)}
           onConfirm={async (chain) => { await save.mutateAsync(); doAction.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
@@ -156,6 +197,60 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
       </div>
 
+      {/* Delivery commitment — what the vendor is held to, and what "delivered on
+          time?" is measured against. The actual date comes from the GRN.
+          An approved document with no promised date may still be backfilled once;
+          an existing commitment is frozen with the rest of the signed document. */}
+      {(() => {
+        const canBackfill = locked && canEditDoc && !d.promisedDeliveryDate;
+        const dateEditable = editable || canBackfill;
+        return (
+          <div className="card p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold text-slate-600">Delivery Schedule</div>
+              {canBackfill && (
+                <button className="btn-primary text-xs" disabled={setDelivery.isPending || !d.promisedDeliveryDate}
+                  onClick={() => setDelivery.mutate({ promisedDeliveryDate: d.promisedDeliveryDate ?? null, requiredByDate: d.requiredByDate ?? null })}>
+                  {setDelivery.isPending ? 'Saving…' : 'Set delivery date'}
+                </button>
+              )}
+            </div>
+
+            {canBackfill && (
+              <div className="mb-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                This {d.type} was approved before a delivery date was recorded. You may set it once here — after that it is
+                frozen with the document, so on-time reporting cannot be rewritten after the fact.
+              </div>
+            )}
+            {locked && d.promisedDeliveryDate && (
+              <div className="mb-3 rounded bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                The delivery commitment is part of the approved document and cannot be changed. Raise a revised {d.type} to renegotiate it.
+              </div>
+            )}
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <label className="label">Promised Delivery Date <span className="text-slate-400">(vendor's commitment)</span></label>
+                <input type="date" className="input" disabled={!dateEditable}
+                  value={isoDay(d.promisedDeliveryDate)}
+                  onChange={(e) => setD({ ...d, promisedDeliveryDate: e.target.value || null })} />
+                <div className="mt-1 text-[11px] text-slate-400">Printed on the {isWO ? 'WO' : 'PO'}. Drives on-time delivery reporting.</div>
+              </div>
+              <div>
+                <label className="label">Required By <span className="text-slate-400">(site need date)</span></label>
+                <input type="date" className="input" disabled={!dateEditable}
+                  value={isoDay(d.requiredByDate)}
+                  onChange={(e) => setD({ ...d, requiredByDate: e.target.value || null })} />
+              </div>
+              <div>
+                <label className="label">Actual Delivery</label>
+                <DeliveryBadge delivery={d.delivery} />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Line items */}
       <div className="card p-4">
         <div className="mb-3 flex items-center justify-between"><div className="text-sm font-semibold text-slate-600">Line Items</div>
@@ -163,18 +258,27 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="w-8">#</th><th>Description</th>{isWO && <th className="w-20">UOM</th>}<th className="w-20">Qty</th><th className="w-28">Unit Price</th><th className="w-28 text-right">Total</th>{editable && <th></th>}</tr></thead>
+            <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="w-8">#</th><th>Description</th><th className="w-52">BOQ Item</th>{isWO && <th className="w-20">UOM</th>}<th className="w-20">Qty</th><th className="w-28">Unit Price</th><th className="w-28 text-right">Total</th>{editable && <th></th>}</tr></thead>
             <tbody>
               {d.lineItems.map((l: any, i: number) => l.isLeadTime ? (
                 <tr key={i} className="border-b border-slate-100 bg-purple-50/40">
                   <td className="py-1 text-center text-purple-500">⏱</td>
-                  <td colSpan={isWO ? 3 : 2}><input className="input bg-transparent text-purple-700" disabled={!editable} value={l.leadTimeText || ''} onChange={(e) => setLine(i, { leadTimeText: e.target.value })} placeholder="Lead Time e.g. 7 Days" /></td>
+                  <td colSpan={isWO ? 4 : 3}><input className="input bg-transparent text-purple-700" disabled={!editable} value={l.leadTimeText || ''} onChange={(e) => setLine(i, { leadTimeText: e.target.value })} placeholder="Lead Time e.g. 7 Days" /></td>
                   <td colSpan={2}></td>{editable && <td><button className="text-slate-300 hover:text-red-500" onClick={() => delLine(i)}>✕</button></td>}
                 </tr>
               ) : (
                 <tr key={i} className="border-b border-slate-100 align-top">
                   <td className="py-1 text-center text-slate-400">{i + 1}</td>
                   <td><textarea className="input min-h-[38px] text-xs" disabled={!editable} rows={Math.min((l.description || '').split('\n').length + 1, 6)} value={l.description} onChange={(e) => setLine(i, { description: e.target.value })} /></td>
+                  <td>
+                    {/* Optional but strongly recommended: without it this line's cost
+                        never reaches the BOQ Cost sheet and shows up as "unlinked". */}
+                    <select className="input text-xs" disabled={!editable} value={l.boqItemId || ''} onChange={(e) => selectBoqItem(i, e.target.value)}>
+                      <option value="">— not linked —</option>
+                      {boqItems.map((b) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
+                    </select>
+                    {!l.boqItemId && !!l.description?.trim() && <div className="mt-0.5 text-[10px] text-amber-600">Unlinked — cost won’t appear in BOQ Cost</div>}
+                  </td>
                   {isWO && <td>
                     <select className="input" disabled={!editable} value={l.uom || ''} onChange={(e) => setLine(i, { uom: e.target.value })}>
                       <option value="">—</option>
@@ -233,21 +337,49 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         )}
       </div>
 
-      {/* T&C */}
+      {/* T&C — strike-off, not delete (Sprint PRD §8). Standard clauses can be
+          edited and struck off; locked clauses are read-only; only custom clauses
+          Amisha added can be removed outright. */}
       <div className="card p-4">
-        <div className="mb-3 text-sm font-semibold text-slate-600">Terms & Conditions ({d.termsSections?.length || 0} sections — all editable)</div>
+        <div className="mb-1 text-sm font-semibold text-slate-600">
+          Terms &amp; Conditions ({d.termsSections?.length || 0} sections)
+          {struck > 0 && <span className="ml-2 badge bg-slate-100 text-slate-600">{struck} struck off</span>}
+        </div>
+        <p className="mb-3 text-xs text-slate-400">Struck-off clauses stay in the PDF, crossed out, with a footnote — they are never deleted.</p>
         <div className="space-y-2">
-          {(d.termsSections || []).map((s: any, i: number) => (
-            <details key={i} className="rounded-lg border border-slate-200">
-              <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-navy">{s.title}</summary>
-              <div className="space-y-2 px-3 pb-3">
-                <input className="input text-sm font-medium" disabled={!editable} value={s.title} onChange={(e) => { const t = [...d.termsSections]; t[i] = { ...t[i], title: e.target.value }; setD({ ...d, termsSections: t }); }} />
-                <textarea className="input text-xs" rows={3} disabled={!editable} value={s.text} onChange={(e) => { const t = [...d.termsSections]; t[i] = { ...t[i], text: e.target.value }; setD({ ...d, termsSections: t }); }} />
-                {editable && <button className="text-xs text-red-500 hover:underline" onClick={() => setD({ ...d, termsSections: d.termsSections.filter((_: any, idx: number) => idx !== i) })}>Delete section</button>}
-              </div>
-            </details>
-          ))}
-          {editable && <button className="btn-outline text-xs" onClick={() => setD({ ...d, termsSections: [...(d.termsSections || []), { title: 'New Section', text: '' }] })}>+ Add Section</button>}
+          {(d.termsSections || []).map((s: any, i: number) => {
+            const isStruck = !!s.isStruckOff;
+            const patch = (p: any) => { const t = [...d.termsSections]; t[i] = { ...t[i], ...p }; setD({ ...d, termsSections: t }); };
+            return (
+              <details key={i} className={`rounded-lg border ${isStruck ? 'border-slate-200 bg-slate-50' : 'border-slate-200'}`}>
+                <summary className={`cursor-pointer px-3 py-2 text-sm font-medium ${isStruck ? 'text-slate-400 line-through' : 'text-navy'}`}>
+                  {s.title}
+                  {s.isLocked && <span className="ml-2 text-xs" title="Legal / compliance — read only">🔒</span>}
+                  {s.isCustom && <span className="ml-2 badge bg-blue-50 text-blue-700">custom</span>}
+                </summary>
+                <div className="space-y-2 px-3 pb-3">
+                  {/* Only custom clauses may be retitled — a standard clause's title
+                      is its identity when the server validates the save. */}
+                  <input className="input text-sm font-medium" disabled={!editable || !s.isCustom} value={s.title} onChange={(e) => patch({ title: e.target.value })} />
+                  <textarea className={`input text-xs ${isStruck ? 'text-slate-400 line-through' : ''}`} rows={3} disabled={!editable || s.isLocked} value={s.text} onChange={(e) => patch({ text: e.target.value })} />
+                  {editable && (
+                    <div className="flex gap-3">
+                      {!s.isLocked && (
+                        <button type="button" className={`text-xs hover:underline ${isStruck ? 'text-blue-600' : 'text-amber-600'}`}
+                          onClick={() => patch({ isStruckOff: !isStruck, struckOffAt: isStruck ? null : new Date().toISOString() })}>
+                          {isStruck ? 'Undo Strike-off' : 'Strike off clause'}
+                        </button>
+                      )}
+                      {s.isCustom
+                        ? <button type="button" className="text-xs text-red-500 hover:underline" onClick={() => setD({ ...d, termsSections: d.termsSections.filter((_: any, idx: number) => idx !== i) })}>Delete section</button>
+                        : <span className="text-xs text-slate-400">Standard clause — cannot be deleted</span>}
+                    </div>
+                  )}
+                </div>
+              </details>
+            );
+          })}
+          {editable && <button type="button" className="btn-outline text-xs" onClick={() => setD({ ...d, termsSections: [...(d.termsSections || []), { title: 'New Section', text: '', isCustom: true, isLocked: false, isStruckOff: false, struckOffAt: null }] })}>+ Add Section</button>}
         </div>
       </div>
       </>}

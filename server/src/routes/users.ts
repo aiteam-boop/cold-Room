@@ -62,7 +62,9 @@ router.get(
       roles: ROLES,
       roleLabels: ROLE_LABELS,
       projectRoles: PROJECT_ROLES,
-      pages: PAGE_KEYS.map((key) => ({ key, label: PAGE_LABELS[key] })),
+      // 'dpr' is admin-only (enforced in routes/dpr.ts), so granting it to a
+      // non-admin does nothing — keep it out of the grantable-pages grid.
+      pages: PAGE_KEYS.filter((key) => key !== 'dpr').map((key) => ({ key, label: PAGE_LABELS[key] })),
       sections: SECTION_KEYS.map((key) => ({ key, label: SECTION_LABELS[key] })),
       approvalRoles: APPROVAL_ROLES,
       approvalTypes: APPROVAL_TYPES,

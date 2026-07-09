@@ -8,6 +8,7 @@ import { notifyUser } from './notify';
 import { sendEmail, approvalEmailHtml, appBaseUrl, isEmailEnabled } from './email';
 import { buildMilestones } from './procurement';
 import { parseApprover, approverHandlesType, type ApprovalType } from '../lib/permissions';
+import { isAdmin } from '../lib/enums';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
 
@@ -59,7 +60,9 @@ async function logAction(docType: DocType, docId: string, stepId: string | null,
 async function notifyStep(step: { id: string; docType: string; docId: string; approverId: string; approverEmail: string | null; approverName: string }, doc: DocSummary, kind: 'NEW' | 'REMINDER') {
   const title = kind === 'REMINDER' ? `Reminder: approval pending` : `Approval needed: ${doc.label} ${doc.number}`;
   const message = `${doc.label} ${doc.number} is awaiting your approval.`;
-  await notifyUser(step.approverId, { type: 'APPROVAL_PENDING', title, message, projectId: doc.projectId, relatedDocType: step.docType, relatedDocId: step.docId, link: doc.link });
+  // Link to the self-contained Approvals page — the approver may not be a member
+  // of the document's project, so we must NOT send them to the project workspace.
+  await notifyUser(step.approverId, { type: 'APPROVAL_PENDING', title, message, projectId: doc.projectId, relatedDocType: step.docType, relatedDocId: step.docId, link: '/approvals' });
   if (isEmailEnabled() && step.approverEmail) {
     const token = signApprovalToken({ stepId: step.id, docType: step.docType as DocType, docId: step.docId, approverId: step.approverId });
     const actionUrl = `${appBaseUrl()}/api/approvals/act?token=${encodeURIComponent(token)}`;
@@ -79,16 +82,19 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
 export async function buildChain(docType: DocType, docId: string, projectId: string, approverIds: string[], actor: ActorInfo) {
   if (!approverIds.length) throw new Error('Select at least one approver for the chain.');
   const type = approvalTypeFor(docType);
-  const users = await prisma.user.findMany({ where: { id: { in: approverIds }, active: true }, select: { id: true, name: true, email: true, approver: true } });
+  const users = await prisma.user.findMany({ where: { id: { in: approverIds }, active: true }, select: { id: true, name: true, email: true, approver: true, role: true } });
   const byId = new Map(users.map((u) => [u.id, u]));
 
   // Preserve the order the creator chose; validate each is a valid approver.
+  // Admins can approve any document type, so they are always allowed in a chain
+  // even without an explicit approver profile.
   const steps = approverIds.map((id, i) => {
     const u = byId.get(id);
     if (!u) throw new Error('An approver in the chain no longer exists.');
     const prof = parseApprover(u.approver);
-    if (!approverHandlesType(prof, type)) throw new Error(`${u.name} is not authorised to approve ${type}.`);
-    return { order: i + 1, approverId: u.id, approverName: u.name, approverEmail: u.email, approverRole: prof.approvalRole, status: i === 0 ? 'PENDING' : 'WAITING' };
+    const admin = isAdmin(u.role);
+    if (!admin && !approverHandlesType(prof, type)) throw new Error(`${u.name} is not authorised to approve ${type}.`);
+    return { order: i + 1, approverId: u.id, approverName: u.name, approverEmail: u.email, approverRole: prof.approvalRole || (admin ? 'Admin' : null), status: i === 0 ? 'PENDING' : 'WAITING' };
   });
 
   // Clear any prior chain (re-submit) then create fresh.

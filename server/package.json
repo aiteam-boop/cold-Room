@@ -12,6 +12,7 @@
     "prisma:push": "prisma db push",
     "migrate": "prisma migrate dev",
     "seed": "tsx prisma/seed.ts",
+    "backfill:sprint": "tsx prisma/backfillSprint.ts",
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts"
   },
   "dependencies": {

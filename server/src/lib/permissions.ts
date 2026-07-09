@@ -11,13 +11,18 @@
 import { isAdmin } from './enums';
 import type { Role } from './enums';
 
-// The 12 CRMCTS pages (matches the client sidebar + top-nav + the admin grid).
+// The CRMCTS pages (matches the client sidebar + top-nav + the admin grid).
 export const PAGE_KEYS = [
   'dashboard', 'boq', 'drawing',
   'gantt', 'changeorders',
   'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
   'machinemodels',
   'team', 'approvals', 'financials',
+  // Room-wise DPR — one grant covers all of its tabs (dashboard, daily entry,
+  // the 8 room sheets, handover tracker, milestones).
+  'dpr',
+  // Procurement register: PO → GRN → invoice → payment, vendor outstanding.
+  'reports',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -37,6 +42,8 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   team: 'Team',
   approvals: 'Approvals',
   financials: 'Financials',
+  dpr: 'DPR (Room-wise)',
+  reports: 'Reports & Registers',
 };
 
 // Curated section-level toggles (IMS "section permissions").

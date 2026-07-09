@@ -16,14 +16,21 @@ const diskStorage = multer.diskStorage({
 });
 
 // Dual storage: write to local disk (fast cache) AND persist the bytes into
-// MongoDB (GridFS) so files are durable across redeploys. Every existing route
+// MongoDB GridFS so files are durable across redeploys. Every existing route
 // keeps using `/uploads/<filename>` unchanged.
+//
+// Persistence is awaited (not fire-and-forget): a drawing that returns 201 but
+// never reached Atlas is exactly the silent data loss this whole change fixes.
+// GridFS handles any size, so the old 14MB skip is gone. If Atlas is briefly
+// unreachable the upload still succeeds on disk — the backfill script closes the
+// gap later — but the common path now guarantees the file is in Atlas.
 const dualStorage: StorageEngine = {
   _handleFile(req, file, cb) {
     diskStorage._handleFile(req, file, (err, info) => {
       if (err || !info) return cb(err);
-      // Persist to DB in the background; never block or fail the upload on it.
-      persistToDb(info.filename!, info.path!, file.mimetype).finally(() => cb(null, info));
+      persistToDb(info.filename!, info.path!, file.mimetype)
+        .then(() => cb(null, info))
+        .catch(() => cb(null, info)); // never fail the upload on a persistence hiccup
     });
   },
   _removeFile(req, file, cb) {

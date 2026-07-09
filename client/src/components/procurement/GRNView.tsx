@@ -9,15 +9,16 @@ import ChainBuilder from './ChainBuilder';
 
 export default function GRNView({ projectId }: { projectId: string; role: string }) {
   const qc = useQueryClient();
-  const { canEdit, can, hideFinancials } = useAuth();
+  const { canEdit, can } = useAuth();
   const canRaise = canEdit('grn');
   const canApprove = can('canApprove');
-  const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
   const [openId, setOpenId] = useState<string | null>(null);
   const [raising, setRaising] = useState(false);
 
   const grnsQ = useQuery({ queryKey: ['grns', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/grns`)).data.grns as any[] });
-  const posQ = useQuery({ queryKey: ['proc-docs-approved', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs`)).data.docs.filter((d: any) => d.status === 'APPROVED') });
+  // Dedicated endpoint gated on the GRN page (not pay/po/wo) and carrying no
+  // rupee values — a site engineer with only the GRN grant can still pick a PO.
+  const posQ = useQuery({ queryKey: ['grn-available-docs', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/grns/available-docs`)).data.docs as any[] });
 
   const raise = useMutation({
     mutationFn: (docId: string) => api.post(`/projects/${projectId}/procurement/grns`, { docId }),
@@ -41,9 +42,16 @@ export default function GRNView({ projectId }: { projectId: string; role: string
           <div className="mb-2 text-sm font-medium text-slate-600">Raise GRN against an approved PO/WO</div>
           {posQ.data?.length ? (
             <div className="space-y-2">
+              {/* No PO value here by design — the engineer sees items and quantities,
+                  never the commercial amount (Sprint PRD §7.2). */}
               {posQ.data.map((d: any) => (
                 <div key={d.id} className="flex items-center justify-between rounded-lg border border-slate-200 p-2 text-sm">
-                  <span>{d.docNumber} · {d.vendorName} · {money(d.finalAmount)}</span>
+                  <span>
+                    <span className="font-medium text-navy">{d.docNumber}</span>
+                    <span className="badge ml-1 bg-slate-100 text-slate-600">{d.type}</span>
+                    <span className="text-slate-500"> · {d.vendorName || '—'}</span>
+                    {d.grnCount > 0 && <span className="text-xs text-slate-400"> · {d.grnCount} GRN{d.grnCount > 1 ? 's' : ''} already raised</span>}
+                  </span>
                   <button className="btn-outline text-xs" onClick={() => raise.mutate(d.id)}>Select</button>
                 </div>
               ))}
@@ -66,7 +74,9 @@ export default function GRNView({ projectId }: { projectId: string; role: string
                   <td className="text-slate-600">{g.doc?.docNumber}</td>
                   <td className="text-slate-600">{g.vendorName}</td>
                   <td className="text-slate-500">{fmtDate(g.grnDate)}</td>
-                  <td className="text-right">{g.invoiceValue ? money(g.invoiceValue) : '—'}</td>
+                  {/* The invoice value is the engineer's own transcription of the
+                      vendor invoice, not PO pricing — everyone on the GRN sees it. */}
+                  <td className="text-right">{g.invoiceValue != null ? inr(g.invoiceValue) : '—'}</td>
                   <td><span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span></td>
                   <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(g.id)}>Open →</button></td>
                 </tr>
@@ -82,6 +92,9 @@ export default function GRNView({ projectId }: { projectId: string; role: string
 function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string; grnId: string; canApprove: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const { user } = useAuth();
+  // PO pricing arrives already nulled for anyone who may not see it, so a plain
+  // null-check is the whole rule here.
+  const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
   const [g, setG] = useState<any>(null);
   const [msg, setMsg] = useState('');
   const [showChain, setShowChain] = useState(false);
@@ -100,6 +113,11 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   const uploadInvoice = useMutation({
     mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/invoice`, fd); },
     onSuccess: () => { setMsg('Invoice uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  const uploadPhoto = useMutation({
+    mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/photo`, fd); },
+    onSuccess: () => { setMsg('Photo uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
     onError: (e) => setMsg(errMsg(e)),
   });
   const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }, onError: (e) => setMsg(errMsg(e)) });
@@ -136,6 +154,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       {showChain && (
         <ChainBuilder
           docType="GRN"
+          projectId={projectId}
+          // A GRN's value is the invoice it certifies.
+          amount={Number(g.invoiceValue) || 0}
           busy={act.isPending || save.isPending}
           onClose={() => setShowChain(false)}
           onConfirm={async (chain) => { await save.mutateAsync(); act.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
@@ -152,18 +173,41 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       </div>
 
       <div className="card p-4">
-        <div className="mb-3 text-sm font-semibold text-slate-600">Receipt Line Items</div>
+        <div className="mb-1 text-sm font-semibold text-slate-600">Receipt Line Items</div>
+        {/* PO unit price / total value are only rendered for approvers (Procurement,
+            Site Manager, Admin). `poVisible` comes straight from the server, which
+            also nulls the values themselves — the engineer never receives them. */}
+        <p className="mb-3 text-xs text-slate-400">
+          {g.poVisible ? 'PO pricing is shown because you can approve this GRN.' : 'PO unit prices and total value are not shown for your role.'}
+        </p>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-slate-400"><tr><th>Description</th><th className="w-20">PO Qty</th><th className="w-20">Prev Recd</th><th className="w-24">Receipt</th><th className="w-20">Defect</th><th className="w-20">Accepted</th></tr></thead>
+            {/* Quantity columns are centre-aligned — AA sir asked for this explicitly. */}
+            <thead className="text-xs uppercase text-slate-400">
+              <tr>
+                <th className="text-left">Description</th>
+                <th className="w-20 text-center">PO Qty</th>
+                <th className="w-24 text-center">Prev Recd</th>
+                <th className="w-24 text-center">Remaining</th>
+                <th className="w-24 text-center">Receipt</th>
+                <th className="w-20 text-center">Defect</th>
+                <th className="w-20 text-center">Accepted</th>
+                {g.poVisible && <th className="w-24 text-right">PO Unit Price</th>}
+                {g.poVisible && <th className="w-24 text-right">PO Total</th>}
+              </tr>
+            </thead>
             <tbody>
               {g.lineItems.map((l: any, i: number) => (
                 <tr key={l.id} className="border-b border-slate-100">
                   <td className="py-1 text-xs">{l.description}</td>
-                  <td>{l.poQty}</td><td>{l.previouslyReceivedQty}</td>
-                  <td><input className="input" type="number" disabled={!editable} value={l.receiptQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], receiptQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
-                  <td><input className="input" type="number" disabled={!editable} value={l.defectQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], defectQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
-                  <td className="font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                  <td className="text-center">{l.poQty}</td>
+                  <td className="text-center">{l.previouslyReceivedQty}</td>
+                  <td className="text-center text-slate-500">{l.remainingToReceive ?? Math.max(l.poQty - l.previouslyReceivedQty, 0)}</td>
+                  <td><input className="input text-center" type="number" disabled={!editable} value={l.receiptQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], receiptQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
+                  <td><input className="input text-center" type="number" disabled={!editable} value={l.defectQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], defectQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
+                  <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                  {g.poVisible && <td className="text-right">{money(l.poUnitPrice)}</td>}
+                  {g.poVisible && <td className="text-right">{money(l.poTotalPrice)}</td>}
                 </tr>
               ))}
             </tbody>
@@ -172,13 +216,15 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       </div>
 
       <div className="card p-4">
-        <div className="mb-3 text-sm font-semibold text-slate-600">Invoice (mandatory before submit)</div>
+        <div className="mb-1 text-sm font-semibold text-slate-600">Invoice (mandatory before submit)</div>
+        <p className="mb-3 text-xs text-slate-400">Enter the value from the vendor's actual tax invoice — an invoice may cover only part of the PO. This is what flows into the payment pipeline as “Amount Invoiced”.</p>
         <div className="grid gap-3 sm:grid-cols-2">
           <G label="Invoice Number *" v={g.invoiceNumber} on={(x) => setG({ ...g, invoiceNumber: x })} ed={editable} />
           <div><label className="label">Invoice Date *</label><input className="input" type="date" disabled={!editable} value={g.invoiceDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, invoiceDate: e.target.value })} /></div>
           <G label="Invoice Value (INR) *" v={g.invoiceValue} on={(x) => setG({ ...g, invoiceValue: x })} ed={editable} />
           <G label="E-Way Bill Number" v={g.ewayBillNumber} on={(x) => setG({ ...g, ewayBillNumber: x })} ed={editable} />
-          <div><label className="label">Invoice PDF * {g.invoicePdfUrl && <span className="text-green-600">✓ uploaded</span>}</label><input className="input text-xs" type="file" accept=".pdf,image/*" disabled={!editable} onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} /></div>
+          <div><label className="label">Invoice PDF * {g.invoicePdfUrl && <a className="text-green-600 hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label><input className="input text-xs" type="file" accept=".pdf,image/*" disabled={!editable} onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} /></div>
+          <div><label className="label">Material Photo {g.photoUrl && <a className="text-green-600 hover:underline" href={g.photoUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label><input className="input text-xs" type="file" accept="image/*" disabled={!editable} onChange={(e) => e.target.files?.[0] && uploadPhoto.mutate(e.target.files[0])} /></div>
         </div>
       </div>
     </div>

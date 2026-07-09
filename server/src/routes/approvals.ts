@@ -4,6 +4,7 @@ import { asyncHandler } from '../lib/errors';
 import { requireAuth, requirePage } from '../middleware/authMiddleware';
 import { maskFinancials } from '../lib/financial';
 import { parseApprover } from '../lib/permissions';
+import { isAdmin } from '../lib/enums';
 import { verifyApprovalToken, recordDecision, finalizeApproval, markDocRejected, resolveActor } from '../services/approvalChain';
 
 const router = Router();
@@ -68,25 +69,79 @@ router.use(requireAuth);
 
 // GET /api/approvals/approvers — the approver registry (single source of truth
 // for building approval chains). Any authenticated user can read it so document
-// creators can pick a chain. Only users flagged canApprove are returned.
+// creators can pick a chain.
+//
+// Returned: everyone flagged canApprove, PLUS every ADMIN. Admins can approve any
+// document type ("Admins can approve anything — no explicit approver setup
+// needed") so they belong in the chain picker with types = ['ALL'], even though
+// their approver profile is empty. `isAdmin` lets the UI label them.
 router.get(
   '/approvers',
   asyncHandler(async (_req, res) => {
     const users = await prisma.user.findMany({
       where: { active: true },
       orderBy: { name: 'asc' },
-      select: { id: true, name: true, email: true, whatsapp: true, approver: true },
+      select: { id: true, name: true, email: true, whatsapp: true, approver: true, role: true },
     });
     const approvers = users
-      .map((u) => ({ user: u, p: parseApprover(u.approver) }))
-      .filter(({ p }) => p.canApprove)
-      .map(({ user, p }) => ({
+      .map((u) => ({ user: u, p: parseApprover(u.approver), admin: isAdmin(u.role) }))
+      .filter(({ p, admin }) => p.canApprove || admin)
+      .map(({ user, p, admin }) => ({
         id: user.id, name: user.name, email: user.email, whatsapp: user.whatsapp ?? '',
-        approvalRole: p.approvalRole, level: p.level, types: p.types,
+        // An admin who hasn't set up a profile still approves every type.
+        approvalRole: p.approvalRole || (admin ? 'Admin' : null),
+        level: p.level,
+        types: admin && !p.types.length ? ['ALL'] : p.types,
+        isAdmin: admin,
       }));
     res.json({ approvers });
   })
 );
+
+// GET /api/approvals/mine — documents (PO/WO/GRN) where the signed-in user is
+// the CURRENT pending approver. Admins see every pending item (chain steps +
+// legacy no-chain docs). Actionable directly from the Approvals page; needs no
+// project membership or page grant — being the approver is the authorisation.
+router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
+  const me = req.account!;
+  const admin = me.role === 'ADMIN';
+
+  const steps = await prisma.approvalStep.findMany({
+    where: { status: 'PENDING', ...(admin ? {} : { approverId: me.id }) },
+    orderBy: { createdAt: 'asc' },
+  });
+  const poIds = steps.filter((s) => s.docType !== 'GRN').map((s) => s.docId);
+  const grnIds = steps.filter((s) => s.docType === 'GRN').map((s) => s.docId);
+
+  const [docs, grns] = await Promise.all([
+    prisma.procurementDoc.findMany({ where: { id: { in: poIds } }, include: { project: { select: { name: true } } } }),
+    prisma.gRN.findMany({ where: { id: { in: grnIds } }, include: { project: { select: { name: true } } } }),
+  ]);
+  const docById = new Map(docs.map((d) => [d.id, d]));
+  const grnById = new Map(grns.map((g) => [g.id, g]));
+
+  const items = steps.map((s) => {
+    if (s.docType === 'GRN') {
+      const g = grnById.get(s.docId);
+      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl };
+    }
+    const d = docById.get(s.docId);
+    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole };
+  }).filter(Boolean) as any[];
+
+  // Admins also see legacy items that were submitted without an approval chain.
+  if (admin) {
+    const withChain = new Set(steps.map((s) => s.docId));
+    const [legacyDocs, legacyGrns] = await Promise.all([
+      prisma.procurementDoc.findMany({ where: { status: 'PENDING_APPROVAL', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
+      prisma.gRN.findMany({ where: { status: 'OPEN', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
+    ]);
+    for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true });
+    for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl });
+  }
+
+  res.json({ items: maskFinancials(items, req.account) });
+}));
 
 // GET /api/approvals/pending — all PO/WO pending approval across projects.
 router.get(

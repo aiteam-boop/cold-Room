@@ -7,6 +7,10 @@ export const PAGE_KEYS = [
   'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
   'machinemodels',
   'team', 'approvals', 'financials',
+  // Room-wise DPR — one grant covers all of its tabs.
+  'dpr',
+  // Procurement register: PO → GRN → invoice → payment, vendor outstanding.
+  'reports',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -26,6 +30,8 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   team: 'Team',
   approvals: 'Approvals',
   financials: 'Financials',
+  dpr: 'DPR (Room-wise)',
+  reports: 'Reports & Registers',
 };
 
 export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid'] as const;

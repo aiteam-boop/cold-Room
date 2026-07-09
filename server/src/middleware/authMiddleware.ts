@@ -2,8 +2,10 @@ import type { Request, Response, NextFunction } from 'express';
 import { verifyToken, JwtPayload } from '../lib/auth';
 import { prisma } from '../lib/prisma';
 import { forbidden, unauthorized } from '../lib/errors';
+import { verifyPathSignature } from '../lib/signedUrl';
 import type { Role, ProjectRole } from '../lib/enums';
 import { READ_ONLY_ROLES, isAdmin } from '../lib/enums';
+import { isDprOwner } from '../lib/dprAccess';
 import type { Account, PageKey, SectionKey } from '../lib/permissions';
 import {
   parseGrants, parseSections,
@@ -27,6 +29,23 @@ declare global {
 
 // Require a valid JWT AND an active account. Populates req.user + req.account.
 export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
+  // Shareable signed links (e.g. PDF URLs exported to Google Sheets) carry a
+  // path-bound ?sig=... instead of a bearer header, because a link clicked from
+  // an external app can't send Authorization. Honor it only for GET requests to
+  // a "/pdf" file endpoint, and only when the signature matches this exact path
+  // — so it unlocks that one document and grants no other capability. A valid
+  // signature can only be minted with JWT_SECRET, so it can't be forged.
+  const reqPath = req.originalUrl.split('?')[0];
+  if (
+    req.method === 'GET' &&
+    reqPath.endsWith('/pdf') &&
+    verifyPathSignature(reqPath, req.query.sig as string | undefined)
+  ) {
+    req.user = { sub: 'signed-link', email: '', role: 'ADMIN' as Role, name: 'Signed link' };
+    req.account = { id: 'signed-link', role: 'ADMIN' as Role, active: true, grants: {}, sections: {} };
+    return next();
+  }
+
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
     return next(unauthorized('Missing bearer token'));
@@ -60,6 +79,14 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
 export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
   if (!req.account) return next(unauthorized());
   if (!isAdmin(req.account.role)) return next(forbidden('Admin only'));
+  next();
+}
+
+// Require the caller to be a room-wise DPR owner (a specific email allowlist,
+// NOT every admin). See lib/dprAccess.ts.
+export function requireDprOwner(req: Request, _res: Response, next: NextFunction) {
+  if (!req.account) return next(unauthorized());
+  if (!isDprOwner(req.user?.email)) return next(forbidden('The room-wise DPR is restricted to its owner.'));
   next();
 }
 

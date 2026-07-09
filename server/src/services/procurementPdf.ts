@@ -1,7 +1,8 @@
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
-import { COMPANY } from './procurement';
+import { COMPANY, strikeOffFootnote } from './procurement';
+import type { TermsSection } from './procurement';
 
 // pdfkit's built-in Helvetica lacks the ₹ glyph; use "Rs." for reliable output.
 const INR = (n: number | null | undefined) => (n == null ? '' : 'Rs. ' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 }));
@@ -19,10 +20,11 @@ interface DocForPdf {
   vendorName?: string | null; vendorAddress?: string | null; vendorGstin?: string | null;
   vendorContact?: string | null; vendorPhone?: string | null;
   againstQuotation?: string | null; invoiceTo?: string | null; shipTo?: string | null; siteAddress?: string | null;
+  promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
   lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; leadTimeText?: string | null }[];
-  termsSections: { title: string; text: string }[];
+  termsSections: TermsSection[];
 }
 
 const BORDER = '#000000';
@@ -84,7 +86,12 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   rect(L + leftW, y, rightW, cH); rect(L + leftW, y + cH, rightW, cH); rect(L + leftW, y + 2 * cH, rightW, blockH - 2 * cH);
   cell(L + leftW, y + cH / 2 - 5, rightW, `Date : ${doc.docDate.toLocaleDateString('en-GB')}`, { size: 8, align: 'center', font: 'Helvetica-Bold' });
   cell(L + leftW, y + cH + cH / 2 - 5, rightW, `${isWO ? 'WO' : 'PO'} No.: ${doc.docNumber}`, { size: 8, align: 'center', font: 'Helvetica-Bold' });
-  cell(L + leftW, y + 2 * cH + 3, rightW, `Against Quotation:\n${doc.againstQuotation || ''}`, { size: 7.5, align: 'center', font: 'Helvetica-Bold' });
+  // The delivery commitment travels on the document itself — it is the date the
+  // vendor is held to, and the one "delivered on time?" is measured against.
+  const deliveryLine = doc.promisedDeliveryDate
+    ? `\nDelivery Date: ${doc.promisedDeliveryDate.toLocaleDateString('en-GB')}`
+    : '';
+  cell(L + leftW, y + 2 * cH + 3, rightW, `Against Quotation:\n${doc.againstQuotation || ''}${deliveryLine}`, { size: 7.5, align: 'center', font: 'Helvetica-Bold' });
   y += blockH;
 
   // ── Invoice To | Ship To ──
@@ -158,17 +165,31 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   y += 6;
 
   // ── Terms & Conditions ──
+  // A struck-off clause stays in the document: grey text with a line through it,
+  // plus a footnote recording the mutual agreement (Sprint PRD §8.3).
   if (y + 30 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
   pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text('TERMS & CONDITIONS', L, y, { width: W, align: 'center' });
   y = pdf.y + 4;
   for (const s of doc.termsSections) {
+    const struck = s.isStruckOff === true;
     const titleHt = textH(s.title, W, 8.5);
     const bodyHt = textH(s.text, W, 8);
     if (y + titleHt + bodyHt + 8 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
-    pdf.font('Helvetica-Bold').fontSize(8.5).fillColor('#111').text(s.title, L, y, { width: W });
+    pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(struck ? '#888' : '#111')
+      .text(struck ? `${s.title} *` : s.title, L, y, { width: W, strike: struck });
     y = pdf.y;
-    pdf.font('Helvetica').fontSize(8).fillColor('#333').text(s.text, L, y, { width: W });
+    pdf.font('Helvetica').fontSize(8).fillColor(struck ? '#999' : '#333')
+      .text(s.text, L, y, { width: W, strike: struck });
     y = pdf.y + 6;
+  }
+
+  const footnote = strikeOffFootnote(doc.termsSections);
+  if (footnote) {
+    const ht = textH(footnote, W, 7.5);
+    if (y + ht + 6 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
+    pdf.font('Helvetica-Oblique').fontSize(7.5).fillColor('#666').text(footnote, L, y, { width: W });
+    y = pdf.y + 4;
+    pdf.font('Helvetica');
   }
 
   // ── Signature block (bordered, 2 cells) ──
@@ -222,14 +243,19 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   pdf.moveDown(0.5);
   const cols = [{ t: 'Sr', w: 22 }, { t: 'Description', w: 198 }, { t: 'UOM', w: 38 }, { t: 'PO Qty', w: 46 }, { t: 'Prev', w: 44 }, { t: 'Receipt', w: 48 }, { t: 'Defect', w: 44 }, { t: 'Accepted', w: 55 }];
   let yy = pdf.y;
+  // Quantity columns are centre-aligned — AA sir asked for this explicitly
+  // (Sprint PRD §7.3). Sr / Description stay left, everything numeric centres.
+  const align = (i: number): 'left' | 'center' => (i <= 1 ? 'left' : 'center');
   pdf.rect(L, yy, tableW, 15).fillAndStroke(HEAD_BG, BORDER); pdf.font('Helvetica-Bold').fontSize(7.5).fillColor('white');
-  let x = L; for (const c of cols) { pdf.text(c.t, x + 2, yy + 4, { width: c.w - 4 }); x += c.w; }
+  let x = L; cols.forEach((c, i) => { pdf.text(c.t, x + 2, yy + 4, { width: c.w - 4, align: align(i) }); x += c.w; });
   pdf.y = yy + 15; pdf.fillColor('#111').font('Helvetica').fontSize(7.5);
   for (const it of grn.lineItems) {
+    // Keep the row on the page — the GRN table used to run off the bottom.
+    if (pdf.y + 20 > pdf.page.height - 40) { pdf.addPage(); pdf.y = 40; }
     const yr = pdf.y + 2; x = L;
     const vals = [String(it.srNo), it.description, it.uom || '', String(it.poQty), String(it.previouslyReceivedQty), String(it.receiptQty), String(it.defectQty), String(it.acceptedQty)];
     const dH = pdf.heightOfString(it.description, { width: cols[1].w - 4 });
-    cols.forEach((c, i) => { pdf.text(vals[i], x + 2, yr, { width: c.w - 4, align: i <= 1 ? 'left' : 'right' }); x += c.w; });
+    cols.forEach((c, i) => { pdf.text(vals[i], x + 2, yr, { width: c.w - 4, align: align(i) }); x += c.w; });
     pdf.y = yr + Math.max(dH + 3, 13);
     pdf.lineWidth(0.5).moveTo(L, pdf.y).lineTo(R, pdf.y).stroke('#cbd5e1');
   }
