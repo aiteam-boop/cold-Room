@@ -20,11 +20,13 @@ const BAR: Record<string, { fill: string; track: string; label: (a: Activity) =>
 };
 const DAY = 86400000;
 
+interface GanttRemark { at: string; byId: string; byName: string; byEmail: string; text: string }
 interface Activity {
   id: string; activityName: string;
   plannedStartDate: string; plannedEndDate: string; plannedDurationDays: number; tatDays: number;
   actualStartDate: string | null; actualEndDate: string | null;
   completedAt: string | null; completionNotes: string | null;
+  remarks: GanttRemark[];
   responsibleDisplay: string | null; responsibleUserId: string | null; responsibleName: string | null;
   percentComplete: number; status: string; barState: string;
   delayDays: number; pastDueDays: number; overrunDays: number; actualDurationDays: number | null;
@@ -40,6 +42,7 @@ export default function GanttTab({ projectId }: { projectId: string }) {
   const [show, setShow] = useState(false);
   const [upOpen, setUpOpen] = useState(false);
   const [checkpoint, setCheckpoint] = useState<CheckpointTarget | null>(null);
+  const [remarkFor, setRemarkFor] = useState<Activity | null>(null);
   const [showDrawings, setShowDrawings] = useState(false);
 
   const { data, isLoading } = useQuery({ queryKey: ['gantt', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/gantt`)).data });
@@ -125,7 +128,7 @@ export default function GanttTab({ projectId }: { projectId: string }) {
                     <div key={i} className="absolute top-0 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium text-slate-500" style={{ left: `${t.pos}%` }}>{t.label}</div>
                   ))}
                 </div>
-                {canManage && <span className="w-44 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Checkpoints</span>}
+                <span className="w-44 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Checkpoints</span>
               </div>
 
               {activities.map((a) => {
@@ -167,24 +170,35 @@ export default function GanttTab({ projectId }: { projectId: string }) {
                       </div>
                     </div>
 
-                    {canManage && (
-                      <div className="flex w-44 shrink-0 items-center justify-end gap-1">
-                        {!a.actualStartDate && !a.actualEndDate && (
-                          <button className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-50" onClick={() => setCheckpoint({ activity: a, verb: 'start' })}>Mark Started</button>
-                        )}
-                        {!a.actualEndDate && (
-                          <button className="rounded border border-green-200 px-1.5 py-0.5 text-[10px] font-medium text-green-700 hover:bg-green-50" onClick={() => setCheckpoint({ activity: a, verb: 'complete' })}>Mark Complete</button>
-                        )}
-                        {a.actualEndDate && (
-                          <span className="text-[10px] text-green-700" title={a.completionNotes || undefined}>✓ {fmtDate(a.actualEndDate)}</span>
-                        )}
-                        {/* Completion is immutable — only an admin can undo it, with a logged reason. */}
-                        {a.actualEndDate && isAdmin && (
-                          <button className="text-[10px] text-slate-400 hover:text-amber-600" title="Revert completion (logged)" onClick={() => askRevert(a)}>↺</button>
-                        )}
-                        <button className="text-slate-300 opacity-0 hover:text-red-500 group-hover:opacity-100" onClick={() => del.mutate(a.id)}>✕</button>
-                      </div>
-                    )}
+                    <div className="flex w-44 shrink-0 items-center justify-end gap-1">
+                      {/* Remarks — a progress note log per activity. Anyone can read;
+                          editors add. Shows the count so a busy activity stands out. */}
+                      <button
+                        className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${a.remarks?.length ? 'border-blue-200 text-blue-700 hover:bg-blue-50' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                        title="Progress remarks — status & reason for delay"
+                        onClick={() => setRemarkFor(a)}
+                      >
+                        💬 {a.remarks?.length ? a.remarks.length : ''}Remark
+                      </button>
+                      {canManage && (
+                        <>
+                          {!a.actualStartDate && !a.actualEndDate && (
+                            <button className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-50" onClick={() => setCheckpoint({ activity: a, verb: 'start' })}>Mark Started</button>
+                          )}
+                          {!a.actualEndDate && (
+                            <button className="rounded border border-green-200 px-1.5 py-0.5 text-[10px] font-medium text-green-700 hover:bg-green-50" onClick={() => setCheckpoint({ activity: a, verb: 'complete' })}>Mark Complete</button>
+                          )}
+                          {a.actualEndDate && (
+                            <span className="text-[10px] text-green-700" title={a.completionNotes || undefined}>✓ {fmtDate(a.actualEndDate)}</span>
+                          )}
+                          {/* Completion is immutable — only an admin can undo it, with a logged reason. */}
+                          {a.actualEndDate && isAdmin && (
+                            <button className="text-[10px] text-slate-400 hover:text-amber-600" title="Revert completion (logged)" onClick={() => askRevert(a)}>↺</button>
+                          )}
+                          <button className="text-slate-300 opacity-0 hover:text-red-500 group-hover:opacity-100" onClick={() => del.mutate(a.id)}>✕</button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -205,6 +219,7 @@ export default function GanttTab({ projectId }: { projectId: string }) {
       {show && <ActivityModal projectId={projectId} onClose={() => setShow(false)} onDone={() => { setShow(false); refresh(); }} />}
       {upOpen && <UploadModal projectId={projectId} onClose={() => setUpOpen(false)} onDone={() => { setUpOpen(false); refresh(); }} />}
       {checkpoint && <CheckpointModal projectId={projectId} target={checkpoint} onClose={() => setCheckpoint(null)} onDone={() => { setCheckpoint(null); refresh(); }} />}
+      {remarkFor && <RemarkModal projectId={projectId} activity={remarkFor} canEdit={canManage} isAdmin={isAdmin} onClose={() => setRemarkFor(null)} onChanged={(a) => { setRemarkFor(a); refresh(); }} />}
     </div>
   );
 }
@@ -252,6 +267,89 @@ function CheckpointModal({ projectId, target, onClose, onDone }: { projectId: st
           <button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Saving…' : verb === 'start' ? 'Mark Started' : 'Mark Complete'}</button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+// Progress-remarks log for one activity: read the timestamped history, add a new
+// note (status / why it's late). Anyone sees the log; editors add; author or
+// admin can remove a mistaken entry.
+function RemarkModal({ projectId, activity, canEdit, isAdmin, onClose, onChanged }: {
+  projectId: string; activity: Activity; canEdit: boolean; isAdmin: boolean;
+  onClose: () => void; onChanged: (a: Activity) => void;
+}) {
+  const { user } = useAuth();
+  const [text, setText] = useState('');
+  const [err, setErr] = useState('');
+  const remarks = activity.remarks ?? [];
+
+  const add = useMutation({
+    mutationFn: () => api.post(`/projects/${projectId}/gantt/${activity.id}/remark`, { text: text.trim() }),
+    onSuccess: (r) => { setText(''); onChanged(r.data.activity as Activity); },
+    onError: (e) => setErr(errMsg(e)),
+  });
+  const remove = useMutation({
+    mutationFn: (index: number) => api.delete(`/projects/${projectId}/gantt/${activity.id}/remark/${index}`),
+    onSuccess: (r) => onChanged(r.data.activity as Activity),
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  return (
+    <Modal title="Activity Remarks" onClose={onClose} wide>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm">
+          <div className="font-medium text-slate-700">{activity.activityName}</div>
+          <div className="text-xs text-slate-500">
+            Planned {fmtDate(activity.plannedStartDate)} → {fmtDate(activity.plannedEndDate)}
+            {activity.actualStartDate ? ` · Started ${fmtDate(activity.actualStartDate)}` : ''}
+            {activity.delayDays > 0 ? ` · ${activity.delayDays}d late` : ''}
+          </div>
+        </div>
+
+        {/* History — newest first */}
+        {remarks.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center text-sm text-slate-400">No remarks yet.</div>
+        ) : (
+          <ol className="max-h-64 space-y-1.5 overflow-y-auto">
+            {remarks.map((_, i) => i).reverse().map((i) => {
+              const r = remarks[i];
+              const mine = r.byId === user?.id;
+              return (
+                <li key={i} className="rounded-lg border border-slate-200 px-3 py-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="whitespace-pre-wrap text-sm text-slate-700">{r.text}</div>
+                    {(mine || isAdmin) && (
+                      <button className="shrink-0 text-xs text-slate-300 hover:text-red-500" title="Remove this remark"
+                        onClick={() => { if (confirm('Remove this remark?')) remove.mutate(i); }}>✕</button>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-400">
+                    {r.byName}{r.byEmail ? ` · ${r.byEmail}` : ''} · {new Date(r.at).toLocaleString('en-GB')}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+        {canEdit ? (
+          <div>
+            <label className="label">Add a remark</label>
+            <textarea className="input text-sm" rows={2} value={text} onChange={(e) => setText(e.target.value)}
+              placeholder="e.g. Panels 60% installed, awaiting doors — running 3 days behind due to late delivery" />
+            <div className="mt-1 flex items-center justify-between">
+              <span className="text-[11px] text-slate-400">Saved with your name, email &amp; the date-time.</span>
+              <button className="btn-primary text-sm" disabled={add.isPending || text.trim().length === 0} onClick={() => { setErr(''); add.mutate(); }}>
+                {add.isPending ? 'Saving…' : 'Add remark'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-slate-400">You have view-only access to the timeline.</div>
+        )}
+      </div>
     </Modal>
   );
 }

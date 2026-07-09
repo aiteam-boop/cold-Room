@@ -119,8 +119,9 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
   const daysLabel = p.daysRemaining == null
     ? 'No target date'
     : overdue ? `${Math.abs(p.daysRemaining)} days overdue` : `${p.daysRemaining} days remaining`;
-  // Admins may fix up any detail left blank at creation, straight from the card.
-  const canEdit = user?.role === 'ADMIN';
+  // Only a global Admin or CEO may edit a project — no other role, straight from
+  // the card. (Enforced server-side too; this just hides the pencil.)
+  const canEdit = user?.role === 'ADMIN' || user?.role === 'CEO';
 
   return (
     <>

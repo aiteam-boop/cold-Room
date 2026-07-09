@@ -11,6 +11,8 @@ export const PAGE_KEYS = [
   'dpr',
   // Procurement register: PO → GRN → invoice → payment, vendor outstanding.
   'reports',
+  // FMS — vendor payment entry (finance).
+  'fms',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -32,6 +34,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   financials: 'Financials',
   dpr: 'DPR (Room-wise)',
   reports: 'Reports & Registers',
+  fms: 'FMS — Vendor Payments',
 };
 
 export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid'] as const;

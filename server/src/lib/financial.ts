@@ -17,6 +17,10 @@ const MONEY_FIELDS = new Set([
   'totalCost', 'advancePaid', 'balancePending',
   'totalOrderedCost', 'totalAdvancePaid', 'totalBalancePending',
   'grandTotalCost', 'grandAdvancePaid', 'grandBalancePending',
+  // BOQ Cost finance overlay (PRD v2 §5).
+  'poAmountOverride', 'effectivePoAmount', 'rateOverride', 'effectiveRate', 'qtyRateAmount',
+  // FMS vendor payment amounts (PRD v2 §4).
+  'fullAmount', 'amountToPay', 'balance',
   // Vendor rate chart (Sprint PRD §5.1.5).
   'rate',
 ]);

@@ -12,10 +12,12 @@ import { isAdmin } from '../lib/enums';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
 
-export type DocType = 'PO' | 'WO' | 'GRN';
+export type DocType = 'PO' | 'WO' | 'GRN' | 'PAYMENT';
 
-// PO/WO map to their own approval type; GRN is GRN.
+// PO/WO map to their own approval type; GRN is GRN; a vendor PAYMENT (FMS) maps
+// to the VENDOR_PAYMENT approver type.
 function approvalTypeFor(docType: DocType): ApprovalType {
+  if (docType === 'PAYMENT') return 'VENDOR_PAYMENT';
   return docType === 'GRN' ? 'GRN' : docType; // 'PO' | 'WO' | 'GRN'
 }
 
@@ -39,6 +41,11 @@ export function verifyApprovalToken(token: string): { stepId: string; docType: D
 // ── Document summary (generic across PO/WO/GRN) ──────────────────────────────
 interface DocSummary { number: string; projectId: string; createdById: string | null; label: string; link: string }
 async function docSummary(docType: DocType, docId: string): Promise<DocSummary | null> {
+  if (docType === 'PAYMENT') {
+    const p = await prisma.vendorPayment.findUnique({ where: { id: docId }, select: { paymentNumber: true, projectId: true, filledById: true } });
+    if (!p) return null;
+    return { number: p.paymentNumber, projectId: p.projectId, createdById: p.filledById, label: 'Payment', link: `/projects/${p.projectId}` };
+  }
   if (docType === 'GRN') {
     const g = await prisma.gRN.findUnique({ where: { id: docId }, select: { grnNumber: true, projectId: true, raisedById: true } });
     if (!g) return null;
@@ -161,6 +168,13 @@ export async function remindCurrent(docType: DocType, docId: string, actor: Acto
 // ── Finalize (document-specific side-effects on last approval) ───────────────
 // Called by the route/email endpoint when recordDecision returns 'COMPLETED'.
 export async function finalizeApproval(docType: DocType, docId: string, actorId: string) {
+  if (docType === 'PAYMENT') {
+    const p = await prisma.vendorPayment.findUnique({ where: { id: docId } });
+    if (!p) return;
+    await prisma.vendorPayment.update({ where: { id: p.id }, data: { status: 'APPROVED', approvedById: actorId, approvedAt: new Date() } });
+    if (p.filledById) await notifyUser(p.filledById, { type: 'PAYMENT_APPROVED', title: 'Payment approved', message: `${p.paymentNumber} has been fully approved.`, projectId: p.projectId, relatedDocType: 'VendorPayment', relatedDocId: p.id, link: `/projects/${p.projectId}` });
+    return;
+  }
   if (docType === 'GRN') {
     const grn = await prisma.gRN.findUnique({ where: { id: docId } });
     if (!grn) return;
@@ -183,7 +197,9 @@ export async function finalizeApproval(docType: DocType, docId: string, actorId:
 
 // Set the parent document's status after a rejection.
 export async function markDocRejected(docType: DocType, docId: string, reason: string) {
-  if (docType === 'GRN') {
+  if (docType === 'PAYMENT') {
+    await prisma.vendorPayment.update({ where: { id: docId }, data: { status: 'REJECTED', rejectionReason: reason } });
+  } else if (docType === 'GRN') {
     await prisma.gRN.update({ where: { id: docId }, data: { status: 'REJECTED', rejectionReason: reason } });
   } else {
     await prisma.procurementDoc.update({ where: { id: docId }, data: { status: 'DRAFT', rejectionReason: reason } });

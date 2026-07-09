@@ -23,6 +23,8 @@ export const PAGE_KEYS = [
   'dpr',
   // Procurement register: PO → GRN → invoice → payment, vendor outstanding.
   'reports',
+  // FMS — vendor payment entry (finance). Admin grants view/edit per user.
+  'fms',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -44,6 +46,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   financials: 'Financials',
   dpr: 'DPR (Room-wise)',
   reports: 'Reports & Registers',
+  fms: 'FMS — Vendor Payments',
 };
 
 // Curated section-level toggles (IMS "section permissions").

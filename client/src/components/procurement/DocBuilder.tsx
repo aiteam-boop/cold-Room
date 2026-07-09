@@ -34,6 +34,14 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [view, setView] = useState<'document' | 'form'>('document');
   const [showChain, setShowChain] = useState(false);
+  // Post-approval amendment: an approved doc is locked until the editor opts to
+  // amend it, which then requires a written reason on save.
+  const [amending, setAmending] = useState(false);
+  const [amendRemark, setAmendRemark] = useState('');
+  // After saving an amendment, offer to resubmit for fresh approval.
+  const [askResubmit, setAskResubmit] = useState(false);
+  // When true, the chain builder RE-submits the amended doc without re-saving.
+  const [resubmitMode, setResubmitMode] = useState(false);
 
   const { data, isLoading } = useQuery({ queryKey: ['proc-doc', docId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs/${docId}`)).data as { doc: any; approval?: any } });
   const vendorsQ = useQuery({ queryKey: ['proc-vendors', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/vendors`)).data.vendors as any[] });
@@ -53,8 +61,20 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       payPostDeliveryPct: Number(d.payPostDeliveryPct), payPostCompletionPct: Number(d.payPostCompletionPct), payRetentionPct: Number(d.payRetentionPct),
       payTriggers: d.payTriggers, termsSections: d.termsSections,
       lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, leadTimeText: l.leadTimeText, boqItemId: l.boqItemId ?? null })),
+      // Only sent when amending an approved doc — the server logs it and requires it.
+      ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,
-    onSuccess: (doc) => { setD(structuredClone(doc)); setMsg({ ok: true, t: 'Saved.' }); qc.invalidateQueries({ queryKey: ['proc-doc', docId] }); qc.invalidateQueries({ queryKey: ['boq-cost', projectId] }); },
+    onSuccess: (doc) => {
+      const wasAmending = amending;
+      setD(structuredClone(doc));
+      setMsg({ ok: true, t: wasAmending ? 'Amendment saved and logged.' : 'Saved.' });
+      setAmending(false); setAmendRemark('');
+      // After an amendment, ask whether to send it back through approval.
+      if (wasAmending) setAskResubmit(true);
+      qc.invalidateQueries({ queryKey: ['proc-doc', docId] });
+      qc.invalidateQueries({ queryKey: ['proc-docs', projectId] });
+      qc.invalidateQueries({ queryKey: ['boq-cost', projectId] });
+    },
     onError: (e) => setMsg({ ok: false, t: errMsg(e) }),
   });
 
@@ -82,8 +102,11 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const isWO = d.type === 'WO';
   const canEditDoc = canEdit(isWO ? 'wo' : 'po');
   const canApprove = can('canApprove');
-  const locked = d.status === 'APPROVED';
-  const editable = !locked && canEditDoc;
+  const approved = d.status === 'APPROVED';
+  // An approved doc is locked unless the editor has chosen to amend it.
+  const locked = approved && !amending;
+  const editable = (!approved || amending) && canEditDoc;
+  const amendments: { at: string; byName: string; byEmail: string; remark: string }[] = d.amendments ?? [];
 
   // Approval-chain state. Whose turn it is drives which action buttons show.
   const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
@@ -147,7 +170,21 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             <button onClick={() => setView('form')} className={`rounded px-2 py-1 font-medium ${view === 'form' ? 'bg-white text-navy shadow-sm' : 'text-slate-500'}`}>Form</button>
           </div>
           <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`)}>📄 PDF</button>
-          {editable && <button className="btn-primary text-sm" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save'}</button>}
+          {/* Approved docs are locked. "Amend" unlocks them, and Save then needs a reason. */}
+          {approved && canEditDoc && !amending && (
+            <button className="btn-outline text-sm" onClick={() => { setAmending(true); setView('form'); setMsg(null); }}>✎ Amend</button>
+          )}
+          {amending && <button className="btn-outline text-sm" onClick={() => { setAmending(false); setAmendRemark(''); setD(structuredClone(data!.doc)); }}>Cancel amend</button>}
+          {editable && (
+            <button
+              className="btn-primary text-sm"
+              disabled={save.isPending || (amending && amendRemark.trim().length < 3)}
+              title={amending && amendRemark.trim().length < 3 ? 'Enter a reason for the amendment first' : undefined}
+              onClick={() => save.mutate()}
+            >
+              {save.isPending ? 'Saving…' : amending ? 'Save amendment' : 'Save'}
+            </button>
+          )}
           {editable && d.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit for Approval</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => doAction.mutate({ verb: 'recall' })}>Recall</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && hasChain && <button className="btn-outline text-sm" disabled={doAction.isPending} onClick={() => doAction.mutate({ verb: 'remind' })}>Send Reminder</button>}
@@ -163,12 +200,73 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           projectId={projectId}
           amount={Number(d.finalAmount) || 0}
           busy={doAction.isPending || save.isPending}
-          onClose={() => setShowChain(false)}
-          onConfirm={async (chain) => { await save.mutateAsync(); doAction.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
+          onClose={() => { setShowChain(false); setResubmitMode(false); }}
+          onConfirm={async (chain) => {
+            // Resubmit after amendment: the amendment is already saved, so just
+            // submit. A fresh draft submit saves first, then submits.
+            if (!resubmitMode) await save.mutateAsync();
+            doAction.mutate({ verb: 'submit', body: { chain } });
+            setShowChain(false); setResubmitMode(false);
+          }}
         />
       )}
       {d.rejectionReason && d.status !== 'APPROVED' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">Last rejection: {d.rejectionReason}</div>}
-      {locked && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">This {d.type} is approved and locked. Every field was editable before approval (manual override on all).</div>}
+      {locked && (
+        <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
+          This {d.type} is approved and locked.{canEditDoc ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}
+        </div>
+      )}
+
+      {/* After an amendment: send back through approval, or keep as amended. */}
+      {askResubmit && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-navy/20 bg-navy/5 px-3 py-2.5">
+          <div className="text-sm text-navy">
+            Amendment saved. Do you want to <strong>resubmit this {d.type} for approval</strong>?
+          </div>
+          <div className="flex gap-2">
+            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); setResubmitMode(true); setShowChain(true); }}>
+              Resubmit for approval
+            </button>
+            <button className="btn-outline text-sm" onClick={() => setAskResubmit(false)}>
+              No, keep as amended
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Amendment reason input — shown while amending an approved doc. */}
+      {amending && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-amber-700">Reason for amending this approved {d.type} *</label>
+          <textarea
+            className="input text-sm"
+            rows={2}
+            value={amendRemark}
+            onChange={(e) => setAmendRemark(e.target.value)}
+            placeholder="e.g. Vendor revised the delivery quantity for line 1 after approval"
+          />
+          <div className="mt-1 text-[11px] text-amber-700">This reason and your name &amp; email are saved to the amendment history and shown to everyone.</div>
+        </div>
+      )}
+
+      {/* Post-approval amendment history — visible to everyone who opens the doc. */}
+      {amendments.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white">
+          <div className="border-b border-slate-100 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Amendments after approval ({amendments.length})
+          </div>
+          <ol className="divide-y divide-slate-100">
+            {[...amendments].reverse().map((a, i) => (
+              <li key={i} className="px-3 py-2 text-sm">
+                <div className="text-slate-700">{a.remark}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">
+                  {a.byName}{a.byEmail ? ` · ${a.byEmail}` : ''} · {new Date(a.at).toLocaleString('en-GB')}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
 
       {view === 'document' && <DocPaper d={d} setD={setD} editable={editable} vendors={vendorsQ.data ?? []} />}
 

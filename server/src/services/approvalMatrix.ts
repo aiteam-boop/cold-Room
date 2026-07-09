@@ -25,7 +25,7 @@
 
 import { prisma } from '../lib/prisma';
 
-export type MatrixDocType = 'PO' | 'WO' | 'GRN';
+export type MatrixDocType = 'PO' | 'WO' | 'GRN' | 'PAYMENT';
 
 export interface MatrixStep {
   approverId: string;

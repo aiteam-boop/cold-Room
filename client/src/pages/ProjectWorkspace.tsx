@@ -18,6 +18,7 @@ import GRNView from '../components/procurement/GRNView';
 import VendorsView from '../components/procurement/VendorsView';
 import DocumentsView from '../components/procurement/DocumentsView';
 import ReportsTab from '../components/tabs/ReportsTab';
+import FMSView from '../components/procurement/FMSView';
 import DprDashboard from '../components/dpr/DprDashboard';
 import DailyEntryTab from '../components/dpr/DailyEntryTab';
 import RoomSheet from '../components/dpr/RoomSheet';
@@ -61,10 +62,11 @@ const MENU: { group: string; items: Item[] }[] = [
     { key: 'wo', label: '3. Work Orders', icon: 'wrench' },
     { key: 'grn', label: '4. Goods Receipt (GRN)', icon: 'truck' },
     { key: 'pay', label: '5. Payment Pipeline', icon: 'wallet' },
-    { key: 'documents', label: '6. Documents', icon: 'folder' },
+    { key: 'fms', label: '6. FMS — Vendor Payments', icon: 'wallet' },
+    { key: 'documents', label: '7. Documents', icon: 'folder' },
     // The registers above stay flat; the PO → GRN → invoice → payment drill-down
     // and vendor outstanding live here (transcript R14/R15).
-    { key: 'reports', label: '7. Reports & Registers', icon: 'chart' },
+    { key: 'reports', label: '8. Reports & Registers', icon: 'chart' },
   ] },
   { group: 'Team', items: [
     { key: 'team', label: 'Team', icon: 'people' },
@@ -219,6 +221,7 @@ export default function ProjectWorkspace() {
         {current.key === 'gantt' && <GanttTab projectId={projectId!} />}
         {current.key === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}
         {current.key === 'pay' && <PaymentDashboard projectId={projectId!} role={role} />}
+        {current.key === 'fms' && <FMSView projectId={projectId!} />}
         {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" />}
         {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" />}
         {current.key === 'grn' && <GRNView projectId={projectId!} role={role} />}

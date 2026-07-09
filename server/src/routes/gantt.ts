@@ -76,8 +76,12 @@ export function derive(a: any, boqPct: number | null, now: Date) {
     percentComplete: Math.round((completed ? 100 : pct) * 10) / 10,
     status, barState, delayDays, pastDueDays, overrunDays, actualDurationDays,
     tatDays: a.plannedDurationDays,
+    remarks: parseRemarks(a.remarks),
   };
 }
+
+export interface GanttRemark { at: string; byId: string; byName: string; byEmail: string; text: string }
+const parseRemarks = (s: string | null | undefined): GanttRemark[] => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
 
 // Resolve responsibleUserId → a display name, falling back to the free-text
 // responsibleName the user typed.
@@ -293,6 +297,33 @@ router.post('/:id/revert', requireProjectMember, asyncHandler(async (req, res) =
   });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GANTT_REVERT_COMPLETE', entity: 'GanttActivity', entityId: a.id, details: { reason, revertedEndDate: a.actualEndDate } });
   res.json({ activity: act });
+}));
+
+// POST .../gantt/:id/remark — append a progress remark. Timestamped and
+// attributed; shown to everyone on the timeline so the status of an activity and
+// the reason it is late are on record.
+router.post('/:id/remark', requireProjectMember, requireEdit('gantt'), asyncHandler(async (req, res) => {
+  const { text } = z.object({ text: z.string().trim().min(1, 'Remark cannot be empty.').max(2000) }).parse(req.body);
+  const a = await loadActivity(req.params.id, req.params.projectId);
+  const list = parseRemarks(a.remarks);
+  list.push({ at: new Date().toISOString(), byId: req.user!.sub, byName: req.user!.name || 'User', byEmail: req.user!.email || '', text });
+  const act = await prisma.ganttActivity.update({ where: { id: a.id }, data: { remarks: JSON.stringify(list) } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GANTT_REMARK', entity: 'GanttActivity', entityId: a.id, details: { text } });
+  res.json({ activity: { ...act, remarks: list } });
+}));
+
+// DELETE a single remark by index (author or admin). Keeps the log honest —
+// nobody edits someone else's note, but a mistaken entry can be removed.
+router.delete('/:id/remark/:index', requireProjectMember, requireEdit('gantt'), asyncHandler(async (req, res) => {
+  const idx = Number(req.params.index);
+  const a = await loadActivity(req.params.id, req.params.projectId);
+  const list = parseRemarks(a.remarks);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) throw badRequest('Remark not found.');
+  const entry = list[idx];
+  if (entry.byId !== req.user!.sub && !isAdmin(req.account!.role)) throw forbidden('You can only remove your own remark.');
+  list.splice(idx, 1);
+  const act = await prisma.ganttActivity.update({ where: { id: a.id }, data: { remarks: JSON.stringify(list) } });
+  res.json({ activity: { ...act, remarks: list } });
 }));
 
 router.delete('/:id', requireProjectMember, requireEdit('gantt'), asyncHandler(async (req, res) => {

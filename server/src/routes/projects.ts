@@ -181,12 +181,17 @@ const updateSchema = createSchema.partial().extend({
   advanceReceiveDate: z.string().nullable().optional(),
 });
 
-// PATCH /api/projects/:projectId — ADMIN of project (FR-PM-04 status).
+// PATCH /api/projects/:projectId — editable only by a global ADMIN or CEO
+// account. No other role may change a project's core details, whatever their
+// per-project membership role. requireProjectMember is deliberately NOT used: a
+// CEO can edit any project without being a member of it, exactly like an admin.
 router.patch(
   '/:projectId',
-  requireProjectMember,
   asyncHandler(async (req, res) => {
-    if (req.projectRole !== 'ADMIN') throw forbidden('Only project admin can edit');
+    const canEditProject = isAdmin(req.account!.role) || req.account!.role === 'CEO';
+    if (!canEditProject) throw forbidden('Only an Admin or CEO can edit a project.');
+    const exists = await prisma.project.findUnique({ where: { id: req.params.projectId }, select: { id: true } });
+    if (!exists) throw notFound('Project not found');
     const body = updateSchema.parse(req.body);
     const project = await prisma.project.update({
       where: { id: req.params.projectId },

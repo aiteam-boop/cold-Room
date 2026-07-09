@@ -104,6 +104,8 @@ model Project {
   procDocuments ProcurementDocument[]
   ganttActivities GanttActivity[]
   changeOrders  ChangeOrder[]
+  vendorPayments VendorPayment[]
+  boqCostNotes  BOQCostAnnotation[]
 }
 
 // ── Module C: Procurement & PO Management ───────────────────────────────────
@@ -153,6 +155,7 @@ model Vendor {
   docs          ProcurementDoc[]
   kycDocs       ProcurementDocument[]
   itemLists     BOQItemList[]
+  payments      VendorPayment[]
 }
 
 model VendorSiteMapping {
@@ -231,12 +234,114 @@ model ProcurementDoc {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  // Post-approval amendment log. An approved PO/WO is locked, but real orders do
+  // get changed after signing — so an edit is allowed IF a reason is given, and
+  // every such edit is recorded here (who, their email, when, why) and shown to
+  // everyone on the document. JSON array of
+  // { at, byId, byName, byEmail, remark }. See routes/procurement.ts.
+  amendments    String?
+
   lineItems     ProcurementLineItem[]
   milestones    PaymentMilestone[]
   grns          GRN[]
+  vendorPayments VendorPayment[]
 
   @@index([projectId])
   @@index([type])
+}
+
+// ── FMS: Vendor Payment Entry (Procurement/Finance Flow PRD v2 §4) ───────────
+// Amisha records a payment to a vendor against a PO. The balance and the
+// PO's payment-terms % are computed/fetched (no phone calculator). The finance
+// approval chain (Supriya → Shivani → Alok → Tarakant → Sir, configurable) runs
+// through the shared ApprovalStep engine with docType = 'PAYMENT'.
+model VendorPayment {
+  id            String   @id @default(cuid()) @map("_id")
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  paymentNumber String   @unique          // FMS-0001
+
+  filledById    String                     // who is filling (auto)
+  department    String?  @default("Cold Room")
+
+  // Performa Invoice (NOT a tax-invoice number)
+  piNumber      String?
+  piDate        DateTime?
+
+  vendorId      String?
+  vendor        Vendor?  @relation(fields: [vendorId], references: [id])
+  vendorName    String?
+
+  // The PO this payment is against. Its PDF is the attachment (no ledger).
+  docId         String?
+  doc           ProcurementDoc? @relation(fields: [docId], references: [id])
+  poNumber      String?
+
+  // Amounts — full & amount-to-pay are MANUAL (billing is per actual qty +
+  // freight); balance is derived = full − paidSoFar.
+  paymentType   String   @default("ADVANCE")  // ADVANCE | BALANCE | FULL
+  fullAmount    Float    @default(0)
+  amountToPay   Float    @default(0)
+  balance       Float    @default(0)
+  // GST toggle: when true the amount is treated as 100% GST-inclusive.
+  gstInclusive  Boolean  @default(false)
+  gstPct        Float    @default(18)
+  // Snapshot of the PO's payment-terms % at the time of entry (advance/before/
+  // running/postDelivery/postCompletion/retention), fetched on PO select.
+  payTermsSnapshot String?
+
+  // Attachments
+  piPdfUrl      String?                    // performa invoice PDF
+  kycPdfUrl     String?                    // vendor KYC PDF (GST+PAN+cheque)
+
+  remark        String?                    // what the payment is regarding
+
+  // Lifecycle. status: DRAFT | PENDING_APPROVAL | APPROVED | REJECTED | PAID
+  status        String   @default("DRAFT")
+  approvedById  String?
+  approvedAt    DateTime?
+  rejectionReason String?
+  paidAt        DateTime?
+  paymentReference String?                 // UTR when marked paid
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([docId])
+}
+
+// ── BOQ & Cost editable overlay (PRD v2 §5) ─────────────────────────────────
+// The finance team edits a few actuals per (BOQ item × PO) directly on the cost
+// sheet, layered over the derived numbers: ordered qty (actual differs from PO),
+// overall PO amount (freight added later), the planned delivery per the Gantt,
+// the actual delivery date, and a "client invoicing done" tick. Kept separate so
+// the PO (the contract) is never mutated by cost-sheet edits — user decision:
+// "for now do the editable" as an overlay.
+model BOQCostAnnotation {
+  id                String   @id @default(cuid()) @map("_id")
+  projectId         String
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  boqItemId         String
+  // Optional PO scope — an annotation may pin to a specific PO for the row, or
+  // be the row-level override when there is a single PO.
+  docId             String?
+
+  orderedQtyOverride   Float?     // actual quantity ordered till now
+  poAmountOverride     Float?     // overall PO amount incl. freight etc.
+  rateOverride         Float?     // rate used for qty × rate (else PO unit price)
+  plannedDeliveryDate  DateTime?  // as per the Gantt / dispatch plan
+  actualDeliveryDate   DateTime?  // when it actually arrived
+  invoicingDone        Boolean  @default(false)  // finance ticked: client invoice raised
+  invoicingDoneById    String?
+  invoicingDoneAt      DateTime?
+  remarks              String?
+
+  updatedById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([projectId, boqItemId])
+  @@index([projectId])
 }
 
 model ProcurementLineItem {
@@ -322,6 +427,10 @@ model GRN {
   rejectionReason String?
   pdfUrl        String?
   createdAt     DateTime @default(now())
+
+  // Post-approval amendment log (see ProcurementDoc.amendments). JSON array of
+  // { at, byId, byName, byEmail, remark }.
+  amendments    String?
 
   lineItems   GRNLineItem[]
 
@@ -736,6 +845,10 @@ model GanttActivity {
   completedAt         DateTime?              // immutable stamp of WHEN completion was recorded
   completedById       String?                // who recorded it
   completionNotes     String?
+  // Running progress-remarks log for this activity: how far the work has reached
+  // after "Mark Started", why it is late, etc. Each entry is timestamped and
+  // attributed. JSON array of { at, byId, byName, byEmail, text }.
+  remarks             String?
   responsibleUserId   String?                // project user accountable for this activity
   responsibleName     String?                // free-text fallback (e.g. "Kingspan", "Site Engineer")
   percentComplete     Float    @default(0)

@@ -29,6 +29,7 @@ import changeOrderRoutes from './routes/changeOrders';
 import syncRoutes from './routes/sync';
 import dprRoutes from './routes/dpr';
 import approvalRuleRoutes from './routes/approvalRules';
+import fmsRoutes from './routes/fms';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -74,6 +75,7 @@ app.use('/api/projects/:projectId/boq-items', boqEnhanceRoutes);
 app.use('/api/projects/:projectId/gantt', ganttRoutes);
 app.use('/api/projects/:projectId/change-orders', changeOrderRoutes);
 app.use('/api/projects/:projectId/dpr', dprRoutes);
+app.use('/api/projects/:projectId/fms', fmsRoutes);
 
 // 404
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));

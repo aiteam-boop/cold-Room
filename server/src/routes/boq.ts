@@ -60,6 +60,75 @@ router.get(
   })
 );
 
+// GET .../boq/cost/po-options — the project's POs/WOs, for the "select a PO"
+// dropdown on a BOQ Cost row.
+router.get(
+  '/cost/po-options',
+  requireProjectMember,
+  requirePage('boq'),
+  asyncHandler(async (req, res) => {
+    const pos = await prisma.procurementDoc.findMany({
+      where: { projectId: req.params.projectId, type: { in: ['PO', 'WO'] } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, docNumber: true, vendorName: true, finalAmount: true, status: true },
+    });
+    res.json({ pos: maskFinancials(pos, req.account) });
+  })
+);
+
+// PATCH .../boq/cost/:boqItemId/annotation — the finance overlay on a BOQ Cost
+// row (PRD v2 §5): ordered-qty / PO-amount / rate overrides, planned & actual
+// delivery, and the "client invoicing done" tick. Upserted per (project, item).
+router.patch(
+  '/cost/:boqItemId/annotation',
+  requireProjectMember,
+  requireEdit('boq'),
+  asyncHandler(async (req, res) => {
+    const projectId = req.params.projectId;
+    const boqItemId = req.params.boqItemId;
+    const item = await prisma.bOQItem.findFirst({ where: { id: boqItemId, projectId }, select: { id: true } });
+    if (!item) throw notFound('BOQ item not found in this project');
+
+    const optNum = z.coerce.number().nullable().optional();
+    const optDate = z.string().min(1).nullable().optional();
+    const b = z.object({
+      docId: z.string().nullable().optional(),   // the PO picked directly on the row
+      orderedQtyOverride: optNum,
+      poAmountOverride: optNum,
+      rateOverride: optNum,
+      plannedDeliveryDate: optDate,
+      actualDeliveryDate: optDate,
+      invoicingDone: z.boolean().optional(),
+      remarks: z.string().max(2000).nullable().optional(),
+    }).parse(req.body);
+    // If a PO is picked, it must belong to this project.
+    if (b.docId) {
+      const po = await prisma.procurementDoc.findFirst({ where: { id: b.docId, projectId }, select: { id: true } });
+      if (!po) throw notFound('PO not found in this project');
+    }
+
+    const invoicingChanged = b.invoicingDone !== undefined;
+    const data = {
+      ...(b.docId !== undefined && { docId: b.docId }),
+      ...(b.orderedQtyOverride !== undefined && { orderedQtyOverride: b.orderedQtyOverride }),
+      ...(b.poAmountOverride !== undefined && { poAmountOverride: b.poAmountOverride }),
+      ...(b.rateOverride !== undefined && { rateOverride: b.rateOverride }),
+      ...(b.plannedDeliveryDate !== undefined && { plannedDeliveryDate: b.plannedDeliveryDate ? new Date(b.plannedDeliveryDate) : null }),
+      ...(b.actualDeliveryDate !== undefined && { actualDeliveryDate: b.actualDeliveryDate ? new Date(b.actualDeliveryDate) : null }),
+      ...(b.remarks !== undefined && { remarks: b.remarks }),
+      ...(invoicingChanged && { invoicingDone: b.invoicingDone, invoicingDoneById: b.invoicingDone ? req.user!.sub : null, invoicingDoneAt: b.invoicingDone ? new Date() : null }),
+      updatedById: req.user!.sub,
+    };
+    const ann = await prisma.bOQCostAnnotation.upsert({
+      where: { projectId_boqItemId: { projectId, boqItemId } },
+      create: { projectId, boqItemId, ...data },
+      update: data,
+    });
+    await audit({ userId: req.user!.sub, projectId, action: 'BOQ_COST_ANNOTATE', entity: 'BOQCostAnnotation', entityId: ann.id, details: b });
+    res.json({ annotation: ann });
+  })
+);
+
 // GET .../boq/cost/export — the same sheet as an .xlsx. Behind requireFinancialView
 // because an export with the money columns stripped would be misleading.
 router.get(
@@ -89,11 +158,16 @@ router.get(
         'Planned Qty': it.plannedQty, 'Installed Qty': it.installedQty,
         'PO Number(s)': it.pos.map((p) => p.docNumber).join(', '),
         'Vendor Name': [...new Set(it.pos.map((p) => p.vendorName).filter(Boolean))].join(', '),
-        'Qty Ordered': it.totalOrderedQty, 'Unit Price': '',
-        'Total Cost': it.totalOrderedCost, 'Advance Paid': it.totalAdvancePaid,
+        'Qty Ordered': it.effectiveOrderedQty, 'Rate': it.effectiveRate ?? '',
+        'PO Amount': it.effectivePoAmount, 'Qty × Rate': it.qtyRateAmount ?? '',
+        'Planned Delivery': it.plannedDeliveryDate ? it.plannedDeliveryDate.slice(0, 10) : '',
+        'Actual Delivery': it.actualDeliveryDate ? it.actualDeliveryDate.slice(0, 10) : '',
+        'Delivery Delay (d)': it.deliveryDelayDays ?? '',
+        'Advance Paid': it.totalAdvancePaid,
         'Balance Pending': it.totalBalancePending, 'Payment Status': it.paymentStatus,
         'Qty Received': it.totalReceivedQty, 'Receipt Status': it.receiptStatus,
         'GRN No(s).': approvedGrnNumbers(it.pos), 'Invoice No(s).': invoiceNumbers(it.pos),
+        'Invoicing Done': it.invoicingDone ? 'Yes' : '',
       });
       if (it.pos.length > 1) {
         for (const p of it.pos) {

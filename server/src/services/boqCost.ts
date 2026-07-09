@@ -76,6 +76,26 @@ export interface CostItemRow {
   receiptStatus: ReceiptStatus;
   totalReceivedQty: number;
   pos: CostPORow[];
+
+  // ── Finance overlay (PRD v2 §5) — editable, layered over the derived numbers ──
+  // `effective*` prefer the manual override when present, else the derived value.
+  orderedQtyOverride: number | null;
+  poAmountOverride: number | null;
+  rateOverride: number | null;
+  plannedDeliveryDate: string | null;
+  actualDeliveryDate: string | null;
+  deliveryDelayDays: number | null;   // actual − planned, when both are set
+  invoicingDone: boolean;
+  annotationRemarks: string | null;
+  effectiveOrderedQty: number;        // override ?? totalOrderedQty
+  effectivePoAmount: number;          // override ?? totalOrderedCost
+  effectiveRate: number | null;       // override ?? weighted PO unit price
+  qtyRateAmount: number | null;       // effectiveOrderedQty × effectiveRate — the billable figure
+  // A PO the finance user picked for this row directly (PRD v2 §5), even when no
+  // PO line is linked. Resolved to its number + vendor for display.
+  selectedDocId: string | null;
+  selectedPoNumber: string | null;
+  selectedVendorName: string | null;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -95,8 +115,10 @@ export function paymentStatus(total: number, paid: number, advance: number): Pay
   return r2(paid) === r2(advance) ? 'Advance' : 'Partial';
 }
 
+const dayDiff = (a: Date, b: Date) => Math.round((Date.UTC(a.getUTCFullYear(), a.getUTCMonth(), a.getUTCDate()) - Date.UTC(b.getUTCFullYear(), b.getUTCMonth(), b.getUTCDate())) / 86_400_000);
+
 export async function buildCostSheet(projectId: string) {
-  const [items, prog, lines, grns] = await Promise.all([
+  const [items, prog, lines, grns, annotations, allPos] = await Promise.all([
     prisma.bOQItem.findMany({ where: { projectId, isGroup: false }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
     loadProjectProgress(projectId),
     prisma.procurementLineItem.findMany({
@@ -124,7 +146,26 @@ export async function buildCostSheet(projectId: string) {
       },
       orderBy: { grnDate: 'asc' },
     }),
+    prisma.bOQCostAnnotation.findMany({ where: { projectId } }),
+    // PO/WO index so a directly-selected PO (annotation.docId) can surface its
+    // number, vendor, amounts, payments and GRNs on the BOQ row even when no PO
+    // line is linked to the BOQ item.
+    prisma.procurementDoc.findMany({
+      where: { projectId },
+      select: { id: true, docNumber: true, vendorName: true, type: true, basicAmount: true, finalAmount: true, status: true, milestones: { select: { fieldKey: true, status: true, inrAmount: true } } },
+    }),
   ]);
+  const annById = new Map(annotations.map((a) => [a.boqItemId, a]));
+  const poById = new Map(allPos.map((d) => [d.id, d]));
+
+  // Accepted qty received per PO (across its APPROVED GRNs) — used to fill the
+  // "Received" column for a manually-selected PO.
+  const receivedByDoc = new Map<string, number>();
+  for (const g of grns) {
+    if (g.status !== 'APPROVED') continue;
+    const acc = g.lineItems.reduce((s, l) => s + l.acceptedQty, 0);
+    receivedByDoc.set(g.docId, (receivedByDoc.get(g.docId) ?? 0) + acc);
+  }
 
   // Accepted qty per PO line, counting only APPROVED GRNs — a draft GRN is a
   // claim, not a receipt.
@@ -207,13 +248,52 @@ export async function buildCostSheet(projectId: string) {
     posByItem.set(l.boqItemId, list);
   }
 
+  // A manually-selected PO (no linked line) becomes a synthetic PO row so its
+  // payments + GRNs flow through the same rollup as a linked PO.
+  function syntheticPORow(docId: string): CostPORow | null {
+    const doc = poById.get(docId);
+    if (!doc) return null;
+    const paid = doc.milestones.filter((m) => m.status === 'PAID');
+    const amountPaid = r2(paid.reduce((s, m) => s + m.inrAmount, 0));
+    const advancePaid = r2(paid.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + m.inrAmount, 0));
+    const total = doc.basicAmount || doc.finalAmount || 0;
+    const qtyReceived = r2(receivedByDoc.get(docId) ?? 0);
+    const hasUnapprovedGrn = (grnsByDoc.get(docId) ?? []).some((g) => g.status !== 'APPROVED');
+    return {
+      poLineId: `sel-${docId}`, docId, docNumber: doc.docNumber, docType: doc.type, vendorName: doc.vendorName,
+      qtyOrdered: 0, unitPrice: 0, totalCost: total,
+      advancePaid, amountPaid, balancePending: r2(total - amountPaid),
+      paymentStatus: paymentStatus(total, amountPaid, advancePaid),
+      qtyReceived, receiptStatus: receiptStatus(0, qtyReceived, hasUnapprovedGrn),
+      grns: grnsByDoc.get(docId) ?? [],
+      deliveryStatus: 'UNKNOWN', deliveryDelayDays: null,
+    };
+  }
+
   const rows: CostItemRow[] = items.map((it) => {
-    const pos = posByItem.get(it.id) ?? [];
+    const ann = annById.get(it.id);
+    let pos = posByItem.get(it.id) ?? [];
+    // No linked PO line but a PO was picked on the row → attach it synthetically.
+    if (pos.length === 0 && ann?.docId) {
+      const syn = syntheticPORow(ann.docId);
+      if (syn) pos = [syn];
+    }
     const totalOrderedCost = r2(pos.reduce((s, p) => s + p.totalCost, 0));
     const totalAdvancePaid = r2(pos.reduce((s, p) => s + p.advancePaid, 0));
     const totalPaid = r2(pos.reduce((s, p) => s + p.amountPaid, 0));
     const totalOrderedQty = r2(pos.reduce((s, p) => s + p.qtyOrdered, 0));
     const totalReceivedQty = r2(pos.reduce((s, p) => s + p.qtyReceived, 0));
+
+    // Finance overlay (PRD v2 §5). Effective = manual override ?? derived.
+    const effectiveOrderedQty = ann?.orderedQtyOverride != null ? ann.orderedQtyOverride : totalOrderedQty;
+    const effectivePoAmount = ann?.poAmountOverride != null ? ann.poAmountOverride : totalOrderedCost;
+    // Rate: override, else the weighted PO unit price (cost ÷ qty).
+    const derivedRate = totalOrderedQty > 0 ? r2(totalOrderedCost / totalOrderedQty) : null;
+    const effectiveRate = ann?.rateOverride != null ? ann.rateOverride : derivedRate;
+    const qtyRateAmount = effectiveRate != null ? r2(effectiveOrderedQty * effectiveRate) : null;
+    const deliveryDelayDays = ann?.plannedDeliveryDate && ann?.actualDeliveryDate
+      ? dayDiff(ann.actualDeliveryDate, ann.plannedDeliveryDate) : null;
+
     return {
       id: it.id,
       srNo: it.srNo,
@@ -235,6 +315,22 @@ export async function buildCostSheet(projectId: string) {
       totalReceivedQty,
       receiptStatus: receiptStatus(totalOrderedQty, totalReceivedQty, pos.some((p) => p.receiptStatus === 'Awaiting GRN')),
       pos,
+      // Finance overlay
+      orderedQtyOverride: ann?.orderedQtyOverride ?? null,
+      poAmountOverride: ann?.poAmountOverride ?? null,
+      rateOverride: ann?.rateOverride ?? null,
+      plannedDeliveryDate: ann?.plannedDeliveryDate ? ann.plannedDeliveryDate.toISOString() : null,
+      actualDeliveryDate: ann?.actualDeliveryDate ? ann.actualDeliveryDate.toISOString() : null,
+      deliveryDelayDays,
+      invoicingDone: ann?.invoicingDone ?? false,
+      annotationRemarks: ann?.remarks ?? null,
+      effectiveOrderedQty,
+      effectivePoAmount,
+      effectiveRate,
+      qtyRateAmount,
+      selectedDocId: ann?.docId ?? null,
+      selectedPoNumber: ann?.docId ? (poById.get(ann.docId)?.docNumber ?? null) : null,
+      selectedVendorName: ann?.docId ? (poById.get(ann.docId)?.vendorName ?? null) : null,
     };
   });
 

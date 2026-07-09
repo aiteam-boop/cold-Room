@@ -31,7 +31,7 @@ const bandLabel = (min: number, max: number | null) =>
   min <= 0 && max != null ? `up to ${inr(max)}` : max == null ? `${inr(min)} and above` : `${inr(min)} – ${inr(max)}`;
 
 export default function ChainBuilder({ docType, projectId, amount, onConfirm, onClose, busy }: {
-  docType: 'PO' | 'WO' | 'GRN';
+  docType: 'PO' | 'WO' | 'GRN' | 'PAYMENT';
   projectId: string;
   /** The document's value — what the matrix bands are compared against. */
   amount: number;
@@ -65,7 +65,9 @@ export default function ChainBuilder({ docType, projectId, amount, onConfirm, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matrix]);
 
-  const eligible = (data ?? []).filter((a) => a.types.includes('ALL') || a.types.includes(docType));
+  // A vendor PAYMENT is approved by users whose approver type is VENDOR_PAYMENT.
+  const approvalType = docType === 'PAYMENT' ? 'VENDOR_PAYMENT' : docType;
+  const eligible = (data ?? []).filter((a) => a.types.includes('ALL') || a.types.includes(approvalType));
   const byId = new Map(eligible.map((a) => [a.id, a]));
   const bandOf = new Map(required.map((s) => [s.approverId, s.band]));
   const available = eligible.filter((a) => !chain.includes(a.id));

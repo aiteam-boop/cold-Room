@@ -89,6 +89,18 @@ router.post('/vendors', requireProjectMember, requireEdit('vendors'), asyncHandl
 
 const parseJson = (s: string | null | undefined, fallback: unknown) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
 
+// ── Post-approval amendment trail ───────────────────────────────────────────
+// An approved PO/WO/GRN is locked, but real documents get changed after signing.
+// We allow it only with a reason, and record every such edit — who, their email,
+// when, why — so anyone opening the document sees the full history.
+export interface Amendment { at: string; byId: string; byName: string; byEmail: string; remark: string }
+
+function appendAmendment(existingJson: string | null | undefined, actor: { id: string; name: string; email: string }, remark: string): string {
+  const list = parseJson(existingJson, []) as Amendment[];
+  list.push({ at: new Date().toISOString(), byId: actor.id, byName: actor.name, byEmail: actor.email, remark: remark.trim() });
+  return JSON.stringify(list);
+}
+
 function serializeDoc(d: any) {
   return {
     ...d,
@@ -97,6 +109,7 @@ function serializeDoc(d: any) {
     termsSections: normalizeTermsSections(parseJson(d.termsSections, [])),
     payTriggers: parseJson(d.payTriggers, {}),
     overrides: parseJson(d.overrides, {}),
+    amendments: parseJson(d.amendments, []),
     paymentTotalPct: paymentTotalPct(d),
     // Derived, never stored (G7). Only when the caller loaded the GRNs.
     ...(Array.isArray(d.grns) ? { delivery: deliveryInfo(d, d.grns) } : {}),
@@ -203,14 +216,26 @@ const updateSchema = z.object({
   })).optional(),
   overrides: z.any().optional(),
   lineItems: z.array(lineSchema).optional(),
+  // Required to edit an APPROVED document — the reason for the post-approval
+  // change. Ignored on a draft.
+  amendmentRemark: z.string().trim().max(2000).optional(),
 });
 
 // PATCH .../docs/:docId — edit any field (manual override everywhere).
+// An APPROVED document is normally locked, but may be amended WITH A REASON: the
+// edit then goes through and is logged in the amendment trail for everyone.
 router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES), requireFinancialView, asyncHandler(async (req, res) => {
   const existing = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!existing) throw notFound('Document not found');
-  if (existing.status === 'APPROVED') throw forbidden('Approved documents are locked.');
   const b = updateSchema.parse(req.body);
+
+  const isAmendment = existing.status === 'APPROVED';
+  if (isAmendment && (!b.amendmentRemark || b.amendmentRemark.trim().length < 3)) {
+    throw forbidden('This document is approved. To change it you must give a reason for the amendment (min 3 characters).');
+  }
+  const amendments = isAmendment
+    ? appendAmendment(existing.amendments, { id: req.user!.sub, name: req.user!.name || 'User', email: req.user!.email || '' }, b.amendmentRemark!)
+    : undefined;
 
   // docNumber is unique. If it changed, ensure no other doc already uses it.
   if (b.docNumber !== undefined && b.docNumber !== existing.docNumber) {
@@ -278,12 +303,16 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
       ...(b.payTriggers !== undefined && { payTriggers: JSON.stringify(b.payTriggers) }),
       ...(termsSections !== undefined && { termsSections: JSON.stringify(termsSections) }),
       ...(b.overrides !== undefined && { overrides: JSON.stringify(b.overrides) }),
+      ...(amendments !== undefined && { amendments }),
     },
     include: {
       lineItems: { orderBy: { sortOrder: 'asc' }, include: { boqItem: { select: { id: true, srNo: true, description: true, unit: true, makeModel: true } } } },
       milestones: { orderBy: { sortOrder: 'asc' } },
     },
   });
+  if (isAmendment) {
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_AMEND', entity: 'ProcurementDoc', entityId: doc.id, details: { remark: b.amendmentRemark } });
+  }
   res.json({ doc: serializeDoc(doc) });
 }));
 
@@ -330,10 +359,14 @@ router.post('/docs/:docId/delivery', requireProjectMember, requireAnyEdit(...DOC
 }));
 
 // POST .../docs/:docId/submit — submit for approval (validates 100% payment).
+// A DRAFT is submitted for the first time; an APPROVED doc that was amended can
+// be RE-submitted for fresh approval — it drops back to PENDING_APPROVAL and its
+// e-sign / approved stamps are cleared until it is approved again.
 router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHandler(async (req, res) => {
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound('Document not found');
-  if (doc.status === 'APPROVED') throw badRequest('Already approved');
+  if (doc.status === 'PENDING_APPROVAL') throw badRequest('Already awaiting approval.');
+  const isResubmit = doc.status === 'APPROVED';
   const total = paymentTotalPct(doc);
   if (Math.abs(total - 100) > 0.01) throw badRequest(`Payment terms must total 100% (currently ${total}%).`);
   let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
@@ -352,8 +385,16 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
     }
   }
 
-  const updated = await prisma.procurementDoc.update({ where: { id: doc.id }, data: { status: 'PENDING_APPROVAL' } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_SUBMIT', entity: 'ProcurementDoc', entityId: doc.id, details: { chainLength: chain.length } });
+  const updated = await prisma.procurementDoc.update({
+    where: { id: doc.id },
+    data: {
+      status: 'PENDING_APPROVAL',
+      // On re-submission after an amendment, clear the prior approval so the doc
+      // is genuinely "awaiting approval" again, not still showing as e-signed.
+      ...(isResubmit && { esignApplied: false, approvedById: null, approvedAt: null, lockedAt: null }),
+    },
+  });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: isResubmit ? 'PROC_DOC_RESUBMIT' : 'PROC_DOC_SUBMIT', entity: 'ProcurementDoc', entityId: doc.id, details: { chainLength: chain.length, resubmit: isResubmit } });
   if (chain.length) {
     // Build the sequential approval chain; only the first approver is notified.
     const actor = await resolveActor(req.account!.id);
@@ -526,6 +567,7 @@ function serializeGrn(grn: any, acc: Parameters<typeof maskFinancials>[1]) {
   const hide = shouldHideFinancials(acc);
   return {
     ...grn,
+    amendments: parseJson(grn.amendments, []),
     poVisible: !hide,
     ...(grn.doc && { doc: { ...grn.doc, finalAmount: hide ? null : grn.doc.finalAmount } }),
     ...(grn.lineItems && {
@@ -599,12 +641,22 @@ const grnUpdate = z.object({
   vehicleNumber: z.string().nullable().optional(), driverName: z.string().nullable().optional(), deliveryChallanNumber: z.string().nullable().optional(),
   invoiceNumber: z.string().nullable().optional(), invoiceDate: z.string().nullable().optional(), invoiceValue: z.coerce.number().nullable().optional(), ewayBillNumber: z.string().nullable().optional(),
   lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
+  // Required to amend an APPROVED GRN — the reason for the post-approval change.
+  amendmentRemark: z.string().trim().max(2000).optional(),
 });
 router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, include: { lineItems: true } });
   if (!grn) throw notFound();
-  if (grn.status === 'APPROVED') throw forbidden('GRN locked after approval');
   const b = grnUpdate.parse(req.body);
+
+  // An approved GRN may be amended, but only with a reason — logged for everyone.
+  const isAmendment = grn.status === 'APPROVED';
+  if (isAmendment && (!b.amendmentRemark || b.amendmentRemark.trim().length < 3)) {
+    throw forbidden('This GRN is approved. To change it you must give a reason for the amendment (min 3 characters).');
+  }
+  const amendments = isAmendment
+    ? appendAmendment(grn.amendments, { id: req.user!.sub, name: req.user!.name || 'User', email: req.user!.email || '' }, b.amendmentRemark!)
+    : undefined;
   if (b.lineItems) {
     for (const li of b.lineItems) {
       const existing = grn.lineItems.find((x) => x.id === li.id);
@@ -618,9 +670,13 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
     data: {
       ...(b.vehicleNumber !== undefined && { vehicleNumber: b.vehicleNumber }), ...(b.driverName !== undefined && { driverName: b.driverName }), ...(b.deliveryChallanNumber !== undefined && { deliveryChallanNumber: b.deliveryChallanNumber }),
       ...(b.invoiceNumber !== undefined && { invoiceNumber: b.invoiceNumber }), ...(b.invoiceDate !== undefined && { invoiceDate: b.invoiceDate ? new Date(b.invoiceDate) : null }), ...(b.invoiceValue !== undefined && { invoiceValue: b.invoiceValue }), ...(b.ewayBillNumber !== undefined && { ewayBillNumber: b.ewayBillNumber }),
+      ...(amendments !== undefined && { amendments }),
     },
     include: { lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } } },
   });
+  if (isAmendment) {
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_AMEND', entity: 'GRN', entityId: grn.id, details: { remark: b.amendmentRemark } });
+  }
   res.json({ grn: serializeGrn(updated, req.account) });
 }));
 
@@ -644,7 +700,9 @@ router.post('/grns/:grnId/photo', requireProjectMember, requireEdit('grn'), uplo
 router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
+  if (grn.status === 'OPEN') throw badRequest('Already awaiting approval.');
   if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
+  const isResubmit = grn.status === 'APPROVED';
   let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
 
   // A GRN's value is the invoice it certifies, so the same matrix applies (G6).
@@ -657,8 +715,11 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
     }
   }
 
-  const updated = await prisma.gRN.update({ where: { id: grn.id }, data: { status: 'OPEN' } });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id, details: { chainLength: chain.length } });
+  const updated = await prisma.gRN.update({
+    where: { id: grn.id },
+    data: { status: 'OPEN', ...(isResubmit && { approvedById: null, approvedAt: null }) },
+  });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: isResubmit ? 'GRN_RESUBMIT' : 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id, details: { chainLength: chain.length, resubmit: isResubmit } });
   if (chain.length) {
     const actor = await resolveActor(req.account!.id);
     await buildChain('GRN', grn.id, req.params.projectId, chain, actor);

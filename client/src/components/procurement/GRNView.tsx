@@ -91,13 +91,17 @@ export default function GRNView({ projectId }: { projectId: string; role: string
 
 function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string; grnId: string; canApprove: boolean; onClose: () => void }) {
   const qc = useQueryClient();
-  const { user } = useAuth();
+  const { user, canEdit } = useAuth();
   // PO pricing arrives already nulled for anyone who may not see it, so a plain
   // null-check is the whole rule here.
   const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
   const [g, setG] = useState<any>(null);
   const [msg, setMsg] = useState('');
   const [showChain, setShowChain] = useState(false);
+  const [amending, setAmending] = useState(false);
+  const [amendRemark, setAmendRemark] = useState('');
+  const [askResubmit, setAskResubmit] = useState(false);
+  const [resubmitMode, setResubmitMode] = useState(false);
   const grnQ = useQuery({ queryKey: ['grn', grnId], queryFn: async () => { const res = (await api.get(`/projects/${projectId}/procurement/grns/${grnId}`)).data; setG(structuredClone(res.grn)); return res as { grn: any; approval?: any }; } });
   const isLoading = grnQ.isLoading;
 
@@ -106,8 +110,16 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber,
       invoiceNumber: g.invoiceNumber, invoiceDate: g.invoiceDate?.slice?.(0, 10), invoiceValue: g.invoiceValue ? Number(g.invoiceValue) : undefined, ewayBillNumber: g.ewayBillNumber,
       lineItems: g.lineItems.map((l: any) => ({ id: l.id, receiptQty: Number(l.receiptQty), defectQty: Number(l.defectQty || 0), remarks: l.remarks })),
+      ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.grn,
-    onSuccess: (grn) => { setG(structuredClone(grn)); setMsg('Saved.'); },
+    onSuccess: (grn) => {
+      const wasAmending = amending;
+      setG(structuredClone(grn));
+      setMsg(wasAmending ? 'Amendment saved and logged.' : 'Saved.');
+      setAmending(false); setAmendRemark('');
+      if (wasAmending) setAskResubmit(true);
+      qc.invalidateQueries({ queryKey: ['grns', projectId] });
+    },
     onError: (e) => setMsg(errMsg(e)),
   });
   const uploadInvoice = useMutation({
@@ -123,7 +135,11 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }, onError: (e) => setMsg(errMsg(e)) });
 
   if (isLoading || !g) return <Spinner label="Loading GRN…" />;
-  const editable = g.status === 'DRAFT';
+  const approved = g.status === 'APPROVED';
+  const canEditGrn = canEdit('grn');
+  // Draft is freely editable; an approved GRN only while amending (with a reason).
+  const editable = g.status === 'DRAFT' || (approved && amending);
+  const amendments: { at: string; byName: string; byEmail: string; remark: string }[] = g.amendments ?? [];
 
   // Approval-chain state (mirrors DocBuilder).
   const approval = grnQ.data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
@@ -142,14 +158,56 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         <div className="flex items-center gap-2"><button className="btn-outline text-sm" onClick={onClose}>← Back</button><h2 className="text-lg font-bold text-navy">{g.grnNumber}</h2><span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span></div>
         <div className="flex gap-2">
           {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`)}>📄 PDF</button>}
-          {editable && <button className="btn-primary text-sm" onClick={() => save.mutate()}>Save</button>}
-          {editable && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit</button>}
+          {approved && canEditGrn && !amending && <button className="btn-outline text-sm" onClick={() => { setAmending(true); setMsg(''); }}>✎ Amend</button>}
+          {amending && <button className="btn-outline text-sm" onClick={() => { setAmending(false); setAmendRemark(''); setG(structuredClone(grnQ.data!.grn)); }}>Cancel amend</button>}
+          {editable && (
+            <button className="btn-primary text-sm" disabled={save.isPending || (amending && amendRemark.trim().length < 3)} onClick={() => save.mutate()}>
+              {amending ? 'Save amendment' : 'Save'}
+            </button>
+          )}
+          {g.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit</button>}
           {g.status === 'OPEN' && hasChain && <button className="btn-outline text-sm" disabled={act.isPending} onClick={() => act.mutate({ verb: 'remind' })}>Send Reminder</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
           {canAct && <button className="btn-danger text-sm" onClick={() => promptRemarks('reject')}>Reject</button>}
         </div>
       </div>
       {msg && <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{msg}</div>}
+
+      {approved && !amending && (
+        <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
+          This GRN is approved and locked.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}
+        </div>
+      )}
+      {askResubmit && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-navy/20 bg-navy/5 px-3 py-2.5">
+          <div className="text-sm text-navy">Amendment saved. Do you want to <strong>resubmit this GRN for approval</strong>?</div>
+          <div className="flex gap-2">
+            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); setResubmitMode(true); setShowChain(true); }}>Resubmit for approval</button>
+            <button className="btn-outline text-sm" onClick={() => setAskResubmit(false)}>No, keep as amended</button>
+          </div>
+        </div>
+      )}
+      {amending && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-amber-700">Reason for amending this approved GRN *</label>
+          <textarea className="input text-sm" rows={2} value={amendRemark} onChange={(e) => setAmendRemark(e.target.value)} placeholder="e.g. Corrected accepted quantity for line 2 after re-inspection" />
+          <div className="mt-1 text-[11px] text-amber-700">This reason and your name &amp; email are saved to the amendment history and shown to everyone.</div>
+        </div>
+      )}
+      {amendments.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white">
+          <div className="border-b border-slate-100 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Amendments after approval ({amendments.length})</div>
+          <ol className="divide-y divide-slate-100">
+            {[...amendments].reverse().map((a, i) => (
+              <li key={i} className="px-3 py-2 text-sm">
+                <div className="text-slate-700">{a.remark}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">{a.byName}{a.byEmail ? ` · ${a.byEmail}` : ''} · {new Date(a.at).toLocaleString('en-GB')}</div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
       {hasChain && <ApprovalTimeline approval={approval as any} />}
       {showChain && (
         <ChainBuilder
@@ -158,8 +216,12 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           // A GRN's value is the invoice it certifies.
           amount={Number(g.invoiceValue) || 0}
           busy={act.isPending || save.isPending}
-          onClose={() => setShowChain(false)}
-          onConfirm={async (chain) => { await save.mutateAsync(); act.mutate({ verb: 'submit', body: { chain } }); setShowChain(false); }}
+          onClose={() => { setShowChain(false); setResubmitMode(false); }}
+          onConfirm={async (chain) => {
+            if (!resubmitMode) await save.mutateAsync();
+            act.mutate({ verb: 'submit', body: { chain } });
+            setShowChain(false); setResubmitMode(false);
+          }}
         />
       )}
 

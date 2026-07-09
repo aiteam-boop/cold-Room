@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, downloadFile, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, KPI, Spinner } from '../ui';
-import { fmtNum, inr } from '../../lib/format';
+import { fmtDate, fmtNum, inr } from '../../lib/format';
 
 // The BOQ Cost sheet (Sprint PRD §6): the same BOQ rows as the Progress view,
 // with the financial columns layered on. Read-only — the money comes from
@@ -44,7 +44,14 @@ interface CostItem {
   linkedPOIds: string[]; totalOrderedQty: number;
   totalOrderedCost: number | null; totalAdvancePaid: number | null; totalBalancePending: number | null;
   paymentStatus: string; totalReceivedQty: number; receiptStatus: string; pos: CostPO[];
+  // Finance overlay (PRD v2 §5)
+  orderedQtyOverride: number | null; poAmountOverride: number | null; rateOverride: number | null;
+  plannedDeliveryDate: string | null; actualDeliveryDate: string | null; deliveryDelayDays: number | null;
+  invoicingDone: boolean; annotationRemarks: string | null;
+  effectiveOrderedQty: number; effectivePoAmount: number | null; effectiveRate: number | null; qtyRateAmount: number | null;
+  selectedDocId: string | null; selectedPoNumber: string | null; selectedVendorName: string | null;
 }
+interface POOption { id: string; docNumber: string; vendorName: string | null; finalAmount: number | null; status: string }
 interface CostSheet {
   items: CostItem[];
   unlinked: (CostPO & { description: string; uom: string | null; docStatus: string })[];
@@ -52,8 +59,12 @@ interface CostSheet {
 }
 
 export default function BOQCostView({ projectId }: { projectId: string }) {
-  const { hideFinancials } = useAuth();
+  const { hideFinancials, canEdit } = useAuth();
+  const qc = useQueryClient();
+  const editable = canEdit('boq');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [finance, setFinance] = useState<Record<string, boolean>>({});
+  const [collapsedCat, setCollapsedCat] = useState<Record<string, boolean>>({});
   const [onlyWithPO, setOnlyWithPO] = useState(false);
 
   // Server strips every ₹ for hideFinancials users; this renders a dash rather
@@ -65,10 +76,37 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
     queryFn: async () => (await api.get(`/projects/${projectId}/boq/cost`)).data as CostSheet,
   });
 
+  // POs for the "select a PO" dropdown in the finance editor.
+  const poOptions = useQuery({
+    queryKey: ['boq-cost-pos', projectId],
+    queryFn: async () => (await api.get(`/projects/${projectId}/boq/cost/po-options`)).data.pos as POOption[],
+    enabled: editable,
+  });
+
+  // Save a finance-overlay field on a BOQ Cost row (upserted server-side).
+  const annotate = useMutation({
+    mutationFn: async ({ boqItemId, body }: { boqItemId: string; body: Record<string, unknown> }) =>
+      api.patch(`/projects/${projectId}/boq/cost/${boqItemId}/annotation`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['boq-cost', projectId] }),
+  });
+
   const rows = useMemo(
     () => (data?.items ?? []).filter((i) => !onlyWithPO || i.pos.length > 0),
     [data, onlyWithPO]
   );
+
+  // Group by category, preserving order — the same collapsible grouping the
+  // BOQ & Progress view uses ("Refrigeration Units (5)", "Refrigerant Piping (6)").
+  const grouped = useMemo(() => {
+    const g: { category: string; items: CostItem[] }[] = [];
+    for (const it of rows) {
+      const cat = it.category || 'Uncategorized';
+      let grp = g.find((x) => x.category === cat);
+      if (!grp) { grp = { category: cat, items: [] }; g.push(grp); }
+      grp.items.push(it);
+    }
+    return g;
+  }, [rows]);
 
   if (isLoading || !data) return <Spinner label="Loading cost sheet…" />;
   if (data.items.length === 0) return <EmptyState title="No BOQ items yet" hint="Import the BOQ first — the cost sheet is a financial lens over the same rows." />;
@@ -118,16 +156,37 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                 <th className="px-2">Vendor</th>
                 <th className="px-2 text-right">Qty Ordered</th>
                 <th className="px-2 text-right">Unit Price</th>
-                <th className="px-2 text-right">Total Cost</th>
+                <th className="px-2 text-right">PO Amount</th>
+                <th className="px-2 text-right">Qty × Rate</th>
+                <th className="px-2">Delivery</th>
                 <th className="px-2 text-right">Advance Paid</th>
                 <th className="px-2 text-right">Balance</th>
                 <th className="px-2">Payment</th>
                 <th className="px-2 text-right">Received</th>
                 <th className="px-2">GRN &amp; Invoice</th>
+                <th className="px-2 text-center">Invoiced</th>
+                {editable && <th className="px-2"></th>}
               </tr>
             </thead>
             <tbody>
-              {rows.map((it) => {
+              {grouped.map((g) => {
+                const collapsed = !!collapsedCat[g.category];
+                const groupCost = g.items.reduce((s, it) => s + (it.totalOrderedCost || 0), 0);
+                return (
+                  <FragmentRow key={g.category}>
+                    {/* Category header — click to collapse, like BOQ & Progress. */}
+                    <tr className="cursor-pointer bg-slate-100/60 font-semibold text-navy hover:bg-slate-100" onClick={() => setCollapsedCat((c) => ({ ...c, [g.category]: !c[g.category] }))}>
+                      <td className="px-3 py-2" colSpan={editable ? 21 : 20}>
+                        <div className="flex items-center justify-between">
+                          <span>
+                            <span className="mr-2 inline-block w-3 text-slate-400">{collapsed ? '▶' : '▼'}</span>
+                            {g.category} <span className="ml-1 text-xs font-normal text-slate-400">({g.items.length})</span>
+                          </span>
+                          {!hideFinancials && groupCost > 0 && <span className="text-sm text-slate-500">{money(groupCost)} ordered</span>}
+                        </div>
+                      </td>
+                    </tr>
+                    {!collapsed && g.items.map((it) => {
                 // A single-PO item reads inline; multi-PO items get sub-rows so
                 // "copper piping ordered in 2 batches" is legible.
                 const multi = it.pos.length > 1;
@@ -148,15 +207,70 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                       <td className="px-2 text-right">{fmtNum(it.plannedQty)}</td>
                       <td className="px-2 text-right text-navy">{fmtNum(it.installedQty)}</td>
 
-                      {it.pos.length === 0 ? (
-                        <td className="px-2 text-xs italic text-slate-400" colSpan={9}>No PO raised yet</td>
+                      {it.pos.length === 0 && !it.selectedDocId && it.orderedQtyOverride == null && it.poAmountOverride == null ? (
+                        <td className="px-2 text-xs italic text-slate-400" colSpan={12}>
+                          {editable ? <button className="not-italic text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setFinance((c) => ({ ...c, [it.id]: true })); }}>+ Select PO / fill manually</button> : 'No PO raised yet'}
+                        </td>
+                      ) : it.pos.length === 0 ? (
+                        // Manually selected PO (no linked line) — fill from the annotation.
+                        <>
+                          <td className="px-2 text-xs font-medium text-navy">
+                            {it.selectedDocId ? <button className="hover:underline" title="Open the PO" onClick={(e) => { e.stopPropagation(); openAuthedFile(`/projects/${projectId}/procurement/docs/${it.selectedDocId}/pdf`); }}>{it.selectedPoNumber}</button> : <span className="text-slate-400">manual</span>}
+                          </td>
+                          <td className="px-2 text-xs text-slate-500">{it.selectedVendorName || '—'}</td>
+                          <td className="px-2 text-right">{fmtNum(it.effectiveOrderedQty)}{it.orderedQtyOverride != null && <span className="ml-1 text-amber-500" title="Manual">◆</span>}</td>
+                          <td className="px-2 text-right">{money(it.effectiveRate)}</td>
+                          <td className="px-2 text-right font-medium">{money(it.poAmountOverride)}{it.poAmountOverride != null && <span className="ml-1 text-amber-500" title="Manual">◆</span>}</td>
+                          <td className="px-2 text-right text-navy">{it.qtyRateAmount != null ? money(it.qtyRateAmount) : '—'}</td>
+                          <td className="px-2 text-xs">
+                            {it.plannedDeliveryDate || it.actualDeliveryDate ? (
+                              <div>
+                                <div className="text-slate-500">{fmtDate(it.plannedDeliveryDate)} → {fmtDate(it.actualDeliveryDate)}</div>
+                                {it.deliveryDelayDays != null && <span className={it.deliveryDelayDays > 0 ? 'font-medium text-red-600' : 'font-medium text-green-700'}>{it.deliveryDelayDays > 0 ? `+${it.deliveryDelayDays}d late` : it.deliveryDelayDays < 0 ? `${it.deliveryDelayDays}d early` : 'on time'}</span>}
+                              </div>
+                            ) : <span className="text-slate-300">—</span>}
+                          </td>
+                          <td className="px-2 text-right text-slate-300">—</td>
+                          <td className="px-2 text-right text-slate-300">—</td>
+                          <td className="px-2 text-slate-300">—</td>
+                          <td className="px-2 text-slate-300">—</td>
+                          <td className="px-2 text-slate-300">—</td>
+                        </>
                       ) : (
                         <>
-                          <td className="px-2 text-xs font-medium text-navy">{multi ? `${it.pos.length} POs` : only.docNumber}</td>
+                          {/* PO number — clickable, opens the PO document (single PO). */}
+                          <td className="px-2 text-xs font-medium text-navy">
+                            {multi ? `${it.pos.length} POs` : (
+                              <button className="hover:underline" title="Open the PO" onClick={(e) => { e.stopPropagation(); openAuthedFile(`/projects/${projectId}/procurement/docs/${only.docId}/pdf`); }}>{only.docNumber}</button>
+                            )}
+                          </td>
                           <td className="px-2 text-xs text-slate-500">{vendors.length > 1 ? `${vendors.length} vendors` : vendors[0] || '—'}</td>
-                          <td className="px-2 text-right">{fmtNum(it.totalOrderedQty)}</td>
-                          <td className="px-2 text-right">{multi ? <span className="text-xs text-slate-400">varies</span> : money(only.unitPrice)}</td>
-                          <td className="px-2 text-right font-medium">{money(it.totalOrderedCost)}</td>
+                          {/* Qty ordered — effective (override ?? derived); a dot marks a manual override. */}
+                          <td className="px-2 text-right">
+                            {fmtNum(it.effectiveOrderedQty)}
+                            {it.orderedQtyOverride != null && <span className="ml-1 text-amber-500" title="Manual override">◆</span>}
+                          </td>
+                          <td className="px-2 text-right">{multi ? <span className="text-xs text-slate-400">varies</span> : money(it.effectiveRate)}</td>
+                          {/* PO amount — effective (override ?? derived). */}
+                          <td className="px-2 text-right font-medium">
+                            {money(it.poAmountOverride != null ? it.poAmountOverride : it.totalOrderedCost)}
+                            {it.poAmountOverride != null && <span className="ml-1 text-amber-500" title="Manual override">◆</span>}
+                          </td>
+                          {/* Qty × Rate — the billable figure finance reads at a glance. */}
+                          <td className="px-2 text-right text-navy">{it.qtyRateAmount != null ? money(it.qtyRateAmount) : '—'}</td>
+                          {/* Delivery — planned (Gantt) → actual, with the delay in days. */}
+                          <td className="px-2 text-xs">
+                            {it.plannedDeliveryDate || it.actualDeliveryDate ? (
+                              <div>
+                                <div className="text-slate-500">{fmtDate(it.plannedDeliveryDate)} → {fmtDate(it.actualDeliveryDate)}</div>
+                                {it.deliveryDelayDays != null && (
+                                  <span className={it.deliveryDelayDays > 0 ? 'font-medium text-red-600' : 'font-medium text-green-700'}>
+                                    {it.deliveryDelayDays > 0 ? `+${it.deliveryDelayDays}d late` : it.deliveryDelayDays < 0 ? `${it.deliveryDelayDays}d early` : 'on time'}
+                                  </span>
+                                )}
+                              </div>
+                            ) : <span className="text-slate-300">—</span>}
+                          </td>
                           <td className="px-2 text-right">{money(it.totalAdvancePaid)}</td>
                           <td className="px-2 text-right">{money(it.totalBalancePending)}</td>
                           <td className="px-2"><span className={`badge ${PAY_PILL[it.paymentStatus]}`}>{it.paymentStatus}</span></td>
@@ -167,18 +281,45 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                           <td className="px-2"><GrnCell pos={it.pos} money={money} /></td>
                         </>
                       )}
+                      {/* Finance: "client invoicing done" tick — always available. */}
+                      <td className="px-2 text-center">
+                        <input type="checkbox" disabled={!editable || annotate.isPending} checked={it.invoicingDone}
+                          title="Client invoicing done"
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => annotate.mutate({ boqItemId: it.id, body: { invoicingDone: e.target.checked } })} />
+                      </td>
+                      {editable && (
+                        <td className="px-2 text-right">
+                          <button className="text-xs text-navy hover:underline" title="Edit finance overrides"
+                            onClick={(e) => { e.stopPropagation(); setFinance((c) => ({ ...c, [it.id]: !c[it.id] })); }}>✎</button>
+                        </td>
+                      )}
                     </tr>
+
+                    {/* Finance override editor — full-width sub-row. */}
+                    {editable && finance[it.id] && (
+                      <tr className="border-b border-slate-100 bg-amber-50/40">
+                        <td colSpan={editable ? 21 : 20} className="px-6 py-3">
+                          <FinanceEditor it={it} money={money} poOptions={poOptions.data ?? []}
+                            onSave={(body) => annotate.mutate({ boqItemId: it.id, body }, { onSuccess: () => setFinance((c) => ({ ...c, [it.id]: false })) })}
+                            busy={annotate.isPending} />
+                        </td>
+                      </tr>
+                    )}
 
                     {multi && open && it.pos.map((p) => (
                       <tr key={p.poLineId} className="border-b border-slate-50 bg-slate-50/60 text-xs">
                         <td />
                         <td className="px-3 py-1.5 pl-8 text-slate-500">↳ {p.docNumber} <span className="badge bg-slate-200 text-slate-600">{p.docType}</span></td>
                         <td colSpan={5} />
-                        <td className="px-2 font-medium text-navy">{p.docNumber}</td>
+                        <td className="px-2 font-medium text-navy">
+                          <button className="hover:underline" title="Open the PO" onClick={(e) => { e.stopPropagation(); openAuthedFile(`/projects/${projectId}/procurement/docs/${p.docId}/pdf`); }}>{p.docNumber}</button>
+                        </td>
                         <td className="px-2 text-slate-500">{p.vendorName || '—'}</td>
                         <td className="px-2 text-right">{fmtNum(p.qtyOrdered)}</td>
                         <td className="px-2 text-right">{money(p.unitPrice)}</td>
                         <td className="px-2 text-right">{money(p.totalCost)}</td>
+                        <td className="px-2" /><td className="px-2" />
                         <td className="px-2 text-right">{money(p.advancePaid)}</td>
                         <td className="px-2 text-right">{money(p.balancePending)}</td>
                         <td className="px-2"><span className={`badge ${PAY_PILL[p.paymentStatus]}`}>{p.paymentStatus}</span></td>
@@ -187,8 +328,12 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                           <span className={`badge mt-0.5 ${RECEIPT_PILL[p.receiptStatus]}`}>{p.receiptStatus}</span>
                         </td>
                         <td className="px-2"><GrnCell pos={[p]} money={money} /></td>
+                        <td />{editable && <td />}
                       </tr>
                     ))}
+                  </FragmentRow>
+                );
+                    })}
                   </FragmentRow>
                 );
               })}
@@ -230,6 +375,83 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
 // plus its PO sub-rows without an illegal wrapper element.
 function FragmentRow({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
+}
+
+// The finance overlay editor (PRD v2 §5): manual overrides that layer over the
+// derived numbers — actual ordered qty, overall PO amount (freight added later),
+// the rate for qty × rate, and the Gantt/actual delivery dates. The PO itself is
+// never mutated; these are finance-only actuals on the cost sheet.
+function FinanceEditor({ it, money, poOptions, onSave, busy }: {
+  it: CostItem;
+  money: (n: number | null | undefined) => string;
+  poOptions: POOption[];
+  onSave: (body: Record<string, unknown>) => void;
+  busy: boolean;
+}) {
+  const num = (v: number | null) => (v == null ? '' : String(v));
+  const [docId, setDocId] = useState(it.selectedDocId ?? '');
+  const [orderedQty, setOrderedQty] = useState(num(it.orderedQtyOverride));
+  const [poAmount, setPoAmount] = useState(num(it.poAmountOverride));
+  const [rate, setRate] = useState(num(it.rateOverride));
+  const [planned, setPlanned] = useState(it.plannedDeliveryDate ? it.plannedDeliveryDate.slice(0, 10) : '');
+  const [actual, setActual] = useState(it.actualDeliveryDate ? it.actualDeliveryDate.slice(0, 10) : '');
+  const [remarks, setRemarks] = useState(it.annotationRemarks ?? '');
+
+  const parse = (s: string) => (s.trim() === '' ? null : Number(s));
+
+  return (
+    <div className="space-y-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Finance overrides — {it.description}</div>
+      {/* Select a PO for this row — fetches its number & vendor onto the row. */}
+      <div className="max-w-md">
+        <Field label="PO for this row (auto-fills number & vendor)">
+          <select className="input py-1 text-sm" value={docId} onChange={(e) => setDocId(e.target.value)}>
+            <option value="">— none (fill manually below) —</option>
+            {poOptions.map((o) => <option key={o.id} value={o.id}>{o.docNumber} · {o.vendorName || 'vendor'}{o.finalAmount != null ? ` · ${money(o.finalAmount)}` : ''} ({o.status})</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <Field label={`Ordered qty (derived ${fmtNum(it.totalOrderedQty)})`}>
+          <input type="number" step="any" className="input py-1 text-sm" value={orderedQty} placeholder="auto" onChange={(e) => setOrderedQty(e.target.value)} />
+        </Field>
+        <Field label={`PO amount (derived ${money(it.totalOrderedCost)})`}>
+          <input type="number" step="any" className="input py-1 text-sm" value={poAmount} placeholder="auto" onChange={(e) => setPoAmount(e.target.value)} />
+        </Field>
+        <Field label="Rate (for qty × rate)">
+          <input type="number" step="any" className="input py-1 text-sm" value={rate} placeholder="auto" onChange={(e) => setRate(e.target.value)} />
+        </Field>
+        <Field label="Planned delivery (Gantt)">
+          <input type="date" className="input py-1 text-sm" value={planned} onChange={(e) => setPlanned(e.target.value)} />
+        </Field>
+        <Field label="Actual delivery">
+          <input type="date" className="input py-1 text-sm" value={actual} onChange={(e) => setActual(e.target.value)} />
+        </Field>
+        <Field label="Remarks">
+          <input className="input py-1 text-sm" value={remarks} onChange={(e) => setRemarks(e.target.value)} />
+        </Field>
+      </div>
+      <div className="flex justify-end">
+        <button className="btn-primary text-sm" disabled={busy}
+          onClick={() => onSave({
+            docId: docId || null,
+            orderedQtyOverride: parse(orderedQty), poAmountOverride: parse(poAmount), rateOverride: parse(rate),
+            plannedDeliveryDate: planned || null, actualDeliveryDate: actual || null, remarks: remarks || null,
+          })}>
+          {busy ? 'Saving…' : 'Save overrides'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-[11px] font-medium text-slate-500">{label}</label>
+      {children}
+    </div>
+  );
 }
 
 // "GRN yahin pe aana chahiye agar approve hua hai aur saath-saath mein agar uske
