@@ -185,12 +185,12 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
               {save.isPending ? 'Saving…' : amending ? 'Save amendment' : 'Save'}
             </button>
           )}
-          {/* No approver popup: the chain is resolved automatically server-side
-              from the admin-configured Approval Chain (Users → Approval Chain),
-              falling back to the value-band matrix. */}
+          {/* ChainBuilder decides: with an admin-configured Approval Chain it
+              submits straight through with no popup; without one it falls back
+              to the matrix / free-form picker as before. */}
           {editable && d.status === 'DRAFT' && (
             <button className="btn-primary text-sm" disabled={save.isPending || doAction.isPending}
-              onClick={async () => { await save.mutateAsync(); doAction.mutate({ verb: 'submit', body: {} }); }}>
+              onClick={() => setShowChain(true)}>
               {doAction.isPending ? 'Submitting…' : 'Submit for Approval'}
             </button>
           )}
@@ -232,7 +232,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             Amendment saved. Do you want to <strong>resubmit this {d.type} for approval</strong>?
           </div>
           <div className="flex gap-2">
-            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); doAction.mutate({ verb: 'submit', body: {} }); }}>
+            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); setResubmitMode(true); setShowChain(true); }}>
               Resubmit for approval
             </button>
             <button className="btn-outline text-sm" onClick={() => setAskResubmit(false)}>

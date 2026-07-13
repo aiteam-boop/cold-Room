@@ -1,14 +1,19 @@
-// Modal to pick the ordered approval chain before submitting a PO/WO/GRN.
+// Decides the ordered approval chain when a PO/WO/GRN/payment is submitted.
 //
-// Where a value-threshold matrix is configured (Settings · Approval Matrix), it
-// decides the chain: the required approvers are pre-filled, ordered and locked —
-// you may add extra reviewers, never drop a mandatory one. That is what stops a
-// ₹2,00,000 PO being routed around Finance.
+// It asks the server what chain this document would travel (/approval-chains/
+// resolve) and then behaves in one of three ways:
 //
-// Where no matrix exists, this falls back to the original free-form picker so
-// nothing breaks for projects that have not set one up.
+//   fixed  — an admin configured a chain for this doc type in Users → Approval
+//            Chain. NO POPUP: the document is submitted straight through and the
+//            server routes it through that chain. This is the normal path.
+//   matrix — no fixed chain, but a value-threshold matrix applies. The mandatory
+//            approvers are pre-filled, ordered and locked; the creator may add
+//            extra reviewers but never drop a mandatory one. That is what stops
+//            a ₹2,00,000 PO being routed around Finance.
+//   none   — nothing configured. The original free-form picker, so projects that
+//            have set neither up keep working exactly as before.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { Modal, Spinner } from '../ui';
@@ -30,6 +35,12 @@ interface MatrixPreview {
 const bandLabel = (min: number, max: number | null) =>
   min <= 0 && max != null ? `up to ${inr(max)}` : max == null ? `${inr(min)} and above` : `${inr(min)} – ${inr(max)}`;
 
+interface Resolved {
+  steps: { approverId: string; approverName: string; approverRole: string | null }[];
+  source: 'fixed' | 'matrix' | 'none';
+  scope: 'project' | 'global' | 'none';
+}
+
 export default function ChainBuilder({ docType, projectId, amount, onConfirm, onClose, busy }: {
   docType: 'PO' | 'WO' | 'GRN' | 'PAYMENT';
   projectId: string;
@@ -41,15 +52,33 @@ export default function ChainBuilder({ docType, projectId, amount, onConfirm, on
 }) {
   const [chain, setChain] = useState<string[]>([]);
 
+  // Does an admin-configured chain exist for this doc type? If so we never ask.
+  const { data: auto, isLoading: autoLoading } = useQuery({
+    queryKey: ['approval-resolve', docType, projectId, amount],
+    queryFn: async () =>
+      (await api.get(`/approval-chains/resolve?docType=${docType}&projectId=${projectId}&amount=${amount}`)).data as Resolved,
+  });
+  const autoRouted = auto?.source === 'fixed';
+
+  // Submit straight through. The server resolves the same chain server-side, so
+  // an empty selection is correct here — it is not a "no approvers" submit.
+  const fired = useRef(false);
+  useEffect(() => {
+    if (autoRouted && !fired.current) { fired.current = true; onConfirm([]); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRouted]);
+
   const { data, isLoading } = useQuery({
     queryKey: ['approvers'],
     queryFn: async () => (await api.get('/approvals/approvers')).data.approvers as Approver[],
+    enabled: auto != null && !autoRouted,
   });
 
   const { data: matrix, isLoading: matrixLoading } = useQuery({
     queryKey: ['approval-preview', docType, projectId, amount],
     queryFn: async () =>
       (await api.get(`/approval-rules/preview?docType=${docType}&projectId=${projectId}&amount=${amount}`)).data as MatrixPreview,
+    enabled: auto != null && !autoRouted,
   });
 
   const required = matrix?.configured ? matrix.steps : [];
@@ -80,6 +109,33 @@ export default function ChainBuilder({ docType, projectId, amount, onConfirm, on
     if (requiredIds.has(c[i]) || requiredIds.has(c[j])) return c;
     const next = [...c]; [next[i], next[j]] = [next[j], next[i]]; return next;
   });
+
+  // Auto-routed: no chain to choose. Show what it is routing through while the
+  // submit request is in flight, rather than a picker the creator can't change.
+  if (autoLoading || autoRouted) {
+    return (
+      <Modal title="Submitting for approval" onClose={onClose}>
+        {autoLoading ? <Spinner label="Resolving approval chain…" /> : (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-500">
+              This {docType} routes through the {auto!.scope === 'project' ? 'project’s' : 'company'} approval chain,
+              set by an administrator in <strong>Users → Approval Chain</strong>. Approvers are notified{' '}
+              <strong>one at a time, in order</strong>.
+            </p>
+            <ol className="space-y-1">
+              {auto!.steps.map((s, i) => (
+                <li key={s.approverId} className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">
+                  {i + 1}. {s.approverName}
+                  {s.approverRole && <span className="text-xs text-slate-400"> · {s.approverRole}</span>}
+                </li>
+              ))}
+            </ol>
+            <Spinner label="Submitting…" />
+          </div>
+        )}
+      </Modal>
+    );
+  }
 
   const loading = isLoading || matrixLoading;
 

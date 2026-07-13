@@ -6,7 +6,7 @@ import { requireAuth, requireAdmin } from '../middleware/authMiddleware';
 import { audit } from '../lib/audit';
 import { isAdmin } from '../lib/enums';
 import { parseApprover, approverHandlesType, approvalTypeForDoc } from '../lib/permissions';
-import { fixedChainFor, type ChainDocType } from '../services/fixedChain';
+import { fixedChainFor, resolveAutoChain, type ChainDocType } from '../services/fixedChain';
 
 // Admin config for the FIXED approval chain per document type.
 // Mounted at /api/approval-chains
@@ -22,6 +22,20 @@ router.get('/', asyncHandler(async (req, res) => {
   const projectId = typeof req.query.projectId === 'string' && req.query.projectId ? req.query.projectId : null;
   const { rows, scope } = await fixedChainFor(docType as ChainDocType, projectId);
   res.json({ docType, projectId, scope, chain: rows });
+}));
+
+// GET /api/approval-chains/resolve?docType=PO&projectId=…&amount=…
+// What chain THIS document would travel if submitted right now. The submit
+// screens call this: when source is 'fixed' they submit straight through with
+// no approver popup, because the server will route it through this same chain.
+router.get('/resolve', asyncHandler(async (req, res) => {
+  const docType = String(req.query.docType || 'PO').toUpperCase();
+  if (!DOC_TYPES.includes(docType as any)) throw badRequest('docType must be PO, WO, GRN or PAYMENT');
+  const projectId = String(req.query.projectId || '');
+  if (!projectId) throw badRequest('projectId is required');
+  const amount = Number(req.query.amount) || 0;
+  const resolved = await resolveAutoChain(docType as ChainDocType, projectId, amount);
+  res.json(resolved);
 }));
 
 // PUT /api/approval-chains — replace the whole chain for a docType (admin).
