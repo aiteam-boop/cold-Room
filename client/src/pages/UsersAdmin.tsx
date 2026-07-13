@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { Spinner } from '../components/ui';
 import ApprovalMatrix from '../components/ApprovalMatrix';
+import ApprovalChainConfig from '../components/ApprovalChainConfig';
 import { SECTION_HINTS, APPROVAL_TYPE_LABELS, type PageKey, type SectionKey, type ApproverProfile } from '../lib/permissions';
 
 interface Meta {
@@ -106,6 +107,8 @@ export default function UsersAdmin() {
 
       {/* Who may approve is set above; at what value they must approve is set here. */}
       <ApprovalMatrix />
+      {/* Fixed, user-based chain — sits directly below the value matrix. */}
+      <ApprovalChainConfig />
 
       {editing && (
         <UserDrawer

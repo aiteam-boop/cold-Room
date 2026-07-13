@@ -277,6 +277,14 @@ model VendorPayment {
   doc           ProcurementDoc? @relation(fields: [docId], references: [id])
   poNumber      String?
 
+  // Which of the PO's payment terms (milestones) this pays — picked from a
+  // dropdown of the PO's actual terms; already-paid ones are not selectable.
+  // (GRN/Payment PRD v3 §3.2.) Approving/paying this entry reflects onto the
+  // milestone so the Payment Pipeline & BOQ Cost stay in step.
+  milestoneId   String?
+  milestoneKey  String?   // advance | beforeDelivery | running | postDelivery | postCompletion | retention
+  milestoneName String?
+
   // Amounts — full & amount-to-pay are MANUAL (billing is per actual qty +
   // freight); balance is derived = full − paidSoFar.
   paymentType   String   @default("ADVANCE")  // ADVANCE | BALANCE | FULL
@@ -291,18 +299,22 @@ model VendorPayment {
   payTermsSnapshot String?
 
   // Attachments
-  piPdfUrl      String?                    // performa invoice PDF
+  piPdfUrl      String?                    // proforma invoice PDF — drives the payment, comes first
+  taxInvoicePdfUrl String?                 // tax invoice — arrives later; uploading it CLOSES the entry
   kycPdfUrl     String?                    // vendor KYC PDF (GST+PAN+cheque)
 
   remark        String?                    // what the payment is regarding
 
-  // Lifecycle. status: DRAFT | PENDING_APPROVAL | APPROVED | REJECTED | PAID
+  // Lifecycle (GRN/Payment PRD v3 §6). A payment can be PAID but still open —
+  // it only CLOSES once the vendor's tax invoice is uploaded.
+  // status: DRAFT | PENDING_APPROVAL | APPROVED | REJECTED | PAID | CLOSED
   status        String   @default("DRAFT")
   approvedById  String?
   approvedAt    DateTime?
   rejectionReason String?
   paidAt        DateTime?
   paymentReference String?                 // UTR when marked paid
+  closedAt      DateTime?                  // set when the tax invoice is uploaded
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -412,7 +424,33 @@ model GRN {
   driverName  String?
   deliveryChallanNumber String?
 
-  // Invoice section (mandatory)
+  // ── Payment (GRN/Payment PRD v3 §3) — Amisha does the payment on the GRN. ──
+  // Which of the PO's payment terms (milestones) this GRN pays; already-paid
+  // ones are not selectable. Approving the GRN triggers the milestone.
+  milestoneId   String?
+  milestoneKey  String?
+  milestoneName String?
+  // Proforma Invoice — drives the payment and comes BEFORE the tax invoice.
+  piNumber      String?
+  piDate        DateTime?
+  piValue       Float?
+  piPdfUrl      String?
+  // The amount to release for this milestone (editable; may be partial). Balance
+  // is derived = piValue − advance already paid on the PO − amountToPay.
+  amountToPay   Float?
+
+  // ── Payment lifecycle (GRN/Payment PRD v3 §6) ──
+  // Runs alongside `status` (goods/approval state), NOT on it. Ladder:
+  // approved → TRIGGERED (milestone triggered on approval) → PAID (Accounts enter
+  // the UTR) → CLOSED (the tax invoice is finally uploaded). A GRN can be PAID but
+  // still open — the entry only leaves Amisha's bucket once the tax invoice lands.
+  paymentStatus   String?   // TRIGGERED | PAID | CLOSED
+  utrNumber       String?
+  paidAt          DateTime?
+  paymentProofUrl String?
+  paymentClosedAt DateTime?
+
+  // Tax-invoice section (arrives later; closes the payment side).
   invoiceNumber String?
   invoiceDate   DateTime?
   invoiceValue  Float?
@@ -926,6 +964,26 @@ model ApprovalStep {
 //
 // `projectId = null` is the org-wide default; a project-specific rule set, when
 // present, replaces the defaults for that project entirely.
+// Fixed, admin-configured approval chain per document type (PO | WO | GRN |
+// PAYMENT). Configure once in Users → Approval Chain; every future document of
+// that type is routed through it automatically, in `order`, with no per-submit
+// picking. The value-band ApprovalRule matrix still decides WHETHER a document
+// needs approval / who is mandatory; this decides WHO signs and in what order.
+model ApprovalChainConfig {
+  id           String   @id @default(cuid()) @map("_id")
+  docType      String   // PO | WO | GRN | PAYMENT
+  projectId    String?  // null = company-wide default; set = project override
+  approverId   String
+  approverName String
+  approverRole String?
+  order        Int      @default(1)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([docType, projectId])
+}
+
 model ApprovalRule {
   id           String   @id @default(cuid()) @map("_id")
   projectId    String?

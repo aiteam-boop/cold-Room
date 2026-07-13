@@ -185,7 +185,15 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
               {save.isPending ? 'Saving…' : amending ? 'Save amendment' : 'Save'}
             </button>
           )}
-          {editable && d.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit for Approval</button>}
+          {/* No approver popup: the chain is resolved automatically server-side
+              from the admin-configured Approval Chain (Users → Approval Chain),
+              falling back to the value-band matrix. */}
+          {editable && d.status === 'DRAFT' && (
+            <button className="btn-primary text-sm" disabled={save.isPending || doAction.isPending}
+              onClick={async () => { await save.mutateAsync(); doAction.mutate({ verb: 'submit', body: {} }); }}>
+              {doAction.isPending ? 'Submitting…' : 'Submit for Approval'}
+            </button>
+          )}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => doAction.mutate({ verb: 'recall' })}>Recall</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && hasChain && <button className="btn-outline text-sm" disabled={doAction.isPending} onClick={() => doAction.mutate({ verb: 'remind' })}>Send Reminder</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
@@ -224,7 +232,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             Amendment saved. Do you want to <strong>resubmit this {d.type} for approval</strong>?
           </div>
           <div className="flex gap-2">
-            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); setResubmitMode(true); setShowChain(true); }}>
+            <button className="btn-primary text-sm" onClick={() => { setAskResubmit(false); doAction.mutate({ verb: 'submit', body: {} }); }}>
               Resubmit for approval
             </button>
             <button className="btn-outline text-sm" onClick={() => setAskResubmit(false)}>

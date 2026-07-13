@@ -5,9 +5,10 @@
 import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma';
 import { notifyUser } from './notify';
-import { sendEmail, approvalEmailHtml, appBaseUrl, isEmailEnabled } from './email';
-import { buildMilestones } from './procurement';
-import { parseApprover, approverHandlesType, type ApprovalType } from '../lib/permissions';
+import { sendEmail, approvalEmailHtml, approvalDocEmailHtml, appBaseUrl, appClientUrl, isEmailEnabled } from './email';
+import { buildMilestones, normalizeTermsSections } from './procurement';
+import { renderProcurementPdf, renderGRNPdf, renderToBuffer } from './procurementPdf';
+import { parseApprover, approverHandlesType, approvalTypeForDoc, type ApprovalType } from '../lib/permissions';
 import { isAdmin } from '../lib/enums';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
@@ -16,10 +17,7 @@ export type DocType = 'PO' | 'WO' | 'GRN' | 'PAYMENT';
 
 // PO/WO map to their own approval type; GRN is GRN; a vendor PAYMENT (FMS) maps
 // to the VENDOR_PAYMENT approver type.
-function approvalTypeFor(docType: DocType): ApprovalType {
-  if (docType === 'PAYMENT') return 'VENDOR_PAYMENT';
-  return docType === 'GRN' ? 'GRN' : docType; // 'PO' | 'WO' | 'GRN'
-}
+const approvalTypeFor = (docType: DocType): ApprovalType => approvalTypeForDoc(docType);
 
 export interface ActorInfo { id: string; name: string; email?: string | null; role?: string | null; isAdmin: boolean }
 
@@ -56,6 +54,75 @@ async function docSummary(docType: DocType, docId: string): Promise<DocSummary |
   return { number: d.docNumber, projectId: d.projectId, createdById: d.createdById, label: d.type, link: `/projects/${d.projectId}` };
 }
 
+// ── Rich data for the approval email + the review page ───────────────────────
+// Vendor, amounts and line items for the summary, plus the API path to the
+// document's PDF (signed by the route so the approver can view it without
+// logging in). Shared by notifyStep (email) and routes/approvals.ts (page).
+export interface ApprovalDocData {
+  label: string;          // PO / WO / GRN
+  docLabelLong: string;   // Purchase Order / Work Order / Goods Receipt Note
+  number: string;
+  vendorName: string | null;
+  projectName: string | null;
+  totalLabel: string;
+  totalAmount: number | null;
+  rows: { description: string; qty: number | null; unitPrice: number | null; total: number | null }[];
+  pdfPath: string | null; // /api/... path to the PDF, or null (e.g. PAYMENT)
+  projectId: string;
+}
+
+export async function approvalDocData(docType: DocType, docId: string): Promise<ApprovalDocData | null> {
+  if (docType === 'GRN') {
+    const g = await prisma.gRN.findUnique({
+      where: { id: docId },
+      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { name: true } } },
+    });
+    if (!g) return null;
+    return {
+      label: 'GRN', docLabelLong: 'Goods Receipt Note', number: g.grnNumber,
+      vendorName: g.vendorName, projectName: g.project?.name ?? null,
+      totalLabel: 'Invoice Value', totalAmount: g.invoiceValue ?? null,
+      // The engineer's own receipt data — quantities, no PO pricing.
+      rows: g.lineItems.map((l) => ({ description: l.description, qty: l.receiptQty, unitPrice: null, total: null })),
+      pdfPath: `/api/projects/${g.projectId}/procurement/grns/${g.id}/pdf`, projectId: g.projectId,
+    };
+  }
+  if (docType === 'PAYMENT') {
+    const p = await prisma.vendorPayment.findUnique({ where: { id: docId }, select: { paymentNumber: true, projectId: true } });
+    if (!p) return null;
+    return { label: 'Payment', docLabelLong: 'Vendor Payment', number: p.paymentNumber, vendorName: null, projectName: null, totalLabel: 'Amount', totalAmount: null, rows: [], pdfPath: null, projectId: p.projectId };
+  }
+  const d = await prisma.procurementDoc.findUnique({
+    where: { id: docId },
+    include: { lineItems: { where: { isLeadTime: false }, orderBy: { sortOrder: 'asc' } }, project: { select: { name: true } } },
+  });
+  if (!d) return null;
+  return {
+    label: d.type, docLabelLong: d.type === 'WO' ? 'Work Order' : 'Purchase Order', number: d.docNumber,
+    vendorName: d.vendorName, projectName: d.project?.name ?? null,
+    totalLabel: 'Final Amount', totalAmount: Math.round(d.finalAmount),
+    rows: d.lineItems.map((l) => ({ description: l.description, qty: l.qty, unitPrice: l.unitPrice, total: l.totalPrice })),
+    pdfPath: `/api/projects/${d.projectId}/procurement/docs/${d.id}/pdf`, projectId: d.projectId,
+  };
+}
+
+// Render the document's PDF to a Buffer so it can be attached to the approval
+// email — the approver opens the whole PO/WO/GRN straight from their inbox.
+const safeJson = (s: string | null | undefined) => { try { return s ? JSON.parse(s) : []; } catch { return []; } };
+export async function buildApprovalPdf(docType: DocType, docId: string): Promise<{ filename: string; buffer: Buffer } | null> {
+  if (docType === 'GRN') {
+    const grn = await prisma.gRN.findUnique({ where: { id: docId }, include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true } } } });
+    if (!grn) return null;
+    const buffer = await renderToBuffer((s) => renderGRNPdf({ ...grn, docNumber: grn.doc.docNumber } as any, s));
+    return { filename: `${grn.grnNumber}.pdf`, buffer };
+  }
+  if (docType === 'PAYMENT') return null; // no printable document
+  const doc = await prisma.procurementDoc.findUnique({ where: { id: docId }, include: { lineItems: { orderBy: { sortOrder: 'asc' } } } });
+  if (!doc) return null;
+  const buffer = await renderToBuffer((s) => renderProcurementPdf({ ...doc, termsSections: normalizeTermsSections(safeJson(doc.termsSections)) } as any, s));
+  return { filename: `${doc.docNumber}.pdf`, buffer };
+}
+
 async function logAction(docType: DocType, docId: string, stepId: string | null, actor: ActorInfo, action: string, remarks?: string) {
   await prisma.approvalAction.create({
     data: { docType, docId, stepId, actorId: actor.id || null, actorName: actor.name, actorEmail: actor.email ?? null, actorRole: actor.role ?? null, action, remarks: remarks ?? null },
@@ -64,25 +131,46 @@ async function logAction(docType: DocType, docId: string, stepId: string | null,
 
 // Notify the approver whose turn it is — in-app + (if configured) email with a
 // secure one-click link.
-async function notifyStep(step: { id: string; docType: string; docId: string; approverId: string; approverEmail: string | null; approverName: string }, doc: DocSummary, kind: 'NEW' | 'REMINDER') {
-  const title = kind === 'REMINDER' ? `Reminder: approval pending` : `Approval needed: ${doc.label} ${doc.number}`;
+async function notifyStep(step: { id: string; docType: string; docId: string; approverId: string; approverEmail: string | null; approverName: string; order?: number; approverRole?: string | null }, doc: DocSummary, kind: 'NEW' | 'REMINDER') {
+  const title = kind === 'REMINDER' ? `Reminder: ${doc.label} ${doc.number} awaiting approval` : `Approval needed: ${doc.label} ${doc.number}`;
   const message = `${doc.label} ${doc.number} is awaiting your approval.`;
   // Link to the self-contained Approvals page — the approver may not be a member
   // of the document's project, so we must NOT send them to the project workspace.
   await notifyUser(step.approverId, { type: 'APPROVAL_PENDING', title, message, projectId: doc.projectId, relatedDocType: step.docType, relatedDocId: step.docId, link: '/approvals' });
-  if (isEmailEnabled() && step.approverEmail) {
-    const token = signApprovalToken({ stepId: step.id, docType: step.docType as DocType, docId: step.docId, approverId: step.approverId });
-    const actionUrl = `${appBaseUrl()}/api/approvals/act?token=${encodeURIComponent(token)}`;
+  if (!isEmailEnabled() || !step.approverEmail) return;
+
+  const token = signApprovalToken({ stepId: step.id, docType: step.docType as DocType, docId: step.docId, approverId: step.approverId });
+  const base = `${appBaseUrl()}/api/approvals/act?token=${encodeURIComponent(token)}`;
+
+  // Rich email with the document summary + a full-PDF review page. Fall back to
+  // the plain template if the document can't be loaded for some reason.
+  const data = await approvalDocData(step.docType as DocType, step.docId);
+  if (data) {
+    const total = await prisma.approvalStep.count({ where: { docType: step.docType, docId: step.docId } });
+    const stage = step.order ? `${step.approverRole || 'Approver'} · step ${step.order} of ${total}` : (step.approverRole || null);
+    // No PDF attachment: the full document is shown on the review page that the
+    // Approve / Reject buttons open (helper buildApprovalPdf is kept for reuse).
     await sendEmail({
       to: step.approverEmail,
       subject: title,
-      html: approvalEmailHtml({
-        heading: title,
-        lines: [`Hi ${step.approverName},`, message, 'Review and record your decision using the button below.'],
-        actionUrl, actionLabel: 'Review & Approve',
+      html: approvalDocEmailHtml({
+        label: data.label, docLabelLong: data.docLabelLong, number: data.number,
+        vendorName: data.vendorName, projectName: data.projectName, stage,
+        totalLabel: data.totalLabel, totalAmount: data.totalAmount, rows: data.rows,
+        approverName: step.approverName,
+        // Approve / Reject → the review page (shows the full PDF, no login needed).
+        // Open Dashboard → the app itself, which asks the approver to sign in.
+        approveUrl: `${base}&intent=approve`, rejectUrl: `${base}&intent=reject`,
+        reviewUrl: `${appClientUrl()}/approvals`,
+        reminder: kind === 'REMINDER',
       }),
     });
+    return;
   }
+  await sendEmail({
+    to: step.approverEmail, subject: title,
+    html: approvalEmailHtml({ heading: title, lines: [`Hi ${step.approverName},`, message, 'Review and record your decision using the button below.'], actionUrl: base, actionLabel: 'Review & Approve' }),
+  });
 }
 
 // ── Build the chain on submit ────────────────────────────────────────────────

@@ -72,6 +72,12 @@ export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'
 export const APPROVAL_TYPES = ['PO', 'WO', 'GRN', 'VENDOR_PAYMENT'] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
 
+// Document types are named PAYMENT in the matrix/chain tables but VENDOR_PAYMENT
+// on user records. Route every docType through here before checking rights.
+export function approvalTypeForDoc(docType: string): ApprovalType {
+  return (docType === 'PAYMENT' ? 'VENDOR_PAYMENT' : docType) as ApprovalType;
+}
+
 export interface ApproverProfile {
   canApprove: boolean;
   approvalRole: string | null; // preset or custom label

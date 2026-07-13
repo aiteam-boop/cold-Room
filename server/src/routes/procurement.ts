@@ -21,6 +21,7 @@ import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
 import { kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
 import { deliveryInfo } from '../services/delivery';
 import { chainForAmount, validateChain, type MatrixDocType } from '../services/approvalMatrix';
+import { resolveAutoChain } from '../services/fixedChain';
 import {
   buildChain, recordDecision, remindCurrent, finalizeApproval, markDocRejected,
   getChainState, resolveActor, type DocType,
@@ -371,17 +372,24 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
   if (Math.abs(total - 100) > 0.01) throw badRequest(`Payment terms must total 100% (currently ${total}%).`);
   let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
 
-  // Value-threshold matrix (G6). When the matrix governs this doc type it decides
-  // the chain: an empty selection is filled in from the document's value, and a
-  // hand-picked one must still contain everybody the matrix requires — so a large
-  // PO cannot be routed around Finance.
-  const matrix = await chainForAmount(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount);
-  if (matrix.configured && matrix.steps.length) {
-    if (chain.length === 0) {
-      chain = matrix.steps.map((s) => s.approverId);
-    } else {
-      const check = await validateChain(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount, chain);
-      if (!check.ok) throw badRequest(check.message, { missing: check.missing, amount: doc.finalAmount });
+  // 1) FIXED chain (admin-configured in Users → Approval Chain) wins. When one
+  //    exists the document routes through it automatically — the creator never
+  //    picks approvers. Any value-mandated approver missing from it is appended
+  //    by resolveAutoChain, so Finance still can't be bypassed.
+  const auto = await resolveAutoChain(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount);
+  if (auto.source === 'fixed') {
+    chain = auto.approverIds;
+  } else {
+    // 2) No fixed chain → unchanged legacy behaviour: the value-band matrix fills
+    //    an empty selection, and a hand-picked chain must still satisfy it.
+    const matrix = await chainForAmount(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount);
+    if (matrix.configured && matrix.steps.length) {
+      if (chain.length === 0) {
+        chain = matrix.steps.map((s) => s.approverId);
+      } else {
+        const check = await validateChain(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount, chain);
+        if (!check.ok) throw badRequest(check.message, { missing: check.missing, amount: doc.finalAmount });
+      }
     }
   }
 
@@ -552,6 +560,61 @@ router.patch('/docs/:docId/milestones/:mid', requireProjectMember, requireAnyEdi
   res.json({ milestone: updated });
 }));
 
+// ── GRN payment helpers (GRN/Payment PRD v3) ─────────────────────────────────
+// Amisha does the vendor payment on the GRN itself: she picks which PO milestone
+// is being paid, uploads the PI, and the advance already paid on that PO
+// auto-fills. On GRN approval the linked milestone is TRIGGERED so the Payment
+// Pipeline (Accounts' screen) stays in step — we never touch the Pipeline UI.
+
+// The PO's payment terms (milestones) for the dropdown; paid ones are flagged so
+// the UI can disable them (§3.2–3.3).
+async function milestonesForDoc(docId: string | null | undefined) {
+  if (!docId) return [];
+  return prisma.paymentMilestone.findMany({
+    where: { docId },
+    orderBy: { sortOrder: 'asc' },
+    select: { id: true, name: true, fieldKey: true, percentage: true, inrAmount: true, status: true },
+  });
+}
+
+// "Advance already paid" on the PO — the sum of its TRIGGERED/PAID milestones,
+// which auto-captures on the GRN payment entry (§3.4).
+async function advancePaidOnDoc(docId: string | null | undefined): Promise<number> {
+  if (!docId) return 0;
+  const rows = await prisma.paymentMilestone.findMany({
+    where: { docId, status: { in: ['TRIGGERED', 'PAID'] } },
+    select: { inrAmount: true },
+  });
+  return rows.reduce((s, r) => s + (r.inrAmount || 0), 0);
+}
+
+// On GRN approval: reflect the chosen milestone onto the PO's Payment Pipeline
+// (PENDING → TRIGGERED) and start the GRN's own payment ladder (→ TRIGGERED), so
+// it flows to Accounts to pay. Mirrors the FMS entry so the two stay consistent.
+// Only meaningful when a milestone/payment is attached — pure goods-receipt GRNs
+// carry no payment lifecycle.
+async function onGrnApproved(grn: { id: string; milestoneId: string | null; paymentStatus: string | null }) {
+  if (!grn.milestoneId) return;
+  const m = await prisma.paymentMilestone.findUnique({ where: { id: grn.milestoneId } });
+  if (m && m.status === 'PENDING') {
+    await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'TRIGGERED', actualTriggerDate: new Date() } });
+  }
+  // Advance the GRN payment ladder to TRIGGERED unless it's already further along
+  // (a re-approval after an amendment must not rewind PAID/CLOSED).
+  if (!grn.paymentStatus) {
+    await prisma.gRN.update({ where: { id: grn.id }, data: { paymentStatus: 'TRIGGERED' } });
+  }
+}
+
+// Accounts recorded the UTR: mark the linked milestone PAID with the reference.
+async function payGrnMilestone(grn: { milestoneId: string | null }, utr: string | null, paidAt: Date) {
+  if (!grn.milestoneId) return;
+  const m = await prisma.paymentMilestone.findUnique({ where: { id: grn.milestoneId } });
+  if (m && m.status !== 'PAID') {
+    await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'PAID', paymentDate: paidAt, utrNumber: utr, paymentReference: utr } });
+  }
+}
+
 // ── GRN ─────────────────────────────────────────────────────────────────────
 //
 // Who sees what (Sprint PRD §7.2). A site engineer raises the GRN and must see
@@ -631,7 +694,11 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
   });
   if (!grn) throw notFound();
   const approval = await getChainState('GRN', grn.id);
-  res.json({ grn: serializeGrn(grn, req.account), approval });
+  // Payment section (§3): the PO's milestones for the term dropdown and the
+  // advance already paid, which auto-fills to compute the balance.
+  const milestones = await milestonesForDoc(grn.docId);
+  const advanceOnPo = await advancePaidOnDoc(grn.docId);
+  res.json({ grn: serializeGrn(grn, req.account), approval, milestones, advanceOnPo });
 }));
 
 // Accept null on optional fields — the client sends null (not undefined) for
@@ -640,6 +707,11 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
 const grnUpdate = z.object({
   vehicleNumber: z.string().nullable().optional(), driverName: z.string().nullable().optional(), deliveryChallanNumber: z.string().nullable().optional(),
   invoiceNumber: z.string().nullable().optional(), invoiceDate: z.string().nullable().optional(), invoiceValue: z.coerce.number().nullable().optional(), ewayBillNumber: z.string().nullable().optional(),
+  // Payment (§3): which PO milestone is being paid, the PI that drives it, and
+  // the (editable, possibly partial) amount to pay.
+  milestoneId: z.string().nullable().optional(), milestoneKey: z.string().nullable().optional(), milestoneName: z.string().nullable().optional(),
+  piNumber: z.string().nullable().optional(), piDate: z.string().nullable().optional(), piValue: z.coerce.number().nullable().optional(),
+  amountToPay: z.coerce.number().nullable().optional(),
   lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
   // Required to amend an APPROVED GRN — the reason for the post-approval change.
   amendmentRemark: z.string().trim().max(2000).optional(),
@@ -649,8 +721,16 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
   if (!grn) throw notFound();
   const b = grnUpdate.parse(req.body);
 
+  // On a payment GRN the tax invoice legitimately arrives AFTER approval (§6), so
+  // recording its number/date/value is the closing step, not an amendment — no
+  // reason required. A patch that touches anything else is still an amendment.
+  const TAX_INVOICE_FIELDS = ['invoiceNumber', 'invoiceDate', 'invoiceValue', 'ewayBillNumber'];
+  const touched = Object.keys(b).filter((k) => k !== 'amendmentRemark' && (b as Record<string, unknown>)[k] !== undefined);
+  const taxInvoiceOnly = touched.length > 0 && touched.every((k) => TAX_INVOICE_FIELDS.includes(k));
+  const closingTaxInvoice = grn.status === 'APPROVED' && !!grn.milestoneId && taxInvoiceOnly;
+
   // An approved GRN may be amended, but only with a reason — logged for everyone.
-  const isAmendment = grn.status === 'APPROVED';
+  const isAmendment = grn.status === 'APPROVED' && !closingTaxInvoice;
   if (isAmendment && (!b.amendmentRemark || b.amendmentRemark.trim().length < 3)) {
     throw forbidden('This GRN is approved. To change it you must give a reason for the amendment (min 3 characters).');
   }
@@ -670,22 +750,47 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
     data: {
       ...(b.vehicleNumber !== undefined && { vehicleNumber: b.vehicleNumber }), ...(b.driverName !== undefined && { driverName: b.driverName }), ...(b.deliveryChallanNumber !== undefined && { deliveryChallanNumber: b.deliveryChallanNumber }),
       ...(b.invoiceNumber !== undefined && { invoiceNumber: b.invoiceNumber }), ...(b.invoiceDate !== undefined && { invoiceDate: b.invoiceDate ? new Date(b.invoiceDate) : null }), ...(b.invoiceValue !== undefined && { invoiceValue: b.invoiceValue }), ...(b.ewayBillNumber !== undefined && { ewayBillNumber: b.ewayBillNumber }),
+      ...(b.milestoneId !== undefined && { milestoneId: b.milestoneId }), ...(b.milestoneKey !== undefined && { milestoneKey: b.milestoneKey }), ...(b.milestoneName !== undefined && { milestoneName: b.milestoneName }),
+      ...(b.piNumber !== undefined && { piNumber: b.piNumber }), ...(b.piDate !== undefined && { piDate: b.piDate ? new Date(b.piDate) : null }), ...(b.piValue !== undefined && { piValue: b.piValue }),
+      ...(b.amountToPay !== undefined && { amountToPay: b.amountToPay }),
       ...(amendments !== undefined && { amendments }),
     },
     include: { lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } } },
   });
   if (isAmendment) {
     await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_AMEND', entity: 'GRN', entityId: grn.id, details: { remark: b.amendmentRemark } });
+  } else if (closingTaxInvoice) {
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_TAX_INVOICE', entity: 'GRN', entityId: grn.id, details: { invoiceNumber: b.invoiceNumber, invoiceValue: b.invoiceValue } });
   }
   res.json({ grn: serializeGrn(updated, req.account) });
 }));
 
-// Upload GRN invoice PDF (mandatory before submit).
+// Upload the Tax Invoice PDF. It arrives AFTER payment (§6): uploading it on a
+// PAID GRN CLOSES the payment entry so it leaves Amisha's bucket. If payment has
+// not happened yet it just attaches — the GRN can be "paid but still open".
 router.post('/grns/:grnId/invoice', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw badRequest('No file uploaded');
-  const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { invoicePdfUrl: `/uploads/${req.file.filename}` } });
-  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'TAX_INVOICE', fileName: req.file.originalname, fileUrl: `/uploads/${req.file.filename}`, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
-  res.json({ ok: true, invoicePdfUrl: grn.invoicePdfUrl });
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const existing = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, select: { paymentStatus: true } });
+  const closeNow = existing?.paymentStatus === 'PAID';
+  const grn = await prisma.gRN.update({
+    where: { id: req.params.grnId },
+    data: { invoicePdfUrl: fileUrl, ...(closeNow && { paymentStatus: 'CLOSED', paymentClosedAt: new Date() }) },
+  });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'TAX_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  if (closeNow) await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_PAYMENT_CLOSE', entity: 'GRN', entityId: grn.id, details: { via: 'tax-invoice' } });
+  res.json({ ok: true, invoicePdfUrl: grn.invoicePdfUrl, paymentStatus: grn.paymentStatus });
+}));
+
+// Upload the Proforma Invoice (PI) — drives the payment and comes BEFORE the tax
+// invoice (§3.1, §3.6). Stored under piPdfUrl on the GRN; PI number/date are
+// entered/auto-captured on the form and saved via PATCH.
+router.post('/grns/:grnId/pi', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { piPdfUrl: fileUrl } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.json({ ok: true, piPdfUrl: grn.piPdfUrl });
 }));
 
 // Upload a photo of the received material (optional — Sprint PRD §7.2).
@@ -701,17 +806,32 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
   if (grn.status === 'OPEN') throw badRequest('Already awaiting approval.');
-  if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
+  // §1/§6: a payment GRN is submitted against the PI (the tax invoice arrives
+  // later and closes it). A pure goods-receipt GRN still needs its tax invoice.
+  if (grn.milestoneId) {
+    if (!grn.piPdfUrl) throw badRequest('Upload the Proforma Invoice (PI) before submitting — payment is made against the PI.');
+    if (grn.amountToPay == null || grn.amountToPay <= 0) throw badRequest('Enter the amount to pay before submitting.');
+  } else if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) {
+    throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
+  }
   const isResubmit = grn.status === 'APPROVED';
   let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
 
-  // A GRN's value is the invoice it certifies, so the same matrix applies (G6).
-  const matrix = await chainForAmount('GRN', req.params.projectId, grn.invoiceValue);
-  if (matrix.configured && matrix.steps.length) {
-    if (chain.length === 0) chain = matrix.steps.map((s) => s.approverId);
-    else {
-      const check = await validateChain('GRN', req.params.projectId, grn.invoiceValue, chain);
-      if (!check.ok) throw badRequest(check.message, { missing: check.missing, amount: grn.invoiceValue });
+  // The value that drives the approval matrix (G6): the amount being paid for a
+  // payment GRN, else the tax-invoice value it certifies.
+  const chainAmount = grn.milestoneId ? (grn.amountToPay ?? grn.piValue ?? 0) : (grn.invoiceValue ?? 0);
+  // Fixed admin chain wins (auto-routed, no popup); otherwise legacy matrix flow.
+  const autoGrn = await resolveAutoChain('GRN', req.params.projectId, chainAmount);
+  if (autoGrn.source === 'fixed') {
+    chain = autoGrn.approverIds;
+  } else {
+    const matrix = await chainForAmount('GRN', req.params.projectId, chainAmount);
+    if (matrix.configured && matrix.steps.length) {
+      if (chain.length === 0) chain = matrix.steps.map((s) => s.approverId);
+      else {
+        const check = await validateChain('GRN', req.params.projectId, chainAmount, chain);
+        if (!check.ok) throw badRequest(check.message, { missing: check.missing, amount: chainAmount });
+      }
     }
   }
 
@@ -724,7 +844,7 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
     const actor = await resolveActor(req.account!.id);
     await buildChain('GRN', grn.id, req.params.projectId, chain, actor);
   } else {
-    await notifyProjectRoles(req.params.projectId, ['ADMIN', 'SUPERVISOR'], { type: 'GRN_SUBMITTED', title: 'GRN awaiting approval', message: `${grn.grnNumber} (${grn.vendorName || 'vendor'}), invoice ${rs(grn.invoiceValue ?? 0)} — review needed.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
+    await notifyProjectRoles(req.params.projectId, ['ADMIN', 'SUPERVISOR'], { type: 'GRN_SUBMITTED', title: 'GRN awaiting approval', message: `${grn.grnNumber} (${grn.vendorName || 'vendor'}), ${rs(chainAmount)} — review needed.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
   }
   res.json({ grn: updated });
 }));
@@ -738,12 +858,13 @@ router.post('/grns/:grnId/approve', asyncHandler(async (req, res) => {
   const stepCount = await prisma.approvalStep.count({ where: { docType: 'GRN', docId: grn.id } });
   if (stepCount > 0) {
     const outcome = await recordDecision('GRN', grn.id, actor, 'APPROVE', remarks);
-    if (outcome === 'COMPLETED') await finalizeApproval('GRN', grn.id, actor.id);
+    if (outcome === 'COMPLETED') { await finalizeApproval('GRN', grn.id, actor.id); await onGrnApproved(grn); }
     await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_APPROVE', entity: 'GRN', entityId: grn.id, details: { outcome } });
     return res.json({ ok: true, outcome });
   }
   if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
   await finalizeApproval('GRN', grn.id, actor.id);
+  await onGrnApproved(grn);
   await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_APPROVE', entity: 'GRN', entityId: grn.id, details: { legacy: true } });
   res.json({ ok: true, outcome: 'COMPLETED' });
 }));
@@ -771,6 +892,38 @@ router.post('/grns/:grnId/remind', requireProjectMember, asyncHandler(async (req
   const actor = await resolveActor(req.account!.id);
   await remindCurrent('GRN', grn.id, actor);
   res.json({ ok: true });
+}));
+
+// ── Payment side: Accounts pay the vendor (§5–§6) ─────────────────────────────
+// After the GRN is approved (milestone TRIGGERED), Accounts enter the UTR and
+// Mark Paid. The GRN becomes PAID — but stays OPEN in Amisha's bucket until the
+// tax invoice is uploaded, at which point it CLOSES. If the tax invoice is
+// already on file, paying closes it immediately.
+router.post('/grns/:grnId/mark-paid', requireProjectMember, requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (grn.status !== 'APPROVED') throw badRequest('Only an approved GRN can be marked paid.');
+  if (grn.paymentStatus === 'PAID' || grn.paymentStatus === 'CLOSED') throw badRequest('This payment is already marked paid.');
+  const b = z.object({ utrNumber: z.string().trim().min(1, 'A UTR / payment reference is required.'), paidAt: z.string().optional() }).parse(req.body ?? {});
+  const paidAt = b.paidAt ? new Date(b.paidAt) : new Date();
+  // Paid, but only CLOSE once the tax invoice is on file (§6).
+  const closeNow = !!grn.invoicePdfUrl;
+  const updated = await prisma.gRN.update({
+    where: { id: grn.id },
+    data: { paymentStatus: closeNow ? 'CLOSED' : 'PAID', utrNumber: b.utrNumber, paidAt, ...(closeNow && { paymentClosedAt: new Date() }) },
+  });
+  await payGrnMilestone(grn, b.utrNumber, paidAt);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_MARK_PAID', entity: 'GRN', entityId: grn.id, details: { utr: b.utrNumber, closed: closeNow } });
+  res.json({ grn: updated });
+}));
+
+// Optional payment-proof PDF (bank advice / UTR screenshot) shown on the entry.
+router.post('/grns/:grnId/payment-proof', requireProjectMember, requireSection('canMarkPaid'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { paymentProofUrl: fileUrl } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PAYMENT_PROOF', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.json({ ok: true, paymentProofUrl: grn.paymentProofUrl });
 }));
 
 // The GRN PDF carries no PO pricing — only the vendor invoice data the raiser
@@ -815,7 +968,9 @@ router.post('/vendors/:vendorId/kyc', requireProjectMember, requireEdit('vendors
 router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'financials'), asyncHandler(async (req, res) => {
   const docs = await prisma.procurementDoc.findMany({
     where: { projectId: req.params.projectId, status: 'APPROVED' },
-    include: { milestones: true, grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true } } },
+    // PI (proforma) fields ride alongside the tax invoice: payment is made on the
+    // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
+    include: { milestones: true, grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } } },
   });
   const rows = docs.map((d) => {
     const invoiced = d.grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
@@ -832,7 +987,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,
       milestonesTriggered: triggered, milestonesTotal: d.milestones.length,
       grnStatus: d.grns.length ? 'GRN Approved' : 'No GRN', delayed,
-      grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl })),
+      grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
         id: m.id, name: m.name, percentage: m.percentage, inrAmount: m.inrAmount, status: m.status,
         triggerCondition: m.triggerCondition, expectedDate: m.expectedDate, actualTriggerDate: m.actualTriggerDate,

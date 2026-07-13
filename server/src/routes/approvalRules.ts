@@ -9,7 +9,7 @@ import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
 import { requireAuth } from '../middleware/authMiddleware';
 import { audit } from '../lib/audit';
 import { isAdmin } from '../lib/enums';
-import { parseApprover, approverHandlesType, type ApprovalType } from '../lib/permissions';
+import { parseApprover, approverHandlesType, approvalTypeForDoc } from '../lib/permissions';
 import { bandLabel, chainForAmount, type MatrixDocType } from '../services/approvalMatrix';
 
 const router = Router();
@@ -42,7 +42,7 @@ async function validateRule(b: z.infer<typeof ruleSchema>) {
   if (!user.active) throw badRequest(`${user.name} is deactivated and cannot be an approver.`);
 
   const prof = parseApprover(user.approver);
-  if (!approverHandlesType(prof, b.docType as ApprovalType)) {
+  if (!approverHandlesType(prof, approvalTypeForDoc(b.docType))) {
     throw badRequest(`${user.name} is not registered as an approver for ${b.docType}. Enable it on their user record first.`);
   }
   return { user, prof };
@@ -81,7 +81,7 @@ router.get('/candidates', asyncHandler(async (req, res) => {
   res.json({
     candidates: users
       .map((u) => ({ ...u, profile: parseApprover(u.approver) }))
-      .filter((u) => approverHandlesType(u.profile, docType as ApprovalType))
+      .filter((u) => approverHandlesType(u.profile, approvalTypeForDoc(docType)))
       .map((u) => ({ id: u.id, name: u.name, email: u.email, approvalRole: u.profile.approvalRole, level: u.profile.level })),
   });
 }));
