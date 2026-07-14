@@ -70,6 +70,8 @@ router.post(
     if (!user.active) throw unauthorized('Your account has been deactivated. Contact an administrator.');
 
     await audit({ userId: user.id, action: 'USER_LOGIN', entity: 'User', entityId: user.id });
+    // Stamp the login so the Users admin can show who is actually using the app.
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     const token = signToken({ sub: user.id, email: user.email, role: user.role as never, name: user.name });
     res.json({ token, user: publicUser(user) });
   })

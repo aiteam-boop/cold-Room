@@ -102,7 +102,7 @@ export default function ProjectsList() {
           action={user?.role === 'ADMIN' ? <button className="btn-primary mt-2" onClick={() => setShowCreate(true)}>+ New Project</button> : undefined}
         />
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {projects.map((p) => <ProjectCardTile key={p.id} p={p} />)}
         </div>
       )}

@@ -22,7 +22,10 @@ interface UserRow {
   pageAccess: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sectionPerms: Partial<Record<SectionKey, boolean>>;
   approver?: ApproverProfile;
+  lastLoginAt?: string | null;
 }
+
+const fmtDateTime = (s: string) => new Date(s).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' });
 interface UserDetail extends UserRow { projects: { projectId: string; role: string }[] }
 
 type ProjAccess = Record<string, { included: boolean; role: string }>;
@@ -39,6 +42,7 @@ export default function UsersAdmin() {
   const qc = useQueryClient();
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<Form | null>(null);
+  const [activityFor, setActivityFor] = useState<UserRow | null>(null);
 
   const metaQ = useQuery({ queryKey: ['users-meta'], queryFn: async () => (await api.get('/users/meta')).data as Meta });
   const usersQ = useQuery({ queryKey: ['users'], queryFn: async () => (await api.get('/users')).data.users as UserRow[] });
@@ -87,7 +91,7 @@ export default function UsersAdmin() {
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-            <tr><th className="px-4 py-2">Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr>
+            <tr><th className="px-4 py-2">Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th className="text-right">Actions</th></tr>
           </thead>
           <tbody>
             {filtered.map((u) => (
@@ -96,12 +100,21 @@ export default function UsersAdmin() {
                 <td className="text-slate-500">{u.email}</td>
                 <td><span className={`badge ${u.role === 'ADMIN' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}`}>{u.role}</span></td>
                 <td>{u.active ? <span className="badge bg-green-100 text-green-700">Active</span> : <span className="badge bg-red-100 text-red-700">Disabled</span>}</td>
-                <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => openEdit(u.id)}>Edit →</button></td>
+                {/* Stamped on every login; "—" means this account has never signed in. */}
+                <td className="text-slate-500">{u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : <span className="text-slate-300">never</span>}</td>
+                <td className="px-2 text-right">
+                  <div className="flex justify-end gap-3">
+                    <button className="text-xs font-medium text-navy hover:underline" onClick={() => setActivityFor(u)}>Activity</button>
+                    <button className="text-xs font-medium text-navy hover:underline" onClick={() => openEdit(u.id)}>Edit →</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {activityFor && <ActivityModal user={activityFor} onClose={() => setActivityFor(null)} />}
 
       <ApprovalPermissions users={users} meta={meta} onSaved={() => qc.invalidateQueries({ queryKey: ['users'] })} />
 
@@ -400,6 +413,127 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Per-user activity (admin) ────────────────────────────────────────────────
+// "What has this person actually done?" — what they raised (POs/WOs/GRNs/payments),
+// what they approved or rejected, and the full action trail from the audit log.
+interface Activity {
+  user: { id: string; name: string; email: string; role: string; lastLoginAt: string | null };
+  summary: {
+    lastLoginAt: string | null;
+    loginCount: number;
+    totalActions: number;
+    created: { PO: number; WO: number; GRN: number; PAYMENT: number; VENDOR: number; CHANGE_ORDER: number };
+    approved: Record<string, number>;
+    onHold: Record<string, number>;
+    totalApproved: number;
+    totalOnHold: number;
+  };
+  actions: { id: string; action: string; entity: string | null; entityId: string | null; details: any; at: string; projectName: string | null }[];
+}
+
+// Audit actions are stored as CONSTANT_CASE — render them as readable English.
+const prettyAction = (a: string) => a.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+function Stat({ label, value, accent = 'text-navy' }: { label: string; value: number | string; accent?: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`text-lg font-semibold ${accent}`}>{value}</div>
+    </div>
+  );
+}
+
+function ActivityModal({ user, onClose }: { user: UserRow; onClose: () => void }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['user-activity', user.id],
+    queryFn: async () => (await api.get(`/users/${user.id}/activity`)).data as Activity,
+  });
+
+  const byType = (m: Record<string, number>) =>
+    Object.entries(m).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' · ') || '—';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6" onClick={onClose}>
+      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
+          <div>
+            <h3 className="text-lg font-bold text-navy">Activity — {user.name}</h3>
+            <p className="text-sm text-slate-500">{user.email}</p>
+          </div>
+          <button className="text-2xl leading-none text-slate-400 hover:text-slate-600" onClick={onClose}>×</button>
+        </div>
+
+        {isLoading && <div className="p-6"><Spinner label="Loading activity…" /></div>}
+        {error && <div className="p-6 text-sm text-red-600">{errMsg(error)}</div>}
+
+        {data && (
+          <div className="space-y-4 p-5">
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Overview</div>
+              <div className="grid gap-2 sm:grid-cols-4">
+                <Stat label="Last login" value={data.summary.lastLoginAt ? fmtDateTime(data.summary.lastLoginAt) : 'never'} accent="text-slate-700" />
+                <Stat label="Logins" value={data.summary.loginCount} accent="text-slate-700" />
+                <Stat label="Approved" value={data.summary.totalApproved} accent="text-green-600" />
+                <Stat label="On hold" value={data.summary.totalOnHold} accent="text-orange-600" />
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Documents they raised</div>
+              <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                <Stat label="POs" value={data.summary.created.PO} />
+                <Stat label="WOs" value={data.summary.created.WO} />
+                <Stat label="GRNs" value={data.summary.created.GRN} />
+                <Stat label="Payments" value={data.summary.created.PAYMENT} />
+                <Stat label="Vendors" value={data.summary.created.VENDOR} />
+                <Stat label="Change orders" value={data.summary.created.CHANGE_ORDER} />
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-green-700">Approved by document type</div>
+                <div className="text-sm text-green-900">{byType(data.summary.approved)}</div>
+              </div>
+              <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-orange-700">Put on hold by document type</div>
+                <div className="text-sm text-orange-900">{byType(data.summary.onHold)}</div>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Action history — {data.summary.totalActions} total{data.summary.totalActions > data.actions.length ? `, showing the latest ${data.actions.length}` : ''}
+              </div>
+              {data.actions.length === 0 ? (
+                <div className="rounded-lg border border-slate-200 px-3 py-6 text-center text-sm text-slate-400">No recorded activity yet.</div>
+              ) : (
+                <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-200">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-slate-400">
+                      <tr><th className="px-3 py-2">When</th><th>Action</th><th>Entity</th><th>Project</th></tr>
+                    </thead>
+                    <tbody>
+                      {data.actions.map((a) => (
+                        <tr key={a.id} className="border-t border-slate-100">
+                          <td className="whitespace-nowrap px-3 py-1.5 text-slate-500">{fmtDateTime(a.at)}</td>
+                          <td className="font-medium text-slate-700">{prettyAction(a.action)}</td>
+                          <td className="text-slate-500">{a.entity || '—'}</td>
+                          <td className="text-slate-500">{a.projectName || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

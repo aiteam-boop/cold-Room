@@ -169,8 +169,10 @@ export default function ProjectWorkspace() {
   );
 
   if (!current) {
+    // No rail here (there are no pages to list), so this branch supplies the page
+    // padding the workspace <main> normally owns.
     return (
-      <div>
+      <div className="px-5 py-6 lg:px-6">
         {metricBar}
         <div className="card p-8 text-center text-slate-500">
           You don’t have access to any pages in this project. Contact an administrator.
@@ -180,40 +182,45 @@ export default function ProjectWorkspace() {
   }
 
   return (
-    <div className="flex gap-5">
-      {/* Left sidebar menu */}
-      <aside className="w-56 shrink-0">
-        <div className="card sticky top-20 overflow-hidden p-0">
-          <div className="flex items-center gap-2 border-b border-slate-100 p-4">
-            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-navy text-sm font-bold text-white">{p.name.slice(0, 1)}</div>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-navy">{p.name}</div>
-              <div className="truncate text-xs text-slate-400">{p.clientName || 'Cold Room Project'}</div>
-            </div>
+    <>
+      {/* Left rail — FIXED to the viewport, not to the page flow.
+          `fixed left-0 top-14` anchors it to the screen's left edge, directly
+          under the 56px header, so it is completely independent of the page's
+          centred container and cannot drift sideways when the browser is zoomed
+          or the window resized. It scrolls inside itself (overflow-y-auto) rather
+          than with the page, so it stays put while the content scrolls. */}
+      <aside className="fixed bottom-0 left-0 top-14 z-30 flex w-60 flex-col overflow-y-auto border-r border-slate-200 bg-white">
+        <div className="flex items-center gap-2 border-b border-slate-100 p-4">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-navy text-sm font-bold text-white">{p.name.slice(0, 1)}</div>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-navy">{p.name}</div>
+            <div className="truncate text-xs text-slate-400">{p.clientName || 'Cold Room Project'}</div>
           </div>
-          <nav className="p-2">
-            {menu.map((g) => (
-              <div key={g.group} className="mb-1">
-                <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{g.group}</div>
-                {g.items.map((it) => {
-                  const nav: Nav = { key: it.key, view: it.view };
-                  const on = current != null && navId(current) === navId(nav);
-                  return (
-                    <button key={navId(nav)} onClick={() => setActive(nav)}
-                      className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition ${on ? 'bg-navy/10 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
-                      <span className={on ? 'text-navy' : 'text-slate-400'}>{ICONS[it.icon]}</span>
-                      {it.label}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-          </nav>
         </div>
+        <nav className="p-2">
+          {menu.map((g) => (
+            <div key={g.group} className="mb-1">
+              <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{g.group}</div>
+              {g.items.map((it) => {
+                const nav: Nav = { key: it.key, view: it.view };
+                const on = current != null && navId(current) === navId(nav);
+                return (
+                  <button key={navId(nav)} onClick={() => setActive(nav)}
+                    className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${on ? 'bg-navy/10 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
+                    <span className={`shrink-0 ${on ? 'text-navy' : 'text-slate-400'}`}>{ICONS[it.icon]}</span>
+                    <span className="min-w-0 flex-1">{it.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
       </aside>
 
-      {/* Main content */}
-      <main className="min-w-0 flex-1">
+      {/* Main content — offset by exactly the rail's width (w-60 → pl-60), so it
+          fills everything to the right of the rail and never sits under it. */}
+      <main className="min-w-0 pl-60">
+        <div className="px-5 py-6 lg:px-6">
         {metricBar}
         {current.key === 'dashboard' && <DashboardTab projectId={projectId!} onOpenGantt={canView('gantt') ? () => setActive({ key: 'gantt' }) : undefined} />}
         {current.key === 'boq' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
@@ -238,8 +245,9 @@ export default function ProjectWorkspace() {
         )}
         {current.key === 'dpr' && current.view === 'handover' && <RoomHandoverTab projectId={projectId!} onOpenRoom={openRoom} />}
         {current.key === 'dpr' && current.view === 'milestones' && <MilestonesTab projectId={projectId!} />}
+        </div>
       </main>
-    </div>
+    </>
   );
 }
 

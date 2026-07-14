@@ -1,15 +1,26 @@
-import { Link, NavLink, Outlet } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import NotificationBell from './NotificationBell';
 import ErrorBoundary from './ErrorBoundary';
 
 export default function AppShell() {
   const { user, logout, isAdmin, canView } = useAuth();
+  const { pathname } = useLocation();
   const navCls = ({ isActive }: { isActive: boolean }) => `rounded-lg px-2.5 py-1.5 ${isActive ? 'bg-white/15 text-white' : 'text-slate-200 hover:bg-white/10'}`;
+
+  // The project workspace pins a rail to the viewport's left edge (see
+  // ProjectWorkspace), so it must run full-bleed: a centred, max-width column
+  // would drag the content away from that fixed rail. Every other page keeps the
+  // centred column, capped so rows don't stretch on an ultra-wide display.
+  const isWorkspace = /^\/projects\/[^/]+/.test(pathname);
+  const container = 'mx-auto w-full max-w-[1920px] px-5 lg:px-6';
+
   return (
     <div className="min-h-screen">
+      {/* h-14 (56px) is a fixed, known height — the workspace rail anchors itself
+          directly beneath it with `top-14`. Don't change it without updating that. */}
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-navy text-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
+        <div className={`flex h-14 items-center justify-between gap-3 ${isWorkspace ? 'w-full px-5 lg:px-6' : container}`}>
           <div className="flex items-center gap-4">
             <Link to="/" className="flex items-center gap-2 font-semibold">
               <span className="grid h-8 w-8 place-items-center rounded-lg bg-white/10">❄</span>
@@ -37,7 +48,8 @@ export default function AppShell() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-4 py-6">
+      {/* The workspace owns its own padding (it has to clear the fixed rail). */}
+      <main className={isWorkspace ? '' : `py-6 ${container}`}>
         <ErrorBoundary>
           <Outlet />
         </ErrorBoundary>

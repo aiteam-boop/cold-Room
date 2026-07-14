@@ -32,6 +32,9 @@ model User {
   approver     String?
   twoFactor    Boolean          @default(false)
   createdAt    DateTime         @default(now())
+  // Stamped on every successful login, so the Users admin can show who is
+  // actually using the system. Backfilled from the USER_LOGIN audit trail.
+  lastLoginAt  DateTime?
 
   memberships  ProjectMember[]
   submitted    ProgressEntry[]  @relation("SubmittedBy")
@@ -1065,4 +1068,6 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@index([projectId])
+  // The per-user activity view reads this trail by user, newest first.
+  @@index([userId])
 }

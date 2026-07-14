@@ -33,6 +33,7 @@ const projectsInput = z
 function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
   whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
+  lastLoginAt?: Date | null;
 }) {
   return {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
@@ -41,6 +42,7 @@ function publicUser(u: {
     sectionPerms: parseSections(u.sectionPerms),
     approver: parseApprover(u.approver),
     createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt ?? null,
   };
 }
 
@@ -48,6 +50,7 @@ function publicUser(u: {
 const USER_SELECT = {
   id: true, name: true, email: true, role: true, active: true,
   whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
+  lastLoginAt: true,
 } as const;
 
 // GET /api/users/meta — the page/section catalogue + project list for the UI.
@@ -95,6 +98,88 @@ router.get(
     });
     if (!user) throw notFound('User not found');
     res.json({ user: { ...publicUser(user), projects: user.memberships } });
+  })
+);
+
+// GET /api/users/:id/activity — everything this user has done in the app:
+// what they RAISED (POs, WOs, GRNs, payments, vendors, change orders), what they
+// DECIDED (approved / rejected, per document type), and the raw action trail.
+// Counts come from the documents themselves — not from parsing audit strings —
+// so they stay right even if an audit action is ever renamed.
+const safeParse = (s: string | null) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
+
+// Decisions are counted from the AUDIT LOG, not from ApprovalAction: an approval
+// taken without an approval chain (the legacy/admin path) never writes an
+// ApprovalAction row, so that table under-reports. The audit log records every
+// decision on every path. Maps each decision action to the document it acted on.
+// The *_REJECT actions are historical: approvers now put a document ON HOLD
+// (*_HOLD) instead of rejecting it. Both are kept so old activity still reads.
+const DECISION_DOC: Record<string, string> = {
+  PROC_DOC_APPROVE: 'PO/WO', PROC_DOC_HOLD: 'PO/WO', PROC_DOC_REJECT: 'PO/WO',
+  GRN_APPROVE: 'GRN', GRN_HOLD: 'GRN', GRN_REJECT: 'GRN',
+  FMS_APPROVE: 'Payment', FMS_HOLD: 'Payment', FMS_REJECT: 'Payment',
+  CO_APPROVE: 'Change order', CO_REJECT: 'Change order',
+  ENTRY_APPROVE: 'DPR entry', ENTRY_REJECT: 'DPR entry',
+};
+
+router.get(
+  '/:id/activity',
+  asyncHandler(async (req, res) => {
+    const userId = req.params.id;
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, role: true, lastLoginAt: true, createdAt: true } });
+    if (!user) throw notFound('User not found');
+
+    const [docs, grnCount, paymentCount, vendorCount, changeOrderCount, decisions, loginCount, totalActions, logs] = await Promise.all([
+      prisma.procurementDoc.findMany({ where: { createdById: userId }, select: { type: true } }),
+      prisma.gRN.count({ where: { raisedById: userId } }),
+      prisma.vendorPayment.count({ where: { filledById: userId } }),
+      prisma.vendor.count({ where: { createdById: userId } }),
+      prisma.changeOrder.count({ where: { createdById: userId } }),
+      prisma.auditLog.findMany({ where: { userId, action: { in: Object.keys(DECISION_DOC) } }, select: { action: true } }),
+      prisma.auditLog.count({ where: { userId, action: 'USER_LOGIN' } }),
+      prisma.auditLog.count({ where: { userId } }),
+      prisma.auditLog.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+        include: { project: { select: { name: true } } },
+      }),
+    ]);
+
+    // Decisions tallied per document type (PO/WO, GRN, Payment, …). "On hold"
+    // also absorbs the historical *_REJECT actions from before the rename.
+    const tally = (...verbs: string[]) =>
+      decisions
+        .filter((d) => verbs.some((v) => d.action.endsWith(`_${v}`)))
+        .reduce<Record<string, number>>((m, d) => { const k = DECISION_DOC[d.action]; m[k] = (m[k] ?? 0) + 1; return m; }, {});
+    const approved = tally('APPROVE');
+    const onHold = tally('HOLD', 'REJECT');
+    const sum = (o: Record<string, number>) => Object.values(o).reduce((s, n) => s + n, 0);
+
+    res.json({
+      user,
+      summary: {
+        lastLoginAt: user.lastLoginAt,
+        loginCount,
+        totalActions,
+        created: {
+          PO: docs.filter((d) => d.type === 'PO').length,
+          WO: docs.filter((d) => d.type === 'WO').length,
+          GRN: grnCount,
+          PAYMENT: paymentCount,
+          VENDOR: vendorCount,
+          CHANGE_ORDER: changeOrderCount,
+        },
+        approved, onHold,
+        totalApproved: sum(approved),
+        totalOnHold: sum(onHold),
+      },
+      // Most recent first; capped so a heavy user doesn't blow up the response.
+      actions: logs.map((l) => ({
+        id: l.id, action: l.action, entity: l.entity, entityId: l.entityId,
+        details: safeParse(l.details), at: l.createdAt, projectName: l.project?.name ?? null,
+      })),
+    });
   })
 );
 

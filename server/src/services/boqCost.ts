@@ -20,6 +20,9 @@ export type PaymentStatus = 'Paid' | 'Partial' | 'Advance' | 'Pending';
 /** Material receipt against a PO. Derived from its GRNs. */
 export type ReceiptStatus = 'Received' | 'Partially Received' | 'Awaiting GRN' | 'Not Received';
 
+/** A paid milestone, for the "Paid" breakdown on the BOQ row. */
+export interface PaidMilestone { name: string; fieldKey: string; inrAmount: number }
+
 /** One GRN + its invoice, as shown inline on the BOQ row (transcript R8). */
 export interface CostGRNRow {
   grnId: string;
@@ -29,6 +32,10 @@ export interface CostGRNRow {
   invoiceNumber: string | null;
   invoiceValue: number | null;
   invoicePdfUrl: string | null;
+  // Proforma Invoice — drives the payment, arrives before the tax invoice (§3/§6).
+  piNumber: string | null;
+  piValue: number | null;
+  piPdfUrl: string | null;
   grnPdfUrl: string;
 }
 
@@ -43,6 +50,8 @@ export interface CostPORow {
   totalCost: number;
   advancePaid: number;
   amountPaid: number;
+  /** Every PAID milestone (Advance, Before Delivery, Running…) with its amount. */
+  paidMilestones: PaidMilestone[];
   balancePending: number;
   paymentStatus: PaymentStatus;
   // ── Material + invoice trail (transcript R8: "GRN yahin pe aana chahiye agar
@@ -70,6 +79,10 @@ export interface CostItemRow {
   totalOrderedQty: number;
   totalOrderedCost: number;
   totalAdvancePaid: number;
+  /** Total paid across ALL milestones (advance + before-delivery + running…). */
+  totalPaid: number;
+  /** Aggregated paid-milestone breakdown, so "why is the balance X" is visible. */
+  paidMilestones: PaidMilestone[];
   totalBalancePending: number;
   paymentStatus: PaymentStatus;
   /** Rollup of the receipt state across every linked PO. */
@@ -128,7 +141,7 @@ export async function buildCostSheet(projectId: string) {
           select: {
             id: true, docNumber: true, type: true, status: true, vendorName: true, basicAmount: true,
             promisedDeliveryDate: true, requiredByDate: true,
-            milestones: { select: { fieldKey: true, status: true, inrAmount: true } },
+            milestones: { select: { fieldKey: true, name: true, status: true, inrAmount: true } },
             grns: { select: { grnDate: true, status: true } },
           },
         },
@@ -142,6 +155,7 @@ export async function buildCostSheet(projectId: string) {
       select: {
         id: true, grnNumber: true, grnDate: true, status: true, docId: true, projectId: true,
         invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true,
+        piNumber: true, piValue: true, piPdfUrl: true,
         lineItems: { select: { lineItemId: true, acceptedQty: true } },
       },
       orderBy: { grnDate: 'asc' },
@@ -152,7 +166,7 @@ export async function buildCostSheet(projectId: string) {
     // line is linked to the BOQ item.
     prisma.procurementDoc.findMany({
       where: { projectId },
-      select: { id: true, docNumber: true, vendorName: true, type: true, basicAmount: true, finalAmount: true, status: true, milestones: { select: { fieldKey: true, status: true, inrAmount: true } } },
+      select: { id: true, docNumber: true, vendorName: true, type: true, basicAmount: true, finalAmount: true, status: true, milestones: { select: { fieldKey: true, name: true, status: true, inrAmount: true } } },
     }),
   ]);
   const annById = new Map(annotations.map((a) => [a.boqItemId, a]));
@@ -181,6 +195,9 @@ export async function buildCostSheet(projectId: string) {
       invoiceNumber: g.invoiceNumber,
       invoiceValue: g.invoiceValue,
       invoicePdfUrl: g.invoicePdfUrl,
+      piNumber: g.piNumber,
+      piValue: g.piValue,
+      piPdfUrl: g.piPdfUrl,
       grnPdfUrl: `/api/projects/${g.projectId}/procurement/grns/${g.id}/pdf`,
     };
     const list = grnsByDoc.get(g.docId) ?? [];
@@ -227,6 +244,8 @@ export async function buildCostSheet(projectId: string) {
       totalCost: l.totalPrice,
       advancePaid,
       amountPaid,
+      // Each paid milestone scaled by this line's share of the PO.
+      paidMilestones: l.doc.milestones.filter((m) => m.status === 'PAID').map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: r2(m.inrAmount * share) })),
       balancePending: r2(l.totalPrice - amountPaid),
       paymentStatus: paymentStatus(l.totalPrice, amountPaid, advancePaid),
       qtyReceived,
@@ -262,7 +281,9 @@ export async function buildCostSheet(projectId: string) {
     return {
       poLineId: `sel-${docId}`, docId, docNumber: doc.docNumber, docType: doc.type, vendorName: doc.vendorName,
       qtyOrdered: 0, unitPrice: 0, totalCost: total,
-      advancePaid, amountPaid, balancePending: r2(total - amountPaid),
+      advancePaid, amountPaid,
+      paidMilestones: paid.map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: m.inrAmount })),
+      balancePending: r2(total - amountPaid),
       paymentStatus: paymentStatus(total, amountPaid, advancePaid),
       qtyReceived, receiptStatus: receiptStatus(0, qtyReceived, hasUnapprovedGrn),
       grns: grnsByDoc.get(docId) ?? [],
@@ -283,6 +304,17 @@ export async function buildCostSheet(projectId: string) {
     const totalPaid = r2(pos.reduce((s, p) => s + p.amountPaid, 0));
     const totalOrderedQty = r2(pos.reduce((s, p) => s + p.qtyOrdered, 0));
     const totalReceivedQty = r2(pos.reduce((s, p) => s + p.qtyReceived, 0));
+
+    // Aggregate the paid-milestone breakdown across every PO on the row, merged
+    // by milestone (Advance, Before Delivery, Running…) so the "Paid" cell can
+    // show why the balance is what it is.
+    const paidAgg = new Map<string, PaidMilestone>();
+    for (const p of pos) for (const m of p.paidMilestones) {
+      const key = m.fieldKey || m.name;
+      const prev = paidAgg.get(key);
+      paidAgg.set(key, { name: m.name, fieldKey: m.fieldKey, inrAmount: r2((prev?.inrAmount ?? 0) + m.inrAmount) });
+    }
+    const paidMilestones = [...paidAgg.values()];
 
     // Finance overlay (PRD v2 §5). Effective = manual override ?? derived.
     const effectiveOrderedQty = ann?.orderedQtyOverride != null ? ann.orderedQtyOverride : totalOrderedQty;
@@ -310,8 +342,12 @@ export async function buildCostSheet(projectId: string) {
       totalOrderedQty,
       totalOrderedCost,
       totalAdvancePaid,
-      totalBalancePending: r2(totalOrderedCost - totalPaid),
-      paymentStatus: paymentStatus(totalOrderedCost, totalPaid, totalAdvancePaid),
+      totalPaid,
+      paidMilestones,
+      // Balance = the PO amount SHOWN (override ?? derived) − everything paid, so
+      // Paid + Balance always equals the PO Amount column.
+      totalBalancePending: r2(effectivePoAmount - totalPaid),
+      paymentStatus: paymentStatus(effectivePoAmount, totalPaid, totalAdvancePaid),
       totalReceivedQty,
       receiptStatus: receiptStatus(totalOrderedQty, totalReceivedQty, pos.some((p) => p.receiptStatus === 'Awaiting GRN')),
       pos,
@@ -350,6 +386,7 @@ export async function buildCostSheet(projectId: string) {
       unlinkedPOLines: unlinked.length,
       grandTotalCost,
       grandAdvancePaid: r2(rows.reduce((s, r) => s + r.totalAdvancePaid, 0)),
+      grandPaid: r2(rows.reduce((s, r) => s + r.totalPaid, 0)),
       grandBalancePending: r2(rows.reduce((s, r) => s + r.totalBalancePending, 0)),
     },
   };

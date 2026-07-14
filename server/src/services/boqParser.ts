@@ -100,6 +100,39 @@ function detectColumns(rows: unknown[][], merges: MergeRange[]): {
   return null;
 }
 
+// Under a merged "Quantity" header, real BOQ cost sheets place several per-site
+// sub-columns (e.g. a reference "Ranchi" column beside THIS sheet's own column).
+// The header-detected column is only the FIRST of the span and may belong to a
+// different site, so pick the sub-column that actually holds this sheet's
+// quantity: a sub-header naming this very sheet/site wins; otherwise an
+// UNLABELED column (the current site's — they leave its sub-header blank),
+// choosing the densest. `resolved` is true only when we deliberately picked a
+// site column, so the caller can treat it as authoritative (and stop flagging a
+// differing foreign-site column as an "ambiguous" duplicate).
+function choosePrimaryQtyCol(
+  rows: unknown[][], headerIdx: number, qtyCols: number[], sheetName: string, fallback: number,
+): { col: number; resolved: boolean } {
+  if (qtyCols.length <= 1) return { col: fallback, resolved: false };
+  const sub = rows[headerIdx + 1] ?? [];
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const site = norm(sheetName);
+  const labelOf = (c: number) => String(sub[c] ?? '').trim();
+
+  // 1. A sub-header naming this very sheet/site is unambiguous.
+  if (site) {
+    const named = qtyCols.find((c) => { const l = norm(labelOf(c)); return !!l && (l === site || l.includes(site) || site.includes(l)); });
+    if (named !== undefined) return { col: named, resolved: true };
+  }
+  // 2. An unlabeled sub-column is the current site's own quantity; pick the one
+  //    carrying the most values (the live column, not an empty spare).
+  const density = (c: number) => { let n = 0; for (let r = headerIdx + 2; r < rows.length; r++) if (toNumber(rows[r]?.[c]) != null) n++; return n; };
+  const blanks = qtyCols.filter((c) => !labelOf(c));
+  if (blanks.length) return { col: blanks.reduce((best, c) => (density(c) > density(best) ? c : best), blanks[0]), resolved: true };
+  // 3. All sub-columns are labelled foreign sites — keep the header column and
+  //    let the caller flag the row for manual review.
+  return { col: fallback, resolved: false };
+}
+
 // Heuristic: a row that looks like a category/group HEADER (no quantity, and
 // reads like a heading rather than a prose note). Real headers in cold-room
 // BOQs are short noun phrases ("Refrigerant Piping", "AIR CURTAINS"); note
@@ -147,6 +180,9 @@ export function parseSpreadsheet(filePath: string): ParseResult {
       continue;
     }
     const { headerIdx, cols, qtyCols } = detected;
+    // Under a merged Quantity header (per-site sub-columns), pick THIS sheet's
+    // own quantity column rather than the first (possibly a different site's).
+    const { col: primaryQtyCol, resolved: qtyResolved } = choosePrimaryQtyCol(rows, headerIdx, qtyCols, sheetName, cols.qty ?? -1);
     let currentCategory: string | undefined = wb.SheetNames.length > 1 ? sheetName : undefined;
     let flaggedCount = 0;
 
@@ -171,18 +207,28 @@ export function parseSpreadsheet(filePath: string): ParseResult {
       // use those only as a fallback and flag the row for manual review whenever
       // the source is ambiguous (value only in a secondary column, or two columns
       // disagree). This keeps the common case an exact 1:1 match.
-      const primaryQty = cols.qty !== undefined ? toNumber(row[cols.qty]) : null;
-      const otherQty = qtyCols.filter((c) => c !== cols.qty).map((c) => toNumber(row[c])).filter((n): n is number => n != null);
+      const primaryQty = primaryQtyCol >= 0 ? toNumber(row[primaryQtyCol]) : null;
       let qty: number | null;
       let ambiguousQty = false;
-      if (primaryQty != null) {
+      if (qtyResolved) {
+        // We identified THIS sheet's own quantity column; it is authoritative.
+        // Values in the other (foreign-site) columns are expected, not ambiguous,
+        // and an empty cell here means the item simply isn't in this site.
         qty = primaryQty;
-        if (otherQty.some((o) => o !== primaryQty)) ambiguousQty = true; // conflicting secondary value
-      } else if (otherQty.length) {
-        qty = otherQty[0]; // value sits only in a secondary column — use but flag
-        ambiguousQty = true;
       } else {
-        qty = null;
+        // Quantity header may span extra columns where a value occasionally lands;
+        // use the labelled column, fall back to a secondary, and flag when the
+        // source is ambiguous (value only in a secondary column, or two disagree).
+        const otherQty = qtyCols.filter((c) => c !== primaryQtyCol).map((c) => toNumber(row[c])).filter((n): n is number => n != null);
+        if (primaryQty != null) {
+          qty = primaryQty;
+          if (otherQty.some((o) => o !== primaryQty)) ambiguousQty = true; // conflicting secondary value
+        } else if (otherQty.length) {
+          qty = otherQty[0]; // value sits only in a secondary column — use but flag
+          ambiguousQty = true;
+        } else {
+          qty = null;
+        }
       }
 
       // makeModel / remarks DO carry down merged blocks. Strip any header label

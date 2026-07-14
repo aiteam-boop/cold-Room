@@ -34,7 +34,8 @@ interface CostGRN {
 interface CostPO {
   poLineId: string; docId: string; docNumber: string; docType: string; vendorName: string | null;
   qtyOrdered: number; unitPrice: number | null; totalCost: number | null;
-  advancePaid: number | null; balancePending: number | null; paymentStatus: string;
+  advancePaid: number | null; amountPaid: number | null; balancePending: number | null; paymentStatus: string;
+  paidMilestones: { name: string; fieldKey: string; inrAmount: number | null }[];
   qtyReceived: number; receiptStatus: string; grns: CostGRN[];
   deliveryStatus: string; deliveryDelayDays: number | null;
 }
@@ -44,6 +45,7 @@ interface CostItem {
   linkedPOIds: string[]; totalOrderedQty: number;
   totalOrderedCost: number | null; totalAdvancePaid: number | null; totalBalancePending: number | null;
   paymentStatus: string; totalReceivedQty: number; receiptStatus: string; pos: CostPO[];
+  totalPaid: number | null; paidMilestones: { name: string; fieldKey: string; inrAmount: number | null }[];
   // Finance overlay (PRD v2 §5)
   orderedQtyOverride: number | null; poAmountOverride: number | null; rateOverride: number | null;
   plannedDeliveryDate: string | null; actualDeliveryDate: string | null; deliveryDelayDays: number | null;
@@ -55,7 +57,7 @@ interface POOption { id: string; docNumber: string; vendorName: string | null; f
 interface CostSheet {
   items: CostItem[];
   unlinked: (CostPO & { description: string; uom: string | null; docStatus: string })[];
-  summary: { itemsWithPO: number; itemsWithoutPO: number; unlinkedPOLines: number; grandTotalCost: number | null; grandAdvancePaid: number | null; grandBalancePending: number | null };
+  summary: { itemsWithPO: number; itemsWithoutPO: number; unlinkedPOLines: number; grandTotalCost: number | null; grandAdvancePaid: number | null; grandPaid: number | null; grandBalancePending: number | null };
 }
 
 export default function BOQCostView({ projectId }: { projectId: string }) {
@@ -117,7 +119,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <KPI label="Total Ordered Cost" value={money(summary.grandTotalCost)} />
-        <KPI label="Advance Paid" value={money(summary.grandAdvancePaid)} accent="#d97706" />
+        <KPI label="Total Paid" value={money(summary.grandPaid)} sub={summary.grandAdvancePaid ? `incl. ${money(summary.grandAdvancePaid)} advance` : undefined} accent="#16a34a" />
         <KPI label="Balance Pending" value={money(summary.grandBalancePending)} accent="#dc2626" />
         <KPI label="Items with a PO" value={`${summary.itemsWithPO} / ${data.items.length}`} sub={summary.itemsWithoutPO ? `${summary.itemsWithoutPO} not yet ordered` : undefined} />
       </div>
@@ -159,7 +161,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                 <th className="px-2 text-right">PO Amount</th>
                 <th className="px-2 text-right">Qty × Rate</th>
                 <th className="px-2">Delivery</th>
-                <th className="px-2 text-right">Advance Paid</th>
+                <th className="px-2 text-right">Paid</th>
                 <th className="px-2 text-right">Balance</th>
                 <th className="px-2">Payment</th>
                 <th className="px-2 text-right">Received</th>
@@ -271,7 +273,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                               </div>
                             ) : <span className="text-slate-300">—</span>}
                           </td>
-                          <td className="px-2 text-right">{money(it.totalAdvancePaid)}</td>
+                          <td className="px-2 text-right"><PaidCell total={it.totalPaid} milestones={it.paidMilestones} money={money} /></td>
                           <td className="px-2 text-right">{money(it.totalBalancePending)}</td>
                           <td className="px-2"><span className={`badge ${PAY_PILL[it.paymentStatus]}`}>{it.paymentStatus}</span></td>
                           <td className="px-2 text-right">
@@ -320,7 +322,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                         <td className="px-2 text-right">{money(p.unitPrice)}</td>
                         <td className="px-2 text-right">{money(p.totalCost)}</td>
                         <td className="px-2" /><td className="px-2" />
-                        <td className="px-2 text-right">{money(p.advancePaid)}</td>
+                        <td className="px-2 text-right"><PaidCell total={p.amountPaid} milestones={p.paidMilestones} money={money} /></td>
                         <td className="px-2 text-right">{money(p.balancePending)}</td>
                         <td className="px-2"><span className={`badge ${PAY_PILL[p.paymentStatus]}`}>{p.paymentStatus}</span></td>
                         <td className="px-2 text-right">
@@ -367,6 +369,32 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Total paid across ALL milestones, with the per-milestone breakdown beneath —
+// so "Advance ₹2,000 + Before Delivery ₹1,000 = ₹3,000 paid" is visible, and
+// Paid + Balance always reconciles to the PO Amount.
+const MS_LABEL: Record<string, string> = {
+  advance: 'Advance', beforeDelivery: 'Before Dly', running: 'Running',
+  postDelivery: 'Post Dly', postCompletion: 'Post Compl', retention: 'Retention',
+};
+function PaidCell({ total, milestones, money }: {
+  total: number | null;
+  milestones: { name: string; fieldKey: string; inrAmount: number | null }[];
+  money: (n: number | null | undefined) => string;
+}) {
+  if (total == null) return <span className="text-slate-300">—</span>;
+  if (total === 0) return <span className="text-slate-400">{money(0)}</span>;
+  return (
+    <div>
+      <div className="font-medium text-green-700">{money(total)}</div>
+      {milestones.filter((m) => (m.inrAmount ?? 0) > 0).map((m) => (
+        <div key={m.fieldKey || m.name} className="text-[10px] leading-tight text-slate-400">
+          {MS_LABEL[m.fieldKey] || m.name} {money(m.inrAmount)}
+        </div>
+      ))}
     </div>
   );
 }

@@ -58,6 +58,9 @@ async function docSummary(docType: DocType, docId: string): Promise<DocSummary |
 // Vendor, amounts and line items for the summary, plus the API path to the
 // document's PDF (signed by the route so the approver can view it without
 // logging in). Shared by notifyStep (email) and routes/approvals.ts (page).
+/** One post-approval amendment: the reason the raiser gave when they changed it. */
+export interface DocAmendment { remark: string; byName: string; at: string }
+
 export interface ApprovalDocData {
   label: string;          // PO / WO / GRN
   docLabelLong: string;   // Purchase Order / Work Order / Goods Receipt Note
@@ -69,6 +72,22 @@ export interface ApprovalDocData {
   rows: { description: string; qty: number | null; unitPrice: number | null; total: number | null }[];
   pdfPath: string | null; // /api/... path to the PDF, or null (e.g. PAYMENT)
   projectId: string;
+  // Amendments made after a previous approval. A document only carries these once
+  // it has been amended and sent back, so a non-empty list means THIS approval is
+  // a re-approval — the approver must see why, and what was changed.
+  amendments: DocAmendment[];
+}
+
+// `amendments` is stored as a JSON array of { at, byId, byName, byEmail, remark }.
+// Oldest → newest; the last entry is the reason for the current resubmission.
+export function parseAmendments(json: string | null | undefined): DocAmendment[] {
+  try {
+    const arr = json ? JSON.parse(json) : [];
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((a) => a && typeof a.remark === 'string' && a.remark.trim())
+      .map((a) => ({ remark: String(a.remark), byName: String(a.byName || 'User'), at: String(a.at || '') }));
+  } catch { return []; }
 }
 
 export async function approvalDocData(docType: DocType, docId: string): Promise<ApprovalDocData | null> {
@@ -85,12 +104,13 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
       // The engineer's own receipt data — quantities, no PO pricing.
       rows: g.lineItems.map((l) => ({ description: l.description, qty: l.receiptQty, unitPrice: null, total: null })),
       pdfPath: `/api/projects/${g.projectId}/procurement/grns/${g.id}/pdf`, projectId: g.projectId,
+      amendments: parseAmendments(g.amendments),
     };
   }
   if (docType === 'PAYMENT') {
     const p = await prisma.vendorPayment.findUnique({ where: { id: docId }, select: { paymentNumber: true, projectId: true } });
     if (!p) return null;
-    return { label: 'Payment', docLabelLong: 'Vendor Payment', number: p.paymentNumber, vendorName: null, projectName: null, totalLabel: 'Amount', totalAmount: null, rows: [], pdfPath: null, projectId: p.projectId };
+    return { label: 'Payment', docLabelLong: 'Vendor Payment', number: p.paymentNumber, vendorName: null, projectName: null, totalLabel: 'Amount', totalAmount: null, rows: [], pdfPath: null, projectId: p.projectId, amendments: [] };
   }
   const d = await prisma.procurementDoc.findUnique({
     where: { id: docId },
@@ -103,6 +123,7 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
     totalLabel: 'Final Amount', totalAmount: Math.round(d.finalAmount),
     rows: d.lineItems.map((l) => ({ description: l.description, qty: l.qty, unitPrice: l.unitPrice, total: l.totalPrice })),
     pdfPath: `/api/projects/${d.projectId}/procurement/docs/${d.id}/pdf`, projectId: d.projectId,
+    amendments: parseAmendments(d.amendments),
   };
 }
 
@@ -132,8 +153,19 @@ async function logAction(docType: DocType, docId: string, stepId: string | null,
 // Notify the approver whose turn it is — in-app + (if configured) email with a
 // secure one-click link.
 async function notifyStep(step: { id: string; docType: string; docId: string; approverId: string; approverEmail: string | null; approverName: string; order?: number; approverRole?: string | null }, doc: DocSummary, kind: 'NEW' | 'REMINDER') {
-  const title = kind === 'REMINDER' ? `Reminder: ${doc.label} ${doc.number} awaiting approval` : `Approval needed: ${doc.label} ${doc.number}`;
-  const message = `${doc.label} ${doc.number} is awaiting your approval.`;
+  // Loaded up front so the in-app notification — not just the email — can say
+  // WHY a re-approval is being asked for.
+  const data = await approvalDocData(step.docType as DocType, step.docId);
+  const latestAmendment = data?.amendments?.length ? data.amendments[data.amendments.length - 1] : null;
+
+  const title = kind === 'REMINDER'
+    ? `Reminder: ${doc.label} ${doc.number} awaiting approval`
+    : latestAmendment
+      ? `Re-approval needed: ${doc.label} ${doc.number} (amended)`
+      : `Approval needed: ${doc.label} ${doc.number}`;
+  const message = latestAmendment
+    ? `${doc.label} ${doc.number} was amended after approval and resubmitted. Reason: “${latestAmendment.remark}” — ${latestAmendment.byName}.`
+    : `${doc.label} ${doc.number} is awaiting your approval.`;
   // Link to the self-contained Approvals page — the approver may not be a member
   // of the document's project, so we must NOT send them to the project workspace.
   await notifyUser(step.approverId, { type: 'APPROVAL_PENDING', title, message, projectId: doc.projectId, relatedDocType: step.docType, relatedDocId: step.docId, link: '/approvals' });
@@ -144,7 +176,6 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
 
   // Rich email with the document summary + a full-PDF review page. Fall back to
   // the plain template if the document can't be loaded for some reason.
-  const data = await approvalDocData(step.docType as DocType, step.docId);
   if (data) {
     const total = await prisma.approvalStep.count({ where: { docType: step.docType, docId: step.docId } });
     const stage = step.order ? `${step.approverRole || 'Approver'} · step ${step.order} of ${total}` : (step.approverRole || null);
@@ -158,11 +189,14 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
         vendorName: data.vendorName, projectName: data.projectName, stage,
         totalLabel: data.totalLabel, totalAmount: data.totalAmount, rows: data.rows,
         approverName: step.approverName,
-        // Approve / Reject → the review page (shows the full PDF, no login needed).
-        // Open Dashboard → the app itself, which asks the approver to sign in.
-        approveUrl: `${base}&intent=approve`, rejectUrl: `${base}&intent=reject`,
+        // The secure review page (full PDF, no login needed) — the Approve and
+        // On Hold buttons live there, so the email only has to get them to it.
+        viewUrl: base,
+        // The app itself, which asks the approver to sign in.
         reviewUrl: `${appClientUrl()}/approvals`,
         reminder: kind === 'REMINDER',
+        // Why it is back for approval — the reason given when it was amended.
+        amendments: data.amendments,
       }),
     });
     return;
@@ -213,11 +247,15 @@ export async function getChainState(docType: DocType, docId: string) {
   return { steps, actions, currentStepId: current?.id ?? null, currentApproverId: current?.approverId ?? null, approved, total: steps.length };
 }
 
-export type Outcome = 'ADVANCED' | 'COMPLETED' | 'REJECTED';
+export type Outcome = 'ADVANCED' | 'COMPLETED' | 'ON_HOLD';
 
-// Record an approve/reject on the CURRENT step. Authorises actor = current
+// A document is never "rejected" outright: an approver who spots a mistake puts
+// it ON HOLD with a note saying what to correct. The raiser fixes it and
+// resubmits — the document stays alive, and the note travels with it.
+//
+// Record an approve/hold on the CURRENT step. Authorises actor = current
 // approver, or an admin override. Returns the outcome; the caller finalizes.
-export async function recordDecision(docType: DocType, docId: string, actor: ActorInfo, decision: 'APPROVE' | 'REJECT', remarks?: string): Promise<Outcome> {
+export async function recordDecision(docType: DocType, docId: string, actor: ActorInfo, decision: 'APPROVE' | 'HOLD', remarks?: string): Promise<Outcome> {
   const steps = await prisma.approvalStep.findMany({ where: { docType, docId }, orderBy: { order: 'asc' } });
   const current = steps.find((s) => s.status === 'PENDING');
   if (!current) throw new Error('There is no pending approval step for this document.');
@@ -225,11 +263,11 @@ export async function recordDecision(docType: DocType, docId: string, actor: Act
 
   const doc = await docSummary(docType, docId);
 
-  if (decision === 'REJECT') {
-    await prisma.approvalStep.update({ where: { id: current.id }, data: { status: 'REJECTED', actedAt: new Date(), remarks: remarks ?? null } });
-    await logAction(docType, docId, current.id, actor, 'REJECTED', remarks);
-    if (doc?.createdById) await notifyUser(doc.createdById, { type: 'APPROVAL_REJECTED', title: `${doc.label} ${doc.number} rejected`, message: `${actor.name} rejected it${remarks ? `: ${remarks}` : '.'}`, projectId: doc.projectId, relatedDocType: docType, relatedDocId: docId, link: doc.link });
-    return 'REJECTED';
+  if (decision === 'HOLD') {
+    await prisma.approvalStep.update({ where: { id: current.id }, data: { status: 'ON_HOLD', actedAt: new Date(), remarks: remarks ?? null } });
+    await logAction(docType, docId, current.id, actor, 'ON_HOLD', remarks);
+    if (doc?.createdById) await notifyUser(doc.createdById, { type: 'APPROVAL_ON_HOLD', title: `${doc.label} ${doc.number} put on hold`, message: `${actor.name} put it on hold — please correct and resubmit${remarks ? `: ${remarks}` : '.'}`, projectId: doc.projectId, relatedDocType: docType, relatedDocId: docId, link: doc.link });
+    return 'ON_HOLD';
   }
 
   await prisma.approvalStep.update({ where: { id: current.id }, data: { status: 'APPROVED', actedAt: new Date(), remarks: remarks ?? null } });
@@ -283,13 +321,17 @@ export async function finalizeApproval(docType: DocType, docId: string, actorId:
   if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_APPROVED', title: `${doc.type} approved`, message: `${doc.docNumber} has been fully approved and e-signed.`, projectId: doc.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${doc.projectId}` });
 }
 
-// Set the parent document's status after a rejection.
-export async function markDocRejected(docType: DocType, docId: string, reason: string) {
+// Put the parent document ON HOLD, carrying the approver's note about what needs
+// correcting. ON_HOLD is an editable state everywhere — the raiser fixes the
+// document and resubmits it, rather than the document being dead. `rejectionReason`
+// is the existing column that now holds the "what to correct" note.
+export async function markDocOnHold(docType: DocType, docId: string, reason: string) {
+  const data = { status: 'ON_HOLD', rejectionReason: reason };
   if (docType === 'PAYMENT') {
-    await prisma.vendorPayment.update({ where: { id: docId }, data: { status: 'REJECTED', rejectionReason: reason } });
+    await prisma.vendorPayment.update({ where: { id: docId }, data });
   } else if (docType === 'GRN') {
-    await prisma.gRN.update({ where: { id: docId }, data: { status: 'REJECTED', rejectionReason: reason } });
+    await prisma.gRN.update({ where: { id: docId }, data });
   } else {
-    await prisma.procurementDoc.update({ where: { id: docId }, data: { status: 'DRAFT', rejectionReason: reason } });
+    await prisma.procurementDoc.update({ where: { id: docId }, data });
   }
 }

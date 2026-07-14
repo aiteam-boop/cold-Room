@@ -55,8 +55,12 @@ export function computeTotals(
 ) {
   const basic = overrides?.basicAmount ??
     lines.filter((l) => !l.isLeadTime).reduce((s, l) => s + (l.totalPrice ?? l.qty * l.unitPrice), 0);
-  const gst = !gstEnabled ? 0 : (overrides?.gstAmount ?? Math.round(basic * (gstPct / 100) * 100) / 100);
-  const final = overrides?.finalAmount ?? Math.round((basic + gst) * 100) / 100;
+  // GST and the grand total are rounded to whole rupees so the PO shows a clean
+  // "Rs. 14,028" rather than "Rs. 14,027.84". Basic (the taxable value) keeps 2
+  // decimals for accuracy; GST is rounded, then the final is rounded so the
+  // three rows always add up on the document. This matches the on-screen paper.
+  const gst = !gstEnabled ? 0 : Math.round(overrides?.gstAmount ?? basic * (gstPct / 100));
+  const final = Math.round(overrides?.finalAmount ?? basic + gst);
   return { basicAmount: Math.round(basic * 100) / 100, gstAmount: gst, finalAmount: final };
 }
 

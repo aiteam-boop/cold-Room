@@ -6,7 +6,7 @@
 // approval chain runs through the same engine as PO/GRN. Reuses ChainBuilder and
 // ApprovalTimeline so the look matches the rest of procurement.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -20,13 +20,15 @@ interface Payment {
   piNumber: string | null; piDate: string | null;
   vendorId: string | null; vendorName: string | null;
   docId: string | null; poNumber: string | null;
+  milestoneId: string | null; milestoneKey: string | null; milestoneName: string | null;
   paymentType: string; fullAmount: number; amountToPay: number; balance: number;
   gstInclusive: boolean; gstPct: number;
   payTermsSnapshot: PayTerms | null;
-  piPdfUrl: string | null; kycPdfUrl: string | null;
-  remark: string | null; paymentReference: string | null; paidAt: string | null; createdAt: string;
+  piPdfUrl: string | null; taxInvoicePdfUrl: string | null; kycPdfUrl: string | null;
+  remark: string | null; paymentReference: string | null; paidAt: string | null; closedAt: string | null; createdAt: string;
 }
 interface PayTerms { advance: number; beforeDelivery: number; running: number; postDelivery: number; postCompletion: number; retention: number }
+interface Milestone { id: string; name: string; fieldKey: string; percentage: number; inrAmount: number; status: string }
 interface POOption { id: string; docNumber: string; vendorId: string | null; vendorName: string | null; finalAmount: number; status: string }
 
 const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
@@ -107,6 +109,9 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   const [p, setP] = useState<Payment | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [showChain, setShowChain] = useState(false);
+  // The chosen PO's actual milestones (for the payment-term dropdown) + advance.
+  const [poMilestones, setPoMilestones] = useState<Milestone[]>([]);
+  const [advanceOnPo, setAdvanceOnPo] = useState(0);
 
   const { data } = useQuery({
     queryKey: ['fms-doc', paymentId],
@@ -114,12 +119,25 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   });
   const poOpts = useQuery({ queryKey: ['fms-pos', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/fms/po-options`)).data.pos as POOption[] });
 
+  // Load the PO's milestones when a doc is set (on open or after selecting a PO).
+  const loadedDoc = useRef<string | null>(null);
+  useEffect(() => {
+    if (p?.docId && p.docId !== loadedDoc.current) {
+      loadedDoc.current = p.docId;
+      api.get(`/projects/${projectId}/fms/po/${p.docId}`).then((r) => {
+        setPoMilestones(r.data.milestones ?? []);
+        setAdvanceOnPo(r.data.advanceOnPo ?? 0);
+      }).catch(() => {});
+    }
+  }, [p?.docId, projectId]);
+
   const refresh = () => { qc.invalidateQueries({ queryKey: ['fms-doc', paymentId] }); qc.invalidateQueries({ queryKey: ['fms', projectId] }); };
 
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/fms/${paymentId}`, {
       piNumber: p!.piNumber, piDate: p!.piDate ? p!.piDate.slice(0, 10) : null,
       vendorId: p!.vendorId, vendorName: p!.vendorName, docId: p!.docId, poNumber: p!.poNumber,
+      milestoneId: p!.milestoneId, milestoneKey: p!.milestoneKey, milestoneName: p!.milestoneName,
       paymentType: p!.paymentType, fullAmount: Number(p!.fullAmount), amountToPay: Number(p!.amountToPay),
       gstInclusive: p!.gstInclusive, gstPct: Number(p!.gstPct), payTermsSnapshot: p!.payTermsSnapshot, remark: p!.remark,
     })).data.payment as Payment,
@@ -134,10 +152,17 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   });
 
   const upload = useMutation({
-    mutationFn: async ({ kind, file }: { kind: 'pi' | 'kyc'; file: File }) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/fms/${paymentId}/${kind}`, fd); },
+    mutationFn: async ({ kind, file }: { kind: 'pi' | 'kyc' | 'tax-invoice'; file: File }) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/fms/${paymentId}/${kind}`, fd); },
     onSuccess: () => { setMsg({ ok: true, t: 'Uploaded.' }); refresh(); },
     onError: (e) => setMsg({ ok: false, t: errMsg(e) }),
   });
+
+  // Pick a payment milestone from the dropdown → default the amount to its value.
+  function selectMilestone(id: string) {
+    if (!p) return;
+    const m = poMilestones.find((x) => x.id === id);
+    setP({ ...p, milestoneId: id || null, milestoneKey: m?.fieldKey ?? null, milestoneName: m?.name ?? null, amountToPay: m ? m.inrAmount : p.amountToPay });
+  }
 
   // When a PO is chosen, fetch its terms + vendor + amount and pre-fill.
   async function selectPO(docId: string) {
@@ -145,10 +170,14 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
     if (!docId) { setP({ ...p, docId: null, poNumber: null }); return; }
     try {
       const r = (await api.get(`/projects/${projectId}/fms/po/${docId}`)).data;
+      setPoMilestones(r.milestones ?? []);
+      setAdvanceOnPo(r.advanceOnPo ?? 0);
+      loadedDoc.current = docId;
       setP({
         ...p, docId, poNumber: r.docNumber,
         vendorId: r.vendorId ?? p.vendorId, vendorName: r.vendorName ?? p.vendorName,
         payTermsSnapshot: r.payTerms,
+        milestoneId: null, milestoneKey: null, milestoneName: null,
         // pre-fill full amount from the PO if not yet set (still manually editable)
         fullAmount: p.fullAmount || r.finalAmount || 0,
         gstInclusive: p.gstInclusive || !!r.gstEnabled,
@@ -164,11 +193,13 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
   const canApprove = can('canApprove');
   const canAct = p.status === 'PENDING_APPROVAL' && (hasChain ? (myTurn || canApprove) : canApprove);
-  const locked = p.status === 'APPROVED' || p.status === 'PAID';
+  const locked = p.status === 'APPROVED' || p.status === 'PAID' || p.status === 'CLOSED';
   const canDo = editable && !locked;
+  // PAID but the tax invoice is not yet uploaded → still open in the bucket.
+  const paidOpen = p.status === 'PAID' && !p.taxInvoicePdfUrl;
 
-  // Live balance preview (server also computes it authoritatively on save).
-  const previewBalance = Math.round((Number(p.fullAmount || 0) - Number(p.amountToPay || 0)) * 100) / 100;
+  // Live balance preview = PI value − (advance already on PO + this payment).
+  const previewBalance = Math.round((Number(p.fullAmount || 0) - advanceOnPo - Number(p.amountToPay || 0)) * 100) / 100;
 
   const set = (patch: Partial<Payment>) => setP({ ...p, ...patch });
 
@@ -185,12 +216,20 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
           {canDo && p.status === 'DRAFT' && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>Submit for Approval</button>}
           {editable && p.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => act.mutate({ verb: 'recall' })}>Recall</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => act.mutate({ verb: 'approve', body: { remarks: '' } })}>✓ Approve</button>}
-          {canAct && <button className="btn-danger text-sm" onClick={() => { const r = prompt('Rejection reason'); if (r) act.mutate({ verb: 'reject', body: { reason: r } }); }}>Reject</button>}
+          {/* Never rejected — put on hold with a note, and the raiser corrects it. */}
+          {canAct && <button className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600" onClick={() => { const r = prompt('What needs to be corrected? (required)'); if (r?.trim()) act.mutate({ verb: 'hold', body: { reason: r } }); }}>⏸ Put On Hold</button>}
           {p.status === 'APPROVED' && can('canMarkPaid') && <button className="btn-primary text-sm" onClick={() => { const ref = prompt('Payment reference / UTR (optional)') ?? ''; act.mutate({ verb: 'mark-paid', body: { paymentReference: ref } }); }}>Mark Paid</button>}
         </div>
       </div>
       {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{msg.t}</div>}
-      {locked && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">This payment is {p.status.toLowerCase()} and locked.{p.paymentReference ? ` UTR: ${p.paymentReference}` : ''}</div>}
+      {p.status === 'CLOSED' && <div className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">Closed — tax invoice uploaded.{p.paymentReference ? ` UTR: ${p.paymentReference}` : ''}</div>}
+      {paidOpen && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <span>Paid{p.paymentReference ? ` · UTR ${p.paymentReference}` : ''} — <strong>tax invoice pending</strong>. Upload it to close this entry.</span>
+          {editable && <label className="btn-outline cursor-pointer text-xs">Upload Tax Invoice<input type="file" className="hidden" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'tax-invoice', file: e.target.files[0] })} /></label>}
+        </div>
+      )}
+      {p.status === 'APPROVED' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">Approved and locked{p.paymentReference ? ` · UTR: ${p.paymentReference}` : ''}. Mark it paid once the vendor is paid.</div>}
       {hasChain && <ApprovalTimeline approval={approval as any} />}
 
       <div className="card space-y-4 p-4">
@@ -210,20 +249,26 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
             </select>
           </F>
           <F label="Vendor"><input className="input" disabled={!canDo} value={p.vendorName ?? ''} onChange={(e) => set({ vendorName: e.target.value })} /></F>
-          <F label="Payment Type">
-            <select className="input" disabled={!canDo} value={p.paymentType} onChange={(e) => set({ paymentType: e.target.value })}>
-              <option value="ADVANCE">Advance</option>
-              <option value="BALANCE">Balance</option>
-              <option value="FULL">Full payment</option>
+          {/* Which payment term this pays — the PO's actual milestones; the ones
+              already paid are shown but disabled. */}
+          <F label="Which payment (term)">
+            <select className="input" disabled={!canDo || !p.docId} value={p.milestoneId ?? ''} onChange={(e) => selectMilestone(e.target.value)}>
+              <option value="">{p.docId ? '— select payment term —' : 'select a PO first'}</option>
+              {poMilestones.map((m) => (
+                <option key={m.id} value={m.id} disabled={m.status === 'PAID'}>
+                  {m.name} ({m.percentage}% · {money(m.inrAmount)}){m.status === 'PAID' ? ' — paid' : m.status === 'TRIGGERED' ? ' — triggered' : ''}
+                </option>
+              ))}
             </select>
           </F>
         </div>
 
-        {/* Amounts */}
-        <div className="grid gap-3 sm:grid-cols-3">
-          <F label="Full Amount (manual — per actual qty + freight)"><input type="number" step="any" className="input" disabled={!canDo} value={p.fullAmount} onChange={(e) => set({ fullAmount: Number(e.target.value) })} /></F>
-          <F label="Amount to Pay"><input type="number" step="any" className="input" disabled={!canDo} value={p.amountToPay} onChange={(e) => set({ amountToPay: Number(e.target.value) })} /></F>
-          <F label="Balance (auto)"><input className="input bg-slate-50 font-semibold text-navy" value={money(save.isPending ? p.balance : previewBalance)} readOnly /></F>
+        {/* Amounts — PI value → advance auto-captured → balance editable */}
+        <div className="grid gap-3 sm:grid-cols-4">
+          <F label="PI / Invoice Value (final)"><input type="number" step="any" className="input" disabled={!canDo} value={p.fullAmount} onChange={(e) => set({ fullAmount: Number(e.target.value) })} /></F>
+          <F label="Advance already paid (on PO)"><input className="input bg-slate-50 text-slate-600" value={money(advanceOnPo)} readOnly /></F>
+          <F label="Amount to Pay (editable — can be partial)"><input type="number" step="any" className="input" disabled={!canDo} value={p.amountToPay} onChange={(e) => set({ amountToPay: Number(e.target.value) })} /></F>
+          <F label="Balance to Pay (auto)"><input className="input bg-slate-50 font-semibold text-navy" value={money(save.isPending ? p.balance : previewBalance)} readOnly /></F>
         </div>
 
         {/* GST toggle */}
@@ -247,13 +292,18 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
           </div>
         )}
 
-        {/* Attachments */}
-        <div className="grid gap-3 sm:grid-cols-3">
-          <F label="PI (Performa Invoice) PDF">
+        {/* Attachments. PI drives the payment (comes first); the Tax Invoice
+            arrives later and CLOSES the entry. */}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <F label="PI (Proforma Invoice) PDF *">
             {p.piPdfUrl ? <button className="text-sm text-navy hover:underline" onClick={() => openFile(p.piPdfUrl!)}>📄 View PI</button> : <span className="text-xs text-slate-400">Not uploaded</span>}
             {canDo && <input type="file" className="input mt-1 text-xs" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'pi', file: e.target.files[0] })} />}
           </F>
-          <F label="Vendor KYC PDF (GST + PAN + cheque)">
+          <F label="Tax Invoice PDF (closes the entry)">
+            {p.taxInvoicePdfUrl ? <button className="text-sm text-navy hover:underline" onClick={() => openFile(p.taxInvoicePdfUrl!)}>📄 View Tax Invoice</button> : <span className="text-xs text-slate-400">Comes after payment</span>}
+            {editable && p.status !== 'CLOSED' && <input type="file" className="input mt-1 text-xs" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'tax-invoice', file: e.target.files[0] })} />}
+          </F>
+          <F label="Vendor KYC PDF">
             {p.kycPdfUrl ? <button className="text-sm text-navy hover:underline" onClick={() => openFile(p.kycPdfUrl!)}>📄 View KYC</button> : <span className="text-xs text-slate-400">Not uploaded</span>}
             {canDo && <input type="file" className="input mt-1 text-xs" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'kyc', file: e.target.files[0] })} />}
           </F>

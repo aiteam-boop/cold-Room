@@ -4,7 +4,7 @@ import { api, errMsg, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Spinner } from '../ui';
 import { docStatusPill, inr, titleize } from '../../lib/format';
-import DocPaper from './DocPaper';
+import DocPaper, { vendorBlock } from './DocPaper';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
 import { DeliveryBadge, isoDay } from '../DeliveryBadge';
@@ -112,12 +112,14 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
   const hasChain = (approval?.total ?? 0) > 0;
   const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
-  // Show Approve/Reject to the current approver, or (legacy, no chain) to canApprove holders.
+  // Show Approve/On Hold to the current approver, or (legacy, no chain) to canApprove holders.
   const canAct = d.status === 'PENDING_APPROVAL' && (hasChain ? (myTurn || canApprove) : canApprove);
-  const promptRemarks = (verb: 'approve' | 'reject') => {
-    const r = window.prompt(verb === 'reject' ? 'Rejection reason' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
-    if (verb === 'reject' && !r) return;
-    doAction.mutate({ verb, body: verb === 'reject' ? { reason: r } : { remarks: r } });
+  // Approvers never reject: they put the document ON HOLD with a note saying what
+  // to correct, and the raiser fixes it and resubmits.
+  const promptRemarks = (verb: 'approve' | 'hold') => {
+    const r = window.prompt(verb === 'hold' ? 'What needs to be corrected? (required)' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
+    if (verb === 'hold' && !r?.trim()) return;
+    doAction.mutate({ verb, body: verb === 'hold' ? { reason: r } : { remarks: r } });
   };
 
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p.key]) || 0), 0);
@@ -132,7 +134,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   function selectVendor(id: string) {
     const v = vendorsQ.data?.find((x) => x.id === id);
-    setD((p: any) => ({ ...p, vendorId: id || null, vendorName: v?.name ?? p.vendorName, vendorAddress: v?.address ?? p.vendorAddress, vendorGstin: v?.gstin ?? p.vendorGstin, vendorContact: v?.contactPerson ?? p.vendorContact, vendorPhone: v?.phones ?? p.vendorPhone }));
+    // Fill the "To," block from the same builder the document view uses, so both
+    // vendor pickers produce the identical letterhead (name, address, Tel/Fax,
+    // Website, GSTIN, CIN) — this one used to drop in the bare address only.
+    setD((p: any) => ({ ...p, vendorId: id || null, vendorName: v?.name ?? p.vendorName, vendorAddress: v ? vendorBlock(v) : p.vendorAddress, vendorGstin: v?.gstin ?? p.vendorGstin, vendorContact: v?.contactPerson ?? p.vendorContact, vendorPhone: v?.phones ?? p.vendorPhone }));
   }
 
   // Linking a PO line to a BOQ item is what makes the BOQ Cost view work
@@ -188,19 +193,29 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           {/* ChainBuilder decides: with an admin-configured Approval Chain it
               submits straight through with no popup; without one it falls back
               to the matrix / free-form picker as before. */}
-          {editable && d.status === 'DRAFT' && (
+          {editable && (d.status === 'DRAFT' || d.status === 'ON_HOLD') && (
             <button className="btn-primary text-sm" disabled={save.isPending || doAction.isPending}
               onClick={() => setShowChain(true)}>
-              {doAction.isPending ? 'Submitting…' : 'Submit for Approval'}
+              {doAction.isPending ? 'Submitting…' : d.status === 'ON_HOLD' ? 'Resubmit for Approval' : 'Submit for Approval'}
             </button>
           )}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => doAction.mutate({ verb: 'recall' })}>Recall</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && hasChain && <button className="btn-outline text-sm" disabled={doAction.isPending} onClick={() => doAction.mutate({ verb: 'remind' })}>Send Reminder</button>}
+          {/* Approvers see the document itself before deciding. */}
+          {canAct && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${d.id}/pdf`)}>📄 View {d.type}</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
-          {canAct && <button className="btn-danger text-sm" onClick={() => promptRemarks('reject')}>Reject</button>}
+          {canAct && <button className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600" onClick={() => promptRemarks('hold')}>⏸ Put On Hold</button>}
         </div>
       </div>
       {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{msg.t}</div>}
+      {/* Sent back by an approver: show exactly what they asked to be corrected. */}
+      {d.status === 'ON_HOLD' && (
+        <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2.5">
+          <div className="text-sm font-semibold text-orange-800">⏸ On hold — correct this and resubmit</div>
+          {d.rejectionReason && <div className="mt-1 text-sm text-orange-900">{d.rejectionReason}</div>}
+          <div className="mt-1 text-[11px] text-orange-700">Fix the points above, Save, then Resubmit for approval.</div>
+        </div>
+      )}
       {hasChain && <ApprovalTimeline approval={approval as any} />}
       {showChain && (
         <ChainBuilder

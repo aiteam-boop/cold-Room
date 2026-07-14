@@ -1,8 +1,22 @@
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
+import { PassThrough } from 'stream';
 import { COMPANY, strikeOffFootnote } from './procurement';
 import type { TermsSection } from './procurement';
+
+// Collect a PDF renderer's streamed output into a single Buffer — used to attach
+// the generated PO/WO/GRN PDF to an approval email.
+export function renderToBuffer(render: (stream: NodeJS.WritableStream) => void): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const s = new PassThrough();
+    s.on('data', (c: Buffer) => chunks.push(c));
+    s.on('end', () => resolve(Buffer.concat(chunks)));
+    s.on('error', reject);
+    try { render(s); } catch (e) { reject(e); }
+  });
+}
 
 // pdfkit's built-in Helvetica lacks the ₹ glyph; use "Rs." for reliable output.
 const INR = (n: number | null | undefined) => (n == null ? '' : 'Rs. ' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 }));
@@ -159,42 +173,74 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     cell(totLabelX + totLabelW, y + 3, totValW, val, { font: 'Helvetica-Bold', size: 8, align: 'right', color: HEAD_BG });
     y += h;
   };
+  // GST and the grand total are shown as whole rupees ("Rs. 14,028", not
+  // "Rs. 14,027.84"). Rounded here at render time so even documents saved before
+  // this rule still print clean totals — no re-save required. Basic (taxable
+  // value) keeps its precision.
   totRow('Basic Amount', INR(doc.basicAmount));
-  if (doc.gstEnabled) totRow(`GST ${doc.gstPct}%`, INR(doc.gstAmount));
-  totRow('Final Amount', INR(doc.finalAmount));
+  if (doc.gstEnabled) totRow(`GST ${doc.gstPct}%`, INR(Math.round(doc.gstAmount)));
+  totRow('Final Amount', INR(Math.round(doc.finalAmount)));
   y += 6;
 
-  // ── Terms & Conditions ──
-  // A struck-off clause stays in the document: grey text with a line through it,
-  // plus a footnote recording the mutual agreement (Sprint PRD §8.3).
-  if (y + 30 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
-  pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text('TERMS & CONDITIONS', L, y, { width: W, align: 'center' });
-  y = pdf.y + 4;
+  // ── Terms & Conditions — always start on their own page (annexure) ──
+  // The Purchase Order sits alone on page 1; the Terms & Conditions (and the
+  // signature that follows them) begin on a fresh page. So: "PO on one page,
+  // T&C on another".
+  //
+  // A bordered box that can itself run onto further pages: it closes at the
+  // bottom of each page and reopens at the top of the next so no clause is
+  // clipped. A struck-off clause stays in the document — grey, lined through —
+  // plus a footnote recording the mutual agreement (PRD §8.3). The PO number is
+  // repeated under the heading so a detached T&C page is still identifiable.
+  pdf.addPage(); y = L;
+  const PAD = 8;
+  const innerL = L + PAD, innerW = W - PAD * 2;
+  let boxTop = 0;
+  const openBox = () => { boxTop = y; y += PAD; };
+  const ensureRoom = (need: number) => {
+    if (y + need + PAD > PAGE_BOTTOM) {
+      rect(L, boxTop, W, (y + PAD) - boxTop);
+      pdf.addPage(); y = L; openBox();
+    }
+  };
+
+  openBox();
+  pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text('TERMS & CONDITIONS', innerL, y, { width: innerW, align: 'center' });
+  y = pdf.y + 2;
+  pdf.font('Helvetica').fontSize(7.5).fillColor('#64748b').text(`${isWO ? 'Work Order' : 'Purchase Order'} No.: ${doc.docNumber}`, innerL, y, { width: innerW, align: 'center' });
+  y = pdf.y + 6;
+
   for (const s of doc.termsSections) {
     const struck = s.isStruckOff === true;
-    const titleHt = textH(s.title, W, 8.5);
-    const bodyHt = textH(s.text, W, 8);
-    if (y + titleHt + bodyHt + 8 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
+    const titleHt = textH(s.title, innerW, 8.5);
+    const bodyHt = textH(s.text, innerW, 8);
+    ensureRoom(titleHt + bodyHt + 6);
     pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(struck ? '#888' : '#111')
-      .text(struck ? `${s.title} *` : s.title, L, y, { width: W, strike: struck });
+      .text(struck ? `${s.title} *` : s.title, innerL, y, { width: innerW, strike: struck });
     y = pdf.y;
     pdf.font('Helvetica').fontSize(8).fillColor(struck ? '#999' : '#333')
-      .text(s.text, L, y, { width: W, strike: struck });
+      .text(s.text, innerL, y, { width: innerW, strike: struck });
     y = pdf.y + 6;
   }
 
   const footnote = strikeOffFootnote(doc.termsSections);
   if (footnote) {
-    const ht = textH(footnote, W, 7.5);
-    if (y + ht + 6 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
-    pdf.font('Helvetica-Oblique').fontSize(7.5).fillColor('#666').text(footnote, L, y, { width: W });
-    y = pdf.y + 4;
+    const ht = textH(footnote, innerW, 7.5);
+    ensureRoom(ht + 2);
+    pdf.font('Helvetica-Oblique').fontSize(7.5).fillColor('#666').text(footnote, innerL, y, { width: innerW });
+    y = pdf.y;
     pdf.font('Helvetica');
   }
 
-  // ── Signature block (bordered, 2 cells) ──
+  // Close the box around all the T&C content.
+  rect(L, boxTop, W, (y + PAD) - boxTop);
+  y = y + PAD;
+
+  // ── Signature block — follows the Terms & Conditions ──
+  // Sits directly beneath the T&C box; if the terms filled the page it moves to
+  // the next one so the sign-off is never split.
   const sigH = 86;
-  if (y + sigH > PAGE_BOTTOM) { pdf.addPage(); y = L; }
+  if (y + sigH + 6 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
   y += 6;
   rect(L, y, halfW, sigH); rect(L + halfW, y, halfW, sigH);
   cell(L, y + 4, halfW, COMPANY.name, { font: 'Helvetica-Bold', size: 8.5 });
@@ -222,6 +268,12 @@ interface GRNForPdf {
   grnNumber: string; grnDate: Date; docNumber: string; vendorName?: string | null; siteAddress?: string | null;
   vehicleNumber?: string | null; driverName?: string | null; deliveryChallanNumber?: string | null;
   invoiceNumber?: string | null; invoiceDate?: Date | null; invoiceValue?: number | null; ewayBillNumber?: string | null;
+  // Payment side (GRN/Payment PRD v3): the PI drives the payment and arrives
+  // BEFORE the tax invoice, so the approver must see it on the document.
+  milestoneName?: string | null;
+  piNumber?: string | null; piDate?: Date | null; piValue?: number | null;
+  amountToPay?: number | null;
+  paymentStatus?: string | null; utrNumber?: string | null; paidAt?: Date | null;
   lineItems: { srNo: number; description: string; uom?: string | null; poQty: number; previouslyReceivedQty: number; receiptQty: number; defectQty: number; acceptedQty: number; remarks?: string | null }[];
 }
 export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
@@ -260,10 +312,79 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
     pdf.lineWidth(0.5).moveTo(L, pdf.y).lineTo(R, pdf.y).stroke('#cbd5e1');
   }
   pdf.moveDown(0.6);
-  pdf.font('Helvetica-Bold').fontSize(9).fillColor(HEAD_BG).text('Invoice Details');
-  pdf.font('Helvetica').fontSize(8).fillColor('#111').text(`Invoice No.: ${grn.invoiceNumber || '-'}    Date: ${grn.invoiceDate ? grn.invoiceDate.toLocaleDateString('en-GB') : '-'}    Value: ${INR(grn.invoiceValue)}    E-Way Bill: ${grn.ewayBillNumber || '-'}`, { width: tableW });
-  pdf.moveDown(2.5);
-  pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(HEAD_BG).text(COMPANY.name, L);
+  // The row loop leaves PDFKit's x-cursor on the LAST column, so every text that
+  // follows must state x = L explicitly or it starts at the right edge and runs
+  // off the page. Keep the closing block on the page too.
+  if (pdf.y + 70 > pdf.page.height - 40) { pdf.addPage(); pdf.y = 40; }
+
+  // ── PI + Tax Invoice boxes, side by side ───────────────────────────────────
+  // Payment is made against the Proforma Invoice, which arrives BEFORE the tax
+  // invoice, so the two sit next to each other: what we paid on (left) and what
+  // finally closes the GRN (right). The PI box only appears when the GRN actually
+  // carries a payment — a pure goods receipt keeps the plain invoice line.
+  const hasPi = !!(grn.piNumber || grn.piValue != null || grn.milestoneName || grn.amountToPay != null);
+  const hasTaxInvoice = !!(grn.invoiceNumber || grn.invoiceValue != null);
+
+  const PAD_X = 8, PAD_Y = 6, LINE_H = 12, TITLE_H = 14, KEY_W = 78;
+  // One bordered box: title, then key/value rows. `note` replaces the rows when
+  // there is nothing to show yet (e.g. the tax invoice hasn't arrived).
+  const drawBox = (bx: number, bw: number, top: number, bh: number, title: string, rows: [string, string][], note?: string) => {
+    pdf.lineWidth(0.7).rect(bx, top, bw, bh).fillAndStroke('#f8fafc', HEAD_BG);
+    pdf.font('Helvetica-Bold').fontSize(9).fillColor(HEAD_BG).text(title, bx + PAD_X, top + PAD_Y, { width: bw - PAD_X * 2 });
+    let ry = top + PAD_Y + TITLE_H;
+    if (note) {
+      pdf.font('Helvetica').fontSize(8).fillColor('#64748b').text(note, bx + PAD_X, ry, { width: bw - PAD_X * 2 });
+      return;
+    }
+    for (const [k, v] of rows) {
+      pdf.font('Helvetica').fontSize(8).fillColor('#64748b').text(k, bx + PAD_X, ry, { width: KEY_W });
+      pdf.font('Helvetica-Bold').fontSize(8).fillColor('#111').text(v, bx + PAD_X + KEY_W + 5, ry, { width: bw - PAD_X * 2 - KEY_W - 5 });
+      ry += LINE_H;
+    }
+  };
+
+  const taxRows: [string, string][] = [
+    ['Invoice No.', grn.invoiceNumber || '-'],
+    ['Invoice Date', grn.invoiceDate ? grn.invoiceDate.toLocaleDateString('en-GB') : '-'],
+    ['Invoice Value', INR(grn.invoiceValue)],
+    ['E-Way Bill', grn.ewayBillNumber || '-'],
+  ];
+
+  if (hasPi) {
+    const piRows: [string, string][] = [
+      ['Payment Term', grn.milestoneName || '-'],
+      ['PI No.', grn.piNumber || '-'],
+      ['PI Date', grn.piDate ? grn.piDate.toLocaleDateString('en-GB') : '-'],
+      ['PI Value', INR(grn.piValue)],
+      ['Amount to Pay', INR(grn.amountToPay)],
+    ];
+    if (grn.paymentStatus) {
+      piRows.push(['Payment Status', grn.paymentStatus === 'CLOSED' ? 'Closed' : grn.paymentStatus === 'PAID' ? 'Paid (invoice pending)' : 'Triggered']);
+      if (grn.utrNumber) piRows.push(['UTR / Ref', `${grn.utrNumber}${grn.paidAt ? ` (${grn.paidAt.toLocaleDateString('en-GB')})` : ''}`]);
+    }
+    // The tax invoice arrives only after payment, so say so rather than printing
+    // a row of dashes the approver has to interpret.
+    const taxNote = hasTaxInvoice ? undefined : 'Awaited — arrives after payment and closes this GRN.';
+
+    const gap = 10, bw = (tableW - gap) / 2;
+    // Both boxes share the taller box's height so they line up.
+    const bodyLines = Math.max(piRows.length, hasTaxInvoice ? taxRows.length : 2);
+    const boxH = TITLE_H + bodyLines * LINE_H + PAD_Y * 2;
+    if (pdf.y + boxH + 70 > pdf.page.height - 40) { pdf.addPage(); pdf.y = 40; }
+    const top = pdf.y;
+    drawBox(L, bw, top, boxH, 'Payment / PI Details', piRows);
+    drawBox(L + bw + gap, bw, top, boxH, 'Tax Invoice Details', taxRows, taxNote);
+    pdf.y = top + boxH + 10;
+  } else {
+    // Pure goods receipt — no payment on it, so keep the original invoice line.
+    pdf.font('Helvetica-Bold').fontSize(9).fillColor(HEAD_BG).text('Invoice Details', L, pdf.y, { width: tableW });
+    pdf.font('Helvetica').fontSize(8).fillColor('#111').text(
+      `Invoice No.: ${grn.invoiceNumber || '-'}    Date: ${grn.invoiceDate ? grn.invoiceDate.toLocaleDateString('en-GB') : '-'}    Value: ${INR(grn.invoiceValue)}    E-Way Bill: ${grn.ewayBillNumber || '-'}`,
+      L, pdf.y, { width: tableW });
+    pdf.moveDown(2.5);
+  }
+
+  pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(HEAD_BG).text(COMPANY.name, L, pdf.y, { width: tableW });
   pdf.font('Helvetica').fontSize(8).fillColor('#111').text('Authorized Signatory', L, pdf.y + 16);
   pdf.end();
 }

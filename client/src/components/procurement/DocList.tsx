@@ -7,7 +7,7 @@ import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import DocBuilder from './DocBuilder';
 import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
-interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; }
+interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; }
 
 export default function DocList({ projectId, role, type }: { projectId: string; role: string; type: 'PO' | 'WO' }) {
   const qc = useQueryClient();
@@ -43,13 +43,19 @@ export default function DocList({ projectId, role, type }: { projectId: string; 
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-              <tr><th className="px-4 py-2">{type} No.</th><th>Vendor</th><th>Date</th><th className="text-right">Basic</th><th className="text-right">Final</th><th>Status</th><th>Delivery</th><th></th></tr>
+              <tr><th className="px-4 py-2">{type} No.</th><th>Vendor</th><th>Created by</th><th>Date</th><th className="text-right">Basic</th><th className="text-right">Final</th><th>Status</th><th>Delivery</th><th></th></tr>
             </thead>
             <tbody>
               {docs.map((d) => (
                 <tr key={d.id} className="border-b border-slate-100 hover:bg-slate-50">
                   <td className="px-4 py-2 font-medium text-navy">{d.docNumber}{d.esignApplied && <span className="ml-1 text-xs text-blue-600">✓e-sign</span>}</td>
                   <td className="text-slate-600">{d.vendorName || '—'}</td>
+                  {/* Who raised it — the email, so it is obvious who to go back to. */}
+                  <td className="text-slate-500">
+                    {d.createdBy
+                      ? <span title={d.createdBy.name} className="text-xs">{d.createdBy.email}</span>
+                      : <span className="text-slate-300">—</span>}
+                  </td>
                   <td className="text-slate-500">{fmtDate(d.docDate)}</td>
                   <td className="text-right">{money(d.basicAmount)}</td>
                   <td className="text-right font-medium">{money(d.finalAmount)}</td>

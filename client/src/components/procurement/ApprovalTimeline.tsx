@@ -13,8 +13,10 @@ export interface ApprovalState {
   currentApproverId?: string | null;
 }
 
+// ON_HOLD = sent back to be corrected and resubmitted (orange, not a dead red).
+// REJECTED is historical — kept so old chains still render.
 const DOT: Record<string, string> = {
-  APPROVED: 'bg-green-500', PENDING: 'bg-amber-500', REJECTED: 'bg-red-500', WAITING: 'bg-slate-300',
+  APPROVED: 'bg-green-500', PENDING: 'bg-amber-500', ON_HOLD: 'bg-orange-500', REJECTED: 'bg-red-500', WAITING: 'bg-slate-300',
 };
 
 function fmt(ts?: string | null) {
@@ -26,9 +28,9 @@ function fmt(ts?: string | null) {
 export default function ApprovalTimeline({ approval }: { approval?: ApprovalState | null }) {
   if (!approval || approval.total === 0) return null;
   const current = approval.steps.find((s) => s.status === 'PENDING');
-  const rejected = approval.steps.find((s) => s.status === 'REJECTED');
-  const summary = rejected
-    ? `Rejected at ${rejected.approverName}`
+  const held = approval.steps.find((s) => s.status === 'ON_HOLD' || s.status === 'REJECTED');
+  const summary = held
+    ? `On hold at ${held.approverName} — awaiting correction`
     : current
       ? `${approval.approved} of ${approval.total} approvals · pending ${current.approverName}`
       : `${approval.approved} of ${approval.total} approvals complete`;

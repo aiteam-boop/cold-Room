@@ -1,5 +1,6 @@
+import { Fragment } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg } from '../lib/api';
+import { api, errMsg, openAuthedFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Spinner } from '../components/ui';
 import { fmtDate, inr } from '../lib/format';
@@ -11,6 +12,10 @@ interface Item {
   basicAmount?: number | null; finalAmount?: number | null;
   submittedAt: string; myRole?: string | null; legacy?: boolean;
   invoiceNumber?: string | null; invoicePdfUrl?: string | null;
+  // Post-approval amendments (oldest → newest). Non-empty means the document was
+  // changed after a previous approval and resubmitted — show WHY it needs
+  // re-approval, so the approver isn't deciding blind.
+  amendments?: { remark: string; byName: string; at: string }[];
 }
 
 // "My Approvals" — documents where the signed-in user is the current approver.
@@ -27,9 +32,9 @@ export default function ApprovalsPage() {
   });
 
   const act = useMutation({
-    mutationFn: async ({ item, verb, remarks }: { item: Item; verb: 'approve' | 'reject'; remarks?: string }) => {
+    mutationFn: async ({ item, verb, remarks }: { item: Item; verb: 'approve' | 'hold'; remarks?: string }) => {
       const seg = item.kind === 'GRN' ? 'grns' : 'docs';
-      const body = verb === 'reject' ? { reason: remarks } : { remarks };
+      const body = verb === 'hold' ? { reason: remarks } : { remarks };
       return api.post(`/projects/${item.projectId}/procurement/${seg}/${item.docId}/${verb}`, body);
     },
     onSuccess: () => {
@@ -39,10 +44,18 @@ export default function ApprovalsPage() {
     onError: (e) => alert(errMsg(e)),
   });
 
-  const decide = (item: Item, verb: 'approve' | 'reject') => {
-    const remarks = window.prompt(verb === 'reject' ? 'Rejection reason' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
-    if (verb === 'reject' && !remarks) return;
+  // Nothing is rejected: an approver who spots a mistake puts the document ON HOLD
+  // with a note, and the raiser corrects it and resubmits.
+  const decide = (item: Item, verb: 'approve' | 'hold') => {
+    const remarks = window.prompt(verb === 'hold' ? 'What needs to be corrected? (required)' : 'Remarks (optional)') ?? (verb === 'approve' ? '' : null);
+    if (verb === 'hold' && !remarks?.trim()) return;
     act.mutate({ item, verb, remarks: remarks ?? undefined });
+  };
+
+  // The document itself — the approver reviews it before deciding.
+  const viewDoc = (item: Item) => {
+    const seg = item.kind === 'GRN' ? 'grns' : 'docs';
+    openAuthedFile(`/projects/${item.projectId}/procurement/${seg}/${item.docId}/pdf`);
   };
 
   if (isLoading) return <Spinner label="Loading approvals…" />;
@@ -54,7 +67,7 @@ export default function ApprovalsPage() {
       <div>
         <h1 className="text-2xl font-bold text-navy">My Approvals</h1>
         <p className="text-sm text-slate-500">
-          {isAdmin ? 'Every document currently awaiting approval, across all projects.' : 'Documents awaiting your approval. Approve or reject directly here.'}
+          {isAdmin ? 'Every document currently awaiting approval, across all projects.' : 'Documents awaiting your approval. Approve, or put on hold with a note, directly here.'}
         </p>
       </div>
       {items.length === 0 ? (
@@ -66,28 +79,55 @@ export default function ApprovalsPage() {
               <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Submitted</th><th className="text-right">Action</th></tr>
             </thead>
             <tbody>
-              {items.map((d) => (
-                <tr key={`${d.kind}-${d.docId}`} className="border-b border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-2">
-                    <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
-                    {d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
-                    {d.legacy && <div className="text-xs text-slate-400">no chain — admin action</div>}
-                    {d.invoicePdfUrl
-                      ? <a href={d.invoicePdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View invoice{d.invoiceNumber ? ` (${d.invoiceNumber})` : ''}</a>
-                      : d.kind === 'GRN' && <span className="text-xs text-slate-400">no invoice file</span>}
-                  </td>
-                  <td className="text-slate-600">{d.projectName}</td>
-                  <td className="text-slate-600">{d.vendorName || '—'}</td>
-                  <td className="text-right font-medium">{money(d.finalAmount)}</td>
-                  <td className="text-slate-500">{fmtDate(d.submittedAt)}</td>
-                  <td className="px-2 text-right">
-                    <div className="flex justify-end gap-2">
-                      <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
-                      <button className="rounded-lg bg-red-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'reject')}>Reject</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {items.map((d) => {
+                const amendments = d.amendments ?? [];
+                const latest = amendments.length ? amendments[amendments.length - 1] : null;
+                const earlier = amendments.slice(0, -1).reverse();
+                return (
+                  <Fragment key={`${d.kind}-${d.docId}`}>
+                    <tr className={`hover:bg-slate-50 ${latest ? '' : 'border-b border-slate-100'}`}>
+                      <td className="px-4 py-2">
+                        <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
+                        {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
+                        {d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
+                        {d.legacy && <div className="text-xs text-slate-400">no chain — admin action</div>}
+                        {d.invoicePdfUrl
+                          ? <a href={d.invoicePdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View invoice{d.invoiceNumber ? ` (${d.invoiceNumber})` : ''}</a>
+                          : d.kind === 'GRN' && <span className="text-xs text-slate-400">no invoice file</span>}
+                      </td>
+                      <td className="text-slate-600">{d.projectName}</td>
+                      <td className="text-slate-600">{d.vendorName || '—'}</td>
+                      <td className="text-right font-medium">{money(d.finalAmount)}</td>
+                      <td className="text-slate-500">{fmtDate(d.submittedAt)}</td>
+                      <td className="px-2 text-right">
+                        <div className="flex justify-end gap-2">
+                          <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewDoc(d)}>📄 View {d.kind}</button>
+                          <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
+                          <button className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'hold')}>⏸ On Hold</button>
+                        </div>
+                      </td>
+                    </tr>
+                    {/* Amended after approval → the approver must see WHY before deciding. */}
+                    {latest && (
+                      <tr className="border-b border-slate-100">
+                        <td colSpan={6} className="bg-amber-50 px-4 py-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Reason for the amendment</div>
+                          <div className="text-sm text-amber-900">{latest.remark}</div>
+                          <div className="text-[11px] text-amber-700">— {latest.byName}{latest.at ? ` · ${new Date(latest.at).toLocaleString('en-GB')}` : ''}</div>
+                          {earlier.length > 0 && (
+                            <div className="mt-1.5 border-t border-amber-200 pt-1.5">
+                              <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Earlier amendments ({earlier.length})</div>
+                              {earlier.map((a, i) => (
+                                <div key={i} className="text-[11px] text-amber-900">• {a.remark} <span className="text-amber-700">— {a.byName}{a.at ? ` · ${new Date(a.at).toLocaleString('en-GB')}` : ''}</span></div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

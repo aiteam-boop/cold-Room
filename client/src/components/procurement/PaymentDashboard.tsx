@@ -105,9 +105,18 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                     <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Received (GRN invoices)</div>
                     {r.grns.map((g: any) => (
                       <div key={g.id} className="flex items-center justify-between gap-3 py-0.5 text-xs">
-                        <span className="text-slate-600">{g.grnNumber}{g.invoiceNumber ? ` · Invoice ${g.invoiceNumber}` : ''} · {money(g.invoiceValue)}</span>
+                        {/* PI (drives the payment, arrives first) then the tax invoice
+                            (arrives later and closes the entry) — both shown the same way. */}
+                        <span className="text-slate-600">
+                          {g.grnNumber}
+                          {(g.piNumber || g.piValue != null) ? ` · PI${g.piNumber ? ` ${g.piNumber}` : ''}${g.piValue != null ? ` · ${money(g.piValue)}` : ''}` : ''}
+                          {(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl)
+                            ? `${g.invoiceNumber ? ` · Invoice ${g.invoiceNumber}` : ' · Invoice'}${g.invoiceValue != null ? ` · ${money(g.invoiceValue)}` : ''}`
+                            : ' · tax invoice pending'}
+                        </span>
                         <span className="flex items-center gap-3">
                           <button className="font-medium text-navy hover:underline" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`)}>📄 GRN</button>
+                          {g.piPdfUrl && <a className="font-medium text-navy hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">📄 PI</a>}
                           {g.invoicePdfUrl && <a className="font-medium text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 Invoice</a>}
                         </span>
                       </div>

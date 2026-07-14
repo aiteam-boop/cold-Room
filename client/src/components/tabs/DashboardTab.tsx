@@ -25,7 +25,10 @@ export default function DashboardTab({ projectId, onOpenGantt }: { projectId: st
         <KPI label="Days Remaining" value={project.daysRemaining ?? '—'} sub={`Target ${fmtDate(project.targetCompletionDate)}`} />
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      {/* On a wide screen the gauge only needs a quarter of the row — giving the
+          rest to the chart keeps both widgets proportionate instead of leaving a
+          small gauge adrift in a huge card. */}
+      <div className="grid gap-5 lg:grid-cols-3 xl:grid-cols-4">
         {/* Gauge */}
         <div className="card flex flex-col items-center justify-center p-6">
           <div className="mb-2 text-sm font-medium text-slate-500">Overall Completion</div>
@@ -36,7 +39,7 @@ export default function DashboardTab({ projectId, onOpenGantt }: { projectId: st
         </div>
 
         {/* Category bar chart */}
-        <div className="card p-5 lg:col-span-2">
+        <div className="card p-5 lg:col-span-2 xl:col-span-3">
           <div className="mb-3 text-sm font-medium text-slate-600">Category-wise Completion %</div>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={chartData} margin={{ left: -10, bottom: 60 }}>

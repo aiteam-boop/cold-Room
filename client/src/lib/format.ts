@@ -71,6 +71,9 @@ export function docStatusPill(status: string): string {
   switch (status) {
     case 'APPROVED': return 'bg-green-100 text-green-700';
     case 'PENDING_APPROVAL': case 'OPEN': return 'bg-amber-100 text-amber-700';
+    // On hold = sent back to be corrected and resubmitted; it is not a dead
+    // document, so it reads orange rather than red. REJECTED is historical.
+    case 'ON_HOLD': return 'bg-orange-100 text-orange-700';
     case 'REJECTED': return 'bg-red-100 text-red-700';
     default: return 'bg-slate-100 text-slate-600';
   }

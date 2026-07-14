@@ -113,6 +113,40 @@ export async function streamFromDb(filename: string, res: Response): Promise<boo
 }
 
 /**
+ * Read a stored file back as a Buffer (GridFS, then the legacy store).
+ *
+ * `streamFromDb` can only write to an HTTP response, but server-side readers —
+ * the KYC document reader, for one — need the bytes in hand. After a redeploy
+ * wipes the disk the file is still in Atlas, so this is what keeps those
+ * features working on a cold VPS. Returns null when the file is in neither.
+ */
+export async function readFromDb(filename: string): Promise<Buffer | null> {
+  try {
+    const bucket = await getUploadsBucket();
+    const files = await bucket.find({ filename }).limit(1).toArray();
+    if (files.length) {
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        bucket.openDownloadStreamByName(filename)
+          .on('data', (c: Buffer) => chunks.push(c))
+          .on('error', reject)
+          .on('end', () => resolve());
+      });
+      return Buffer.concat(chunks);
+    }
+  } catch (err) {
+    console.error('[fileStore] GridFS buffer read failed for', filename, (err as Error).message);
+  }
+  try {
+    const file = await prisma.storedFile.findUnique({ where: { filename } });
+    if (file) return Buffer.from(file.data);
+  } catch (err) {
+    console.error('[fileStore] legacy buffer read failed for', filename, (err as Error).message);
+  }
+  return null;
+}
+
+/**
  * Restore the branding logo/signature from Atlas into a local folder on startup.
  *
  * Most files are served lazily (the /uploads route falls back to GridFS on a

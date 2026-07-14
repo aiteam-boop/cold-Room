@@ -15,8 +15,8 @@ const MONEY_FIELDS = new Set([
   'totalPO', 'totalWO', 'totalInvoiced', 'totalPaid', 'totalPending',
   // BOQ Cost view (Sprint PRD §6): site engineers see quantities, never prices.
   'totalCost', 'advancePaid', 'balancePending',
-  'totalOrderedCost', 'totalAdvancePaid', 'totalBalancePending',
-  'grandTotalCost', 'grandAdvancePaid', 'grandBalancePending',
+  'totalOrderedCost', 'totalAdvancePaid', 'totalPaid', 'totalBalancePending',
+  'grandTotalCost', 'grandAdvancePaid', 'grandPaid', 'grandBalancePending',
   // BOQ Cost finance overlay (PRD v2 §5).
   'poAmountOverride', 'effectivePoAmount', 'rateOverride', 'effectiveRate', 'qtyRateAmount',
   // FMS vendor payment amounts (PRD v2 §4).

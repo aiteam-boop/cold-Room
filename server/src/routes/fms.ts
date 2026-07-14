@@ -16,7 +16,7 @@ import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
 import { hasSection } from '../lib/permissions';
 import {
-  buildChain, recordDecision, finalizeApproval, markDocRejected,
+  buildChain, recordDecision, finalizeApproval, markDocOnHold,
   getChainState, resolveActor, remindCurrent, type DocType,
 } from '../services/approvalChain';
 import { resolveAutoChain } from '../services/fixedChain';
@@ -309,16 +309,17 @@ router.post('/:id/approve', asyncHandler(async (req, res) => {
   res.json({ ok: true, outcome: 'COMPLETED' });
 }));
 
-router.post('/:id/reject', asyncHandler(async (req, res) => {
+// Put a payment on hold — back to the raiser with a note on what to correct.
+router.post('/:id/hold', asyncHandler(async (req, res) => {
   const p = await prisma.vendorPayment.findFirst({ where: { id: req.params.id, projectId: req.params.projectId } });
   if (!p) throw notFound();
   if (p.status !== 'PENDING_APPROVAL') throw badRequest('Payment is not pending approval.');
-  const { reason } = z.object({ reason: z.string().trim().min(1, 'A reason is required.') }).parse(req.body);
+  const { reason } = z.object({ reason: z.string().trim().min(1, 'Say what needs to be corrected.') }).parse(req.body);
   const actor = await resolveActor(req.account!.id);
   const stepCount = await prisma.approvalStep.count({ where: { docType: 'PAYMENT', docId: p.id } });
-  if (stepCount > 0) await recordDecision('PAYMENT', p.id, actor, 'REJECT', reason);
-  await markDocRejected('PAYMENT', p.id, reason);
-  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'FMS_REJECT', entity: 'VendorPayment', entityId: p.id, details: { reason } });
+  if (stepCount > 0) await recordDecision('PAYMENT', p.id, actor, 'HOLD', reason);
+  await markDocOnHold('PAYMENT', p.id, reason);
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'FMS_HOLD', entity: 'VendorPayment', entityId: p.id, details: { reason } });
   res.json({ ok: true });
 }));
 

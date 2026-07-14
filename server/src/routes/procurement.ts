@@ -1,4 +1,7 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../lib/errors';
@@ -19,11 +22,13 @@ import { notifyUser, notifyProjectRoles } from '../services/notify';
 import { hasSection, shouldHideFinancials } from '../lib/permissions';
 import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
 import { kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
+import { extractKycFields } from '../services/kycExtract';
+import { readFromDb } from '../lib/fileStore';
 import { deliveryInfo } from '../services/delivery';
 import { chainForAmount, validateChain, type MatrixDocType } from '../services/approvalMatrix';
 import { resolveAutoChain } from '../services/fixedChain';
 import {
-  buildChain, recordDecision, remindCurrent, finalizeApproval, markDocRejected,
+  buildChain, recordDecision, remindCurrent, finalizeApproval, markDocOnHold,
   getChainState, resolveActor, type DocType,
 } from '../services/approvalChain';
 
@@ -118,6 +123,15 @@ function serializeDoc(d: any) {
 }
 
 // GET .../docs?type=PO|WO
+// `createdById` / `raisedById` are plain ids (no Prisma relation), so resolve the
+// people behind them in one query and hand the lists a { name, email } to show.
+async function creatorsById(ids: (string | null | undefined)[]): Promise<Map<string, { name: string; email: string }>> {
+  const unique = [...new Set(ids.filter((i): i is string => !!i))];
+  if (!unique.length) return new Map();
+  const users = await prisma.user.findMany({ where: { id: { in: unique } }, select: { id: true, name: true, email: true } });
+  return new Map(users.map((u) => [u.id, { name: u.name, email: u.email }]));
+}
+
 router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHandler(async (req, res) => {
   const type = req.query.type === 'WO' ? 'WO' : req.query.type === 'PO' ? 'PO' : undefined;
   const docs = await prisma.procurementDoc.findMany({
@@ -128,6 +142,7 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
       grns: { select: { grnDate: true, status: true } },
     },
   });
+  const creators = await creatorsById(docs.map((d) => d.createdById));
   res.json({
     docs: maskFinancials(
       docs.map((d) => ({
@@ -135,6 +150,7 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         docDate: d.docDate, basicAmount: d.basicAmount, finalAmount: d.finalAmount, esignApplied: d.esignApplied,
         counts: d._count,
         delivery: deliveryInfo(d, d.grns), // G7 — promised vs actual, derived
+        createdBy: (d.createdById && creators.get(d.createdById)) || null,
       })),
       req.account,
     ),
@@ -449,22 +465,24 @@ router.post('/docs/:docId/approve', asyncHandler(async (req, res) => {
   res.json({ ok: true, outcome: 'COMPLETED' });
 }));
 
-router.post('/docs/:docId/reject', asyncHandler(async (req, res) => {
-  const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
+// Put a PO/WO on hold: the approver spotted something to correct, so the document
+// goes back to the raiser with a note instead of being rejected outright.
+router.post('/docs/:docId/hold', asyncHandler(async (req, res) => {
+  const { reason } = z.object({ reason: z.string().trim().min(1, 'Say what needs to be corrected.') }).parse(req.body);
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound();
   if (doc.status !== 'PENDING_APPROVAL') throw badRequest('Document is not pending approval');
   const actor = await resolveActor(req.account!.id);
   const stepCount = await prisma.approvalStep.count({ where: { docType: doc.type, docId: doc.id } });
   if (stepCount > 0) {
-    await recordDecision(doc.type as DocType, doc.id, actor, 'REJECT', reason);
-    await markDocRejected(doc.type as DocType, doc.id, reason);
+    await recordDecision(doc.type as DocType, doc.id, actor, 'HOLD', reason);
+    await markDocOnHold(doc.type as DocType, doc.id, reason);
   } else {
     if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
-    await markDocRejected(doc.type as DocType, doc.id, reason);
-    if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_REJECTED', title: `${doc.type} rejected`, message: `${doc.docNumber} was rejected: ${reason}`, projectId: req.params.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` });
+    await markDocOnHold(doc.type as DocType, doc.id, reason);
+    if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_ON_HOLD', title: `${doc.type} on hold`, message: `${doc.docNumber} needs correction: ${reason}`, projectId: req.params.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` });
   }
-  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'PROC_DOC_REJECT', entity: 'ProcurementDoc', entityId: doc.id, details: { reason } });
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'PROC_DOC_HOLD', entity: 'ProcurementDoc', entityId: doc.id, details: { reason } });
   res.json({ ok: true });
 }));
 
@@ -646,7 +664,14 @@ function serializeGrn(grn: any, acc: Parameters<typeof maskFinancials>[1]) {
 
 router.get('/grns', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const grns = await prisma.gRN.findMany({ where: { projectId: req.params.projectId }, orderBy: { createdAt: 'desc' }, include: { doc: { select: { docNumber: true, type: true, finalAmount: true } } } });
-  res.json({ grns: grns.map((g) => serializeGrn(g, req.account)) });
+  // Who raised each GRN — shown on the register so it is clear who to go back to.
+  const creators = await creatorsById(grns.map((g) => g.raisedById));
+  res.json({
+    grns: grns.map((g) => ({
+      ...serializeGrn(g, req.account),
+      createdBy: (g.raisedById && creators.get(g.raisedById)) || null,
+    })),
+  });
 }));
 
 // GET .../grns/available-docs — approved PO/WOs a GRN can be raised against.
@@ -869,20 +894,21 @@ router.post('/grns/:grnId/approve', asyncHandler(async (req, res) => {
   res.json({ ok: true, outcome: 'COMPLETED' });
 }));
 
-router.post('/grns/:grnId/reject', asyncHandler(async (req, res) => {
-  const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
+// Put a GRN on hold — back to the raiser with a note on what to correct.
+router.post('/grns/:grnId/hold', asyncHandler(async (req, res) => {
+  const { reason } = z.object({ reason: z.string().trim().min(1, 'Say what needs to be corrected.') }).parse(req.body);
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
   const actor = await resolveActor(req.account!.id);
   const stepCount = await prisma.approvalStep.count({ where: { docType: 'GRN', docId: grn.id } });
   if (stepCount > 0) {
-    await recordDecision('GRN', grn.id, actor, 'REJECT', reason);
-    await markDocRejected('GRN', grn.id, reason);
+    await recordDecision('GRN', grn.id, actor, 'HOLD', reason);
+    await markDocOnHold('GRN', grn.id, reason);
   } else {
     if (!hasSection(req.account, 'canApprove')) throw forbidden('You do not have approval permission');
-    await markDocRejected('GRN', grn.id, reason);
+    await markDocOnHold('GRN', grn.id, reason);
   }
-  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_REJECT', entity: 'GRN', entityId: grn.id, details: { reason } });
+  await audit({ userId: actor.id, projectId: req.params.projectId, action: 'GRN_HOLD', entity: 'GRN', entityId: grn.id, details: { reason } });
   res.json({ ok: true });
 }));
 
@@ -961,7 +987,49 @@ router.post('/vendors/:vendorId/kyc', requireProjectMember, requireEdit('vendors
   if (!vendor) throw notFound('Vendor not found');
   const document = await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'KYC', kycKind, fileName: req.file.originalname, fileUrl: `/uploads/${req.file.filename}`, mimeType: req.file.mimetype, vendorId: req.params.vendorId, vendorName: vendor.name, uploadedById: req.user!.sub } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'VENDOR_KYC_UPLOAD', entity: 'Vendor', entityId: req.params.vendorId, details: { kycKind } });
-  res.status(201).json({ document });
+  // Read the GSTIN / PAN / CIN off the document so the Financial tab fills itself.
+  // Never blocks the upload: on any failure `source` is 'none' and the user types
+  // the fields as before. The values are only SUGGESTED — the user still saves.
+  const extracted = await extractKycFields(req.file.path, req.file.mimetype);
+  res.status(201).json({ document, extracted });
+}));
+
+// Re-read an already-uploaded KYC document (for files uploaded before this
+// existed, or after a failed read). Same suggest-only contract as the upload.
+router.post('/vendors/:vendorId/kyc/:docId/extract', requireProjectMember, requireEdit('vendors'), asyncHandler(async (req, res) => {
+  const doc = await prisma.procurementDocument.findFirst({ where: { id: req.params.docId, vendorId: req.params.vendorId, type: 'KYC' } });
+  if (!doc) throw notFound('KYC document not found for this vendor');
+
+  const filename = path.basename(doc.fileUrl);
+  let filePath = path.resolve(process.cwd(), 'uploads', filename);
+  let temp: string | null = null;
+  // A redeploy wipes the disk but not Atlas, so fall back to GridFS and stage the
+  // bytes in a temp file — otherwise this would 400 for every older document.
+  if (!fs.existsSync(filePath)) {
+    const buf = await readFromDb(filename);
+    if (!buf) throw badRequest('The file is no longer available — please re-upload it.');
+    temp = path.join(os.tmpdir(), `kyc-${Date.now()}-${filename}`);
+    fs.writeFileSync(temp, buf);
+    filePath = temp;
+  }
+  try {
+    const extracted = await extractKycFields(filePath, doc.mimeType ?? undefined);
+    res.json({ extracted });
+  } finally {
+    if (temp) fs.rmSync(temp, { force: true });
+  }
+}));
+
+// Remove a KYC document so a wrong/outdated file can be re-uploaded. Scoped to
+// this vendor's KYC records only — it can never delete a PO/GRN/invoice.
+router.delete('/vendors/:vendorId/kyc/:docId', requireProjectMember, requireEdit('vendors'), asyncHandler(async (req, res) => {
+  const doc = await prisma.procurementDocument.findFirst({
+    where: { id: req.params.docId, vendorId: req.params.vendorId, type: 'KYC' },
+  });
+  if (!doc) throw notFound('KYC document not found for this vendor');
+  await prisma.procurementDocument.delete({ where: { id: doc.id } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'VENDOR_KYC_DELETE', entity: 'Vendor', entityId: req.params.vendorId, details: { kycKind: doc.kycKind, fileName: doc.fileName } });
+  res.json({ ok: true });
 }));
 
 // ── Payment pipeline dashboard ──────────────────────────────────────────────

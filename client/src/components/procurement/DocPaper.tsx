@@ -51,6 +51,27 @@ function SignatureMark() {
   return <div className="leading-none text-blue-900" style={{ fontFamily: 'SignatureFont, cursive', fontSize: '30px' }}>Akash Agrawal</div>;
 }
 
+// The vendor's "To," block on a PO/WO. Selecting a vendor fills EXACTLY these
+// lines and nothing else — name, address, Tel/Fax, Website, GSTIN, CIN — so the
+// letterhead reads the way the vendor's own header does. Contact person and
+// phone are separate PO fields and deliberately stay OUT of this block.
+// Shared with DocBuilder's vendor picker so both selects fill it identically.
+export function vendorBlock(v: {
+  name?: string | null; address?: string | null; tel?: string | null; fax?: string | null;
+  website?: string | null; gstin?: string | null; cin?: string | null;
+}): string {
+  const clean = (s: string | null | undefined) => (s ?? '').trim();
+  const telFax = [clean(v.tel) && `Tel : ${clean(v.tel)}`, clean(v.fax) && `Fax: ${clean(v.fax)}`].filter(Boolean).join(', ');
+  return [
+    clean(v.name),
+    clean(v.address),
+    telFax,
+    clean(v.website) && `Website: ${clean(v.website)}`,
+    clean(v.gstin) && `GSTN.NO: ${clean(v.gstin)}`,
+    clean(v.cin) && `CIN: ${clean(v.cin)}`,
+  ].filter(Boolean).join('\n');
+}
+
 // Inline-editable, PDF-styled document with the company's bordered grid layout.
 export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[] }) {
   const isWO = d.type === 'WO';
@@ -67,18 +88,7 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
   const selectVendor = (id: string) => {
     const v = vendors.find((x) => x.id === id);
     if (!v) { setD({ ...d, vendorId: id || null }); return; }
-    const telFax = [v.tel ? `Tel : ${v.tel}` : '', v.fax ? `Fax: ${v.fax}` : ''].filter(Boolean).join(', ');
-    const block = [
-      v.name,
-      v.address,
-      v.contactPerson || '',
-      v.phones ? `Phone: ${v.phones}` : '',
-      telFax,
-      v.website ? `Website: ${v.website}` : '',
-      v.gstin ? `GSTN.NO: ${v.gstin}` : '',
-      v.cin ? `CIN: ${v.cin}` : '',
-    ].filter(Boolean).join('\n');
-    setD({ ...d, vendorId: id, vendorName: v.name, vendorAddress: block, vendorGstin: v.gstin, vendorContact: v.contactPerson, vendorPhone: v.phones });
+    setD({ ...d, vendorId: id, vendorName: v.name, vendorAddress: vendorBlock(v), vendorGstin: v.gstin, vendorContact: v.contactPerson, vendorPhone: v.phones });
   };
   const setVendorBlock = (x: string) => setD({ ...d, vendorAddress: x, vendorName: (x.split('\n')[0] || '').trim() });
 
@@ -147,7 +157,7 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
               {vendors.map((v) => <option key={v.id} value={v.id}>{v.name} ({v.kycStatus})</option>)}
             </select>
           )}
-          <TA value={d.vendorAddress} onChange={setVendorBlock} rows={6} className="font-medium" placeholder="Vendor name&#10;Address&#10;Tel / Fax&#10;GSTIN" />
+          <TA value={d.vendorAddress} onChange={setVendorBlock} rows={6} className="font-medium" placeholder="Vendor name&#10;Address&#10;Tel / Fax&#10;Website&#10;GSTN.NO&#10;CIN" />
         </div>
         <div className="flex w-56 shrink-0 flex-col">
           <div className={`flex flex-1 items-center justify-center overflow-hidden border-b ${B} px-2 py-1 text-center`}>Date : {new Date(d.docDate).toLocaleDateString('en-GB')}</div>

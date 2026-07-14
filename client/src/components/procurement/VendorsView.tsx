@@ -179,6 +179,22 @@ function VendorModal({ projectId, vendor, meta, onClose, onDone }: { projectId: 
   const toggle = (key: 'boqCategories' | 'workCategories', v: string) =>
     set({ [key]: f[key].includes(v) ? f[key].filter((x: string) => x !== v) : [...f[key], v] });
 
+  // A KYC document was read (GST certificate / PAN card / incorporation cert):
+  // drop the numbers straight into the Financial tab. They are only SUGGESTED —
+  // the user reviews them there and still has to press Save Changes.
+  const [readMsg, setReadMsg] = useState<{ text: string; found: string[] } | null>(null);
+  const applyExtracted = (e: { gstin?: string; pan?: string; cin?: string; source?: string; note?: string }) => {
+    const patch: any = {};
+    const found: string[] = [];
+    if (e.gstin) { patch.gstin = e.gstin; found.push(`GSTIN ${e.gstin}`); }
+    if (e.pan) { patch.pan = e.pan; found.push(`PAN ${e.pan}`); }
+    if (e.cin) { patch.cin = e.cin; found.push(`CIN ${e.cin}`); }
+    if (!found.length) { setReadMsg({ text: e.note || 'Nothing could be read from that document.', found: [] }); return; }
+    set(patch);
+    setReadMsg({ text: e.source === 'pdf-text' ? 'Read from the document text' : 'Read from the document image', found });
+    setTab('financial');
+  };
+
   return (
     <Modal title={isEdit ? `Edit ${vendor.name}` : 'Add Vendor / Contractor'} onClose={onClose} wide>
       <div className="mb-4 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 text-sm">
@@ -192,6 +208,24 @@ function VendorModal({ projectId, vendor, meta, onClose, onDone }: { projectId: 
           </button>
         ))}
       </div>
+
+      {/* What the KYC reader pulled off the uploaded document. */}
+      {readMsg && (
+        <div className={`mb-3 rounded-lg border px-3 py-2 text-sm ${readMsg.found.length ? 'border-green-200 bg-green-50 text-green-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              {readMsg.found.length ? (
+                <>
+                  <div className="font-medium">✓ {readMsg.text} — filled into Financial</div>
+                  <div className="mt-0.5 text-xs">{readMsg.found.join(' · ')}</div>
+                  <div className="mt-0.5 text-[11px] opacity-80">Check they are right, then press <strong>Save Changes</strong>.</div>
+                </>
+              ) : <div>{readMsg.text}</div>}
+            </div>
+            <button type="button" className="text-lg leading-none opacity-50 hover:opacity-100" onClick={() => setReadMsg(null)}>×</button>
+          </div>
+        </div>
+      )}
 
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); save.mutate(); }} className="space-y-4">
         {tab === 'basic' && (
@@ -357,7 +391,7 @@ function VendorModal({ projectId, vendor, meta, onClose, onDone }: { projectId: 
           </div>
         )}
 
-        {tab === 'kyc' && isEdit && <KycPanel projectId={projectId} vendorId={vendor.id} meta={meta} />}
+        {tab === 'kyc' && isEdit && <KycPanel projectId={projectId} vendorId={vendor.id} meta={meta} onExtracted={applyExtracted} />}
         {tab === 'rates' && isEdit && <RatePanel vendorId={vendor.id} rates={f.rateChart} onChange={(rateChart) => set({ rateChart })} />}
 
         {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
@@ -372,15 +406,39 @@ function VendorModal({ projectId, vendor, meta, onClose, onDone }: { projectId: 
 
 // ── KYC ──────────────────────────────────────────────────────────────────────
 
-function KycPanel({ projectId, vendorId, meta }: { projectId: string; vendorId: string; meta: Meta }) {
+type Extracted = { gstin?: string; pan?: string; cin?: string; source?: string; note?: string };
+
+function KycPanel({ projectId, vendorId, meta, onExtracted }: {
+  projectId: string; vendorId: string; meta: Meta;
+  /** The GSTIN / PAN / CIN read off the document, for the Financial tab to fill. */
+  onExtracted: (e: Extracted) => void;
+}) {
   const qc = useQueryClient();
   const [kind, setKind] = useState(meta.kycKinds[0]);
   const [msg, setMsg] = useState('');
 
   const docsQ = useQuery({ queryKey: ['vendor-detail', vendorId], queryFn: async () => (await api.get(`/vendors/${vendorId}`)).data.vendor });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['vendor-detail', vendorId] });
+    qc.invalidateQueries({ queryKey: ['proc-vendors', projectId, 'all'] });
+    qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] });
+  };
   const up = useMutation({
     mutationFn: (file: File) => { const fd = new FormData(); fd.append('file', file); fd.append('kycKind', kind); return api.post(`/projects/${projectId}/procurement/vendors/${vendorId}/kyc`, fd); },
-    onSuccess: () => { setMsg('Uploaded.'); qc.invalidateQueries({ queryKey: ['vendor-detail', vendorId] }); qc.invalidateQueries({ queryKey: ['proc-vendors', projectId, 'all'] }); },
+    // The upload also reads the document; a failed read never fails the upload.
+    onSuccess: (r) => { setMsg('Uploaded.'); refresh(); if (r.data?.extracted) onExtracted(r.data.extracted); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  // Re-read a document that was uploaded before this existed (or that failed).
+  const read = useMutation({
+    mutationFn: (docId: string) => api.post(`/projects/${projectId}/procurement/vendors/${vendorId}/kyc/${docId}/extract`),
+    onSuccess: (r) => { setMsg(''); onExtracted(r.data?.extracted ?? {}); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  // Remove a wrong/outdated KYC file so the right one can be uploaded in its place.
+  const del = useMutation({
+    mutationFn: (docId: string) => api.delete(`/projects/${projectId}/procurement/vendors/${vendorId}/kyc/${docId}`),
+    onSuccess: () => { setMsg('Document removed — you can upload a new one.'); refresh(); },
     onError: (e) => setMsg(errMsg(e)),
   });
 
@@ -413,13 +471,35 @@ function KycPanel({ projectId, vendorId, meta }: { projectId: string; vendorId: 
         <div className="text-sm text-slate-400">No KYC documents uploaded yet.</div>
       ) : (
         <table className="w-full text-sm">
-          <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="py-1">Type</th><th>File</th><th>Uploaded</th></tr></thead>
+          <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="py-1">Type</th><th>File</th><th>Uploaded</th><th className="text-right">Read</th><th className="text-right">Remove</th></tr></thead>
           <tbody>
             {docs.map((d) => (
               <tr key={d.id} className="border-t border-slate-100">
                 <td className="py-1.5 text-xs">{(d.kycKind ?? 'Unspecified').replace(/_/g, ' ')}</td>
                 <td><a className="text-xs font-medium text-navy hover:underline" href={d.fileUrl} target="_blank" rel="noreferrer">{d.fileName}</a></td>
                 <td className="text-xs text-slate-400">{fmtDate(d.uploadedAt)}</td>
+                {/* Pull the GSTIN / PAN / CIN off a document uploaded earlier. */}
+                <td className="text-right">
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-navy hover:underline disabled:opacity-40"
+                    disabled={read.isPending}
+                    title="Read the GSTIN / PAN / CIN off this document"
+                    onClick={() => read.mutate(d.id)}
+                  >{read.isPending && read.variables === d.id ? 'Reading…' : '🔍 Read'}</button>
+                </td>
+                {/* Remove a wrong file so the right one can be uploaded in its place. */}
+                <td className="text-right">
+                  <button
+                    type="button"
+                    className="text-slate-300 hover:text-red-500 disabled:opacity-40"
+                    disabled={del.isPending}
+                    title="Remove this document"
+                    onClick={() => {
+                      if (window.confirm(`Remove "${d.fileName}"? You can upload a replacement afterwards.`)) del.mutate(d.id);
+                    }}
+                  >✕</button>
+                </td>
               </tr>
             ))}
           </tbody>
