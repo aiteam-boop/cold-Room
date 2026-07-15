@@ -77,6 +77,15 @@ model Project {
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
+  // ── Frozen budget (BOQ & Budget PRD v1 §3) ──────────────────────────────────
+  // The internal costing that the bid was built on. Once FROZEN it is the
+  // benchmark every PO is measured against and nobody may edit it — the only way
+  // it changes afterwards is a Change Order adding scope.
+  budgetStatus         String          @default("DRAFT")  // DRAFT | FROZEN
+  budgetContingencyPct Float?          // e.g. 5 — added on top of the line total
+  budgetFrozenAt       DateTime?
+  budgetFrozenById     String?
+
   boqAnalyzedAt        DateTime?
 
   // ── Project start-date anchor (Sprint PRD §2) ──
@@ -89,6 +98,7 @@ model Project {
 
   members   ProjectMember[]
   boqItems  BOQItem[]
+  budgetLines BOQBudgetLine[]
   boqAnalysis BOQAnalysisItem[]
   drawings  Drawing[]
   zones     ProjectZone[]
@@ -594,6 +604,8 @@ model BOQItem {
   poLineItems     ProcurementLineItem[]
   // Room-wise breakup of this line's plannedQty (DPR).
   scopeItems      RoomScopeItem[]
+  // The frozen internal costing for this line — what we said it would cost.
+  budgetLine      BOQBudgetLine?
 
   @@index([projectId])
   @@index([parentId])
@@ -845,6 +857,34 @@ model MachineModel {
 }
 
 // Vendor sub-item breakdown for a BOQ category, validated against planned qty.
+// ── Frozen budget line (BOQ & Budget PRD v1 §3) ───────────────────────────────
+// One per BOQ item: what we ESTIMATED this line would cost when the bid was
+// costed. Every PO raised against the item is later measured against this.
+//
+// Deliberately separate from BOQCostAnnotation (which records what a PO ACTUALLY
+// cost): the budget must survive untouched even as the actuals move around it.
+// It is frozen at the project level (Project.budgetStatus) — see routes/budget.ts.
+model BOQBudgetLine {
+  id           String   @id @default(cuid()) @map("_id")
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // One budget line per BOQ item — the granularity the PO is compared at.
+  boqItemId    String   @unique
+  boqItem      BOQItem  @relation(fields: [boqItemId], references: [id], onDelete: Cascade)
+
+  // Defaults to the BOQ's plannedQty, but the costing may assume a different
+  // quantity (e.g. wastage), so it is its own number.
+  budgetQty    Float?
+  budgetRate   Float?   // per unit — the internal estimate
+  budgetAmount Float?   // qty × rate, stored so the number that was frozen is the number kept
+  notes        String?  // why this rate — the basis of the estimate
+
+  updatedById  String?
+  updatedAt    DateTime @updatedAt
+
+  @@index([projectId])
+}
+
 model BOQItemList {
   id              String   @id @default(cuid()) @map("_id")
   boqItemId       String

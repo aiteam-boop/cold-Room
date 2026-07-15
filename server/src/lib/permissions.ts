@@ -50,13 +50,18 @@ export const PAGE_LABELS: Record<PageKey, string> = {
 };
 
 // Curated section-level toggles (IMS "section permissions").
-export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid'] as const;
+// Entering the budget and FREEZING it are deliberately two different rights: the
+// costing may be typed by one person and locked by whoever owns the number.
+// Freezing is what makes the budget the benchmark, so it is the stronger right.
+export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
   hideFinancials: 'Hide pricing & financial data',
   canApprove: 'Can approve (PO/WO, GRN, progress entries)',
   canMarkPaid: 'Can mark payment milestones paid (Accounts)',
+  canEditBudget: 'Can enter the BOQ budget (costing)',
+  canFreezeBudget: 'Can FREEZE the budget (locks it for everyone)',
 };
 
 export interface PageGrant { view: boolean; edit: boolean }

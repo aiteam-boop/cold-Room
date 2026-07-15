@@ -37,19 +37,23 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   fms: 'FMS — Vendor Payments',
 };
 
-export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid'] as const;
+export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
   hideFinancials: 'Hide pricing & financial data',
   canApprove: 'Can approve (PO/WO, GRN, progress entries)',
   canMarkPaid: 'Can mark payment milestones paid (Accounts)',
+  canEditBudget: 'Can enter the BOQ budget (costing)',
+  canFreezeBudget: 'Can FREEZE the budget (locks it for everyone)',
 };
 
 export const SECTION_HINTS: Record<SectionKey, string> = {
   hideFinancials: 'Strips every ₹ amount, contract rate and revenue total from this user — in the UI and the API payloads.',
   canApprove: 'Enables approve / reject on PO/WO, GRNs and progress entries.',
   canMarkPaid: 'Allows marking triggered payment milestones as paid.',
+  canEditBudget: 'Lets this user enter and edit the BOQ budget (the internal costing), until it is frozen.',
+  canFreezeBudget: 'Lets this user FREEZE the budget. Once frozen it is locked for everyone and becomes the benchmark every PO is judged against.',
 };
 
 export interface PageGrant { view: boolean; edit: boolean }

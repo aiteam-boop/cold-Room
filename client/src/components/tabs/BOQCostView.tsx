@@ -52,6 +52,30 @@ interface CostItem {
   invoicingDone: boolean; annotationRemarks: string | null;
   effectiveOrderedQty: number; effectivePoAmount: number | null; effectiveRate: number | null; qtyRateAmount: number | null;
   selectedDocId: string | null; selectedPoNumber: string | null; selectedVendorName: string | null;
+  // Budget vs actual (BOQ & Budget PRD v1 §5). Null until the line is both costed
+  // and ordered — a variance with nothing ordered would read as a false win.
+  budgetAmount: number | null; budgetRate: number | null;
+  budgetVariance: number | null; budgetVariancePct: number | null;
+}
+
+// Under budget is the goal, so it reads green; over budget reads red. Blank until
+// there is both a budget and a PO to compare it with.
+function VarianceCell({ it, money }: { it: CostItem; money: (n: number | null | undefined) => string }) {
+  if (it.budgetVariance == null) {
+    return <td className="px-2 text-right text-xs text-slate-300">—</td>;
+  }
+  const under = it.budgetVariance <= 0;
+  return (
+    <td className={`px-2 text-right text-xs font-medium ${under ? 'text-green-700' : 'text-red-600'}`}
+      title={under ? 'Bought below the frozen budget' : 'Over the frozen budget'}>
+      {under ? '−' : '+'}{money(Math.abs(it.budgetVariance))}
+      {it.budgetVariancePct != null && (
+        <div className="text-[10px] font-normal opacity-80">
+          {it.budgetVariancePct > 0 ? '+' : ''}{it.budgetVariancePct.toFixed(1)}%
+        </div>
+      )}
+    </td>
+  );
 }
 interface POOption { id: string; docNumber: string; vendorName: string | null; finalAmount: number | null; status: string }
 interface CostSheet {
@@ -154,11 +178,16 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                 <th className="px-2">Unit</th>
                 <th className="px-2 text-right">Planned</th>
                 <th className="px-2 text-right">Installed</th>
+                {/* The frozen budget — what this line was SAID to cost. Sits before
+                    the PO block so it is visible even before anything is ordered. */}
+                <th className="px-2 text-right">Budget</th>
                 <th className="px-2">PO Number(s)</th>
                 <th className="px-2">Vendor</th>
                 <th className="px-2 text-right">Qty Ordered</th>
                 <th className="px-2 text-right">Unit Price</th>
                 <th className="px-2 text-right">PO Amount</th>
+                {/* How the PO landed against what we SAID it would cost. */}
+                <th className="px-2 text-right">Variance</th>
                 <th className="px-2 text-right">Qty × Rate</th>
                 <th className="px-2">Delivery</th>
                 <th className="px-2 text-right">Paid</th>
@@ -208,9 +237,11 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                       <td className="px-2 text-xs text-slate-500">{it.unit || '—'}</td>
                       <td className="px-2 text-right">{fmtNum(it.plannedQty)}</td>
                       <td className="px-2 text-right text-navy">{fmtNum(it.installedQty)}</td>
+                      {/* Budget — shown whether or not a PO exists yet. */}
+                      <td className="px-2 text-right text-xs text-slate-600">{it.budgetAmount != null ? money(it.budgetAmount) : <span className="text-slate-300">—</span>}</td>
 
                       {it.pos.length === 0 && !it.selectedDocId && it.orderedQtyOverride == null && it.poAmountOverride == null ? (
-                        <td className="px-2 text-xs italic text-slate-400" colSpan={12}>
+                        <td className="px-2 text-xs italic text-slate-400" colSpan={13}>
                           {editable ? <button className="not-italic text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setFinance((c) => ({ ...c, [it.id]: true })); }}>+ Select PO / fill manually</button> : 'No PO raised yet'}
                         </td>
                       ) : it.pos.length === 0 ? (
@@ -223,6 +254,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                           <td className="px-2 text-right">{fmtNum(it.effectiveOrderedQty)}{it.orderedQtyOverride != null && <span className="ml-1 text-amber-500" title="Manual">◆</span>}</td>
                           <td className="px-2 text-right">{money(it.effectiveRate)}</td>
                           <td className="px-2 text-right font-medium">{money(it.poAmountOverride)}{it.poAmountOverride != null && <span className="ml-1 text-amber-500" title="Manual">◆</span>}</td>
+                          <VarianceCell it={it} money={money} />
                           <td className="px-2 text-right text-navy">{it.qtyRateAmount != null ? money(it.qtyRateAmount) : '—'}</td>
                           <td className="px-2 text-xs">
                             {it.plannedDeliveryDate || it.actualDeliveryDate ? (
@@ -258,6 +290,8 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                             {money(it.poAmountOverride != null ? it.poAmountOverride : it.totalOrderedCost)}
                             {it.poAmountOverride != null && <span className="ml-1 text-amber-500" title="Manual override">◆</span>}
                           </td>
+                          {/* Variance vs the frozen budget — under budget is the goal. */}
+                          <VarianceCell it={it} money={money} />
                           {/* Qty × Rate — the billable figure finance reads at a glance. */}
                           <td className="px-2 text-right text-navy">{it.qtyRateAmount != null ? money(it.qtyRateAmount) : '—'}</td>
                           {/* Delivery — planned (Gantt) → actual, with the delay in days. */}

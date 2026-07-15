@@ -8,6 +8,7 @@ import { Spinner } from '../components/ui';
 import { fmtDate, riskPill, projectStatusPill, titleize } from '../lib/format';
 import DashboardTab from '../components/tabs/DashboardTab';
 import BOQTab from '../components/tabs/BOQTab';
+import BudgetView from '../components/tabs/BudgetView';
 import DrawingTab from '../components/tabs/DrawingTab';
 import GanttTab from '../components/tabs/GanttTab';
 import ChangeOrdersTab from '../components/tabs/ChangeOrdersTab';
@@ -50,6 +51,9 @@ const MENU: { group: string; items: Item[] }[] = [
   { group: 'Project', items: [
     { key: 'dashboard', label: 'Dashboard', icon: 'grid' },
     { key: 'boq', label: 'BOQ & Progress', icon: 'list' },
+    // The internal costing, beside the BOQ. It IS pricing, so it is hidden from
+    // anyone with hideFinancials (filtered below) — never shown to a vendor.
+    { key: 'boq', label: 'BOQ & Budget', icon: 'wallet', view: 'budget' },
     { key: 'drawing', label: 'Drawing & 3D', icon: 'cube' },
     { key: 'gantt', label: 'Gantt / Timeline', icon: 'list' },
     { key: 'changeorders', label: 'Change Orders', icon: 'doc' },
@@ -75,7 +79,7 @@ const MENU: { group: string; items: Item[] }[] = [
 
 export default function ProjectWorkspace() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { canView, isDprOwner } = useAuth();
+  const { canView, isDprOwner, hideFinancials } = useAuth();
   // The room-wise DPR is the owner's personal cockpit — shown only to the DPR
   // owner account(s), NOT every admin and never via the 'dpr' grant.
   const showDpr = isDprOwner;
@@ -119,8 +123,10 @@ export default function ProjectWorkspace() {
   const fullMenu = [...MENU, ...(dprItems.length ? [{ group: 'DPR (Room-wise)', items: dprItems }] : [])];
 
   // Only the pages this user is granted (admins see all). Empty groups drop out.
+  // The budget is pricing: anyone with hideFinancials never sees the entry at all
+  // (the API refuses them too — this just stops a dead menu item).
   const menu = fullMenu
-    .map((g) => ({ group: g.group, items: g.items.filter((it) => canView(it.key)) }))
+    .map((g) => ({ group: g.group, items: g.items.filter((it) => canView(it.key) && !(it.view === 'budget' && hideFinancials)) }))
     .filter((g) => g.items.length > 0);
   const allNavs: Nav[] = menu.flatMap((g) => g.items.map((it) => ({ key: it.key, view: it.view })));
   const visibleIds = new Set(allNavs.map(navId));
@@ -223,7 +229,8 @@ export default function ProjectWorkspace() {
         <div className="px-5 py-6 lg:px-6">
         {metricBar}
         {current.key === 'dashboard' && <DashboardTab projectId={projectId!} onOpenGantt={canView('gantt') ? () => setActive({ key: 'gantt' }) : undefined} />}
-        {current.key === 'boq' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
+        {current.key === 'boq' && current.view !== 'budget' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
+        {current.key === 'boq' && current.view === 'budget' && <BudgetView projectId={projectId!} />}
         {current.key === 'drawing' && <DrawingTab projectId={projectId!} role={role} />}
         {current.key === 'gantt' && <GanttTab projectId={projectId!} />}
         {current.key === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}

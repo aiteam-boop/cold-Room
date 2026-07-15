@@ -90,6 +90,16 @@ export interface CostItemRow {
   totalReceivedQty: number;
   pos: CostPORow[];
 
+  // ── Budget vs actual (BOQ & Budget PRD v1 §5) ──
+  // What we SAID this line would cost, and how the POs actually landed against it.
+  // `budgetVariance` is negative when we bought below budget — that is the goal.
+  budgetAmount: number | null;
+  budgetRate: number | null;
+  /** effectivePoAmount − budgetAmount. Null until the line is both costed and ordered. */
+  budgetVariance: number | null;
+  /** Variance as a % of budget. Null on the same terms. */
+  budgetVariancePct: number | null;
+
   // ── Finance overlay (PRD v2 §5) — editable, layered over the derived numbers ──
   // `effective*` prefer the manual override when present, else the derived value.
   orderedQtyOverride: number | null;
@@ -131,7 +141,7 @@ export function paymentStatus(total: number, paid: number, advance: number): Pay
 const dayDiff = (a: Date, b: Date) => Math.round((Date.UTC(a.getUTCFullYear(), a.getUTCMonth(), a.getUTCDate()) - Date.UTC(b.getUTCFullYear(), b.getUTCMonth(), b.getUTCDate())) / 86_400_000);
 
 export async function buildCostSheet(projectId: string) {
-  const [items, prog, lines, grns, annotations, allPos] = await Promise.all([
+  const [items, prog, lines, grns, annotations, allPos, budgetLines] = await Promise.all([
     prisma.bOQItem.findMany({ where: { projectId, isGroup: false }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
     loadProjectProgress(projectId),
     prisma.procurementLineItem.findMany({
@@ -168,9 +178,12 @@ export async function buildCostSheet(projectId: string) {
       where: { projectId },
       select: { id: true, docNumber: true, vendorName: true, type: true, basicAmount: true, finalAmount: true, status: true, milestones: { select: { fieldKey: true, name: true, status: true, inrAmount: true } } },
     }),
+    // The frozen budget — what each line was SAID to cost. Drives the variance.
+    prisma.bOQBudgetLine.findMany({ where: { projectId }, select: { boqItemId: true, budgetAmount: true, budgetRate: true } }),
   ]);
   const annById = new Map(annotations.map((a) => [a.boqItemId, a]));
   const poById = new Map(allPos.map((d) => [d.id, d]));
+  const budgetByItem = new Map(budgetLines.map((b) => [b.boqItemId, b]));
 
   // Accepted qty received per PO (across its APPROVED GRNs) — used to fill the
   // "Received" column for a manually-selected PO.
@@ -326,6 +339,14 @@ export async function buildCostSheet(projectId: string) {
     const deliveryDelayDays = ann?.plannedDeliveryDate && ann?.actualDeliveryDate
       ? dayDiff(ann.actualDeliveryDate, ann.plannedDeliveryDate) : null;
 
+    // Budget vs actual (PRD v1 §5). Only meaningful once the line is BOTH costed
+    // and ordered — otherwise "−100% under budget" would read as a win.
+    const bud = budgetByItem.get(it.id);
+    const budgetAmount = bud?.budgetAmount ?? null;
+    const hasOrder = effectivePoAmount > 0;
+    const budgetVariance = budgetAmount != null && hasOrder ? r2(effectivePoAmount - budgetAmount) : null;
+    const budgetVariancePct = budgetVariance != null && budgetAmount ? r2((budgetVariance / budgetAmount) * 100) : null;
+
     return {
       id: it.id,
       srNo: it.srNo,
@@ -351,6 +372,11 @@ export async function buildCostSheet(projectId: string) {
       totalReceivedQty,
       receiptStatus: receiptStatus(totalOrderedQty, totalReceivedQty, pos.some((p) => p.receiptStatus === 'Awaiting GRN')),
       pos,
+      // Budget vs actual
+      budgetAmount,
+      budgetRate: bud?.budgetRate ?? null,
+      budgetVariance,
+      budgetVariancePct,
       // Finance overlay
       orderedQtyOverride: ann?.orderedQtyOverride ?? null,
       poAmountOverride: ann?.poAmountOverride ?? null,

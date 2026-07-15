@@ -13,6 +13,7 @@ import authRoutes from './routes/auth';
 import userRoutes from './routes/users';
 import projectRoutes from './routes/projects';
 import boqRoutes from './routes/boq';
+import budgetRoutes from './routes/budget';
 import progressRoutes from './routes/progress';
 import drawingRoutes from './routes/drawings';
 import dashboardRoutes from './routes/dashboard';
@@ -68,6 +69,7 @@ app.use('/api/approval-rules', approvalRuleRoutes);
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
 app.use('/api/projects/:projectId/boq', boqRoutes);
+app.use('/api/projects/:projectId/budget', budgetRoutes);
 app.use('/api/projects/:projectId/progress', progressRoutes);
 app.use('/api/projects/:projectId/drawings', drawingRoutes);
 app.use('/api/projects/:projectId/dashboard', dashboardRoutes);
