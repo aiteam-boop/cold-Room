@@ -28,7 +28,28 @@ router.get('/', requirePage('machinemodels'), asyncHandler(async (req, res) => {
   const filtered = q
     ? models.filter((m) => `${m.make} ${m.modelCode} ${m.fullDisplayName} ${m.refrigerantType} ${m.compressorType}`.toLowerCase().includes(q.toLowerCase()))
     : models;
-  res.json({ models: filtered });
+
+  // Last purchased price per model (PRD §6b): the most recent AWARDED quotation
+  // for a BOQ item that uses this model. Derived, so it never drifts.
+  const awarded = await prisma.vendorQuotation.findMany({
+    where: { status: 'AWARDED', boqItem: { machineModelId: { in: filtered.map((m) => m.id) } } },
+    orderBy: { createdAt: 'desc' },
+    select: { price: true, vendorName: true, createdAt: true, boqItem: { select: { machineModelId: true } } },
+  }).catch(() => [] as any[]);
+  const lastPaid = new Map<string, { price: number; vendorName: string; at: Date }>();
+  for (const a of awarded) {
+    const mid = a.boqItem?.machineModelId;
+    if (!mid) continue;
+    const cur = lastPaid.get(mid);
+    if (!cur || a.createdAt > cur.at) lastPaid.set(mid, { price: a.price, vendorName: a.vendorName, at: a.createdAt });
+  }
+
+  res.json({
+    models: filtered.map((m) => {
+      const lp = lastPaid.get(m.id);
+      return { ...m, lastPaidPrice: lp?.price ?? null, lastPaidVendor: lp?.vendorName ?? null, lastPaidAt: lp?.at ?? null };
+    }),
+  });
 }));
 
 const modelSchema = z.object({
@@ -39,6 +60,9 @@ const modelSchema = z.object({
   compressorType: z.string().optional().nullable(),
   applicableRooms: z.array(z.string()).optional(),
   isActive: z.boolean().optional(),
+  // §6b — the model's reference price and its technical datasheet (TDS) link.
+  unitPrice: z.coerce.number().nullable().optional(),
+  tdsUrl: z.string().nullable().optional(),
 });
 
 router.post('/', requireEdit('machinemodels'), asyncHandler(async (req, res) => {
@@ -48,6 +72,7 @@ router.post('/', requireEdit('machinemodels'), asyncHandler(async (req, res) => 
       make: b.make, modelCode: b.modelCode, capacityKW: b.capacityKW ?? null,
       refrigerantType: b.refrigerantType ?? null, compressorType: b.compressorType ?? null,
       applicableRooms: b.applicableRooms ?? [],
+      unitPrice: b.unitPrice ?? null, tdsUrl: b.tdsUrl ?? null,
       fullDisplayName: displayName(b),
     },
   });
@@ -70,6 +95,8 @@ router.patch('/:id', requireEdit('machinemodels'), asyncHandler(async (req, res)
       ...(b.compressorType !== undefined && { compressorType: b.compressorType }),
       ...(b.applicableRooms !== undefined && { applicableRooms: b.applicableRooms }),
       ...(b.isActive !== undefined && { isActive: b.isActive }),
+      ...(b.unitPrice !== undefined && { unitPrice: b.unitPrice }),
+      ...(b.tdsUrl !== undefined && { tdsUrl: b.tdsUrl }),
       fullDisplayName: displayName(merged),
     },
   });

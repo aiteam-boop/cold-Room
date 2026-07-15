@@ -136,13 +136,19 @@ const lineInput = z.object({
 });
 router.patch('/lines/:boqItemId', requireProjectMember, requireSection('canEditBudget'), requireFinancialView, asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
-  await assertNotFrozen(projectId);
-
   const item = await prisma.bOQItem.findFirst({ where: { id: req.params.boqItemId, projectId }, select: { id: true, plannedQty: true } });
   if (!item) throw notFound('BOQ item not found');
   const b = lineInput.parse(req.body);
 
   const existing = await prisma.bOQBudgetLine.findUnique({ where: { boqItemId: item.id } });
+  // A frozen budget is locked — BUT it can still GROW (PRD §7): a BOQ item added
+  // by a Change Order after the freeze has no budget line yet, so costing that new
+  // line is allowed. Editing an EXISTING (originally-frozen) line is never allowed.
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { budgetStatus: true } });
+  if (project?.budgetStatus === 'FROZEN') {
+    if (existing) throw forbidden('The budget is frozen — existing lines cannot be changed. New scope is added through a Change Order.');
+    await audit({ userId: req.user!.sub, projectId, action: 'BUDGET_LINE_ADD_FROZEN', entity: 'BOQItem', entityId: item.id, details: { via: 'change-order scope' } });
+  }
   // Costing usually assumes the BOQ quantity, so default to it rather than making
   // the user retype 150 numbers.
   const qty = b.budgetQty !== undefined ? b.budgetQty : existing?.budgetQty ?? item.plannedQty;

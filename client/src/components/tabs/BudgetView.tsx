@@ -14,6 +14,7 @@ import { api, errMsg } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
 import { inr } from '../../lib/format';
+import QuotationModal from '../procurement/QuotationModal';
 
 interface Row {
   boqItemId: string; srNo?: string | null; description: string;
@@ -36,6 +37,8 @@ export default function BudgetView({ projectId }: { projectId: string }) {
   const canEdit = can('canEditBudget');
   const canFreeze = can('canFreezeBudget');
   const [msg, setMsg] = useState('');
+  // Vendor quotation comparison & award for a BOQ item (PRD §4).
+  const [quoteFor, setQuoteFor] = useState<string | null>(null);
 
   const q = useQuery({
     queryKey: ['budget', projectId],
@@ -158,6 +161,8 @@ export default function BudgetView({ projectId }: { projectId: string }) {
                 <th className="px-2 text-right">Budget Rate</th>
                 <th className="px-2 text-right">Budget Amount</th>
                 <th className="px-2">Basis / Notes</th>
+                {/* Compare vendor quotes & award the vendor for this item (PRD §4). */}
+                <th className="px-2 text-right">Vendors</th>
               </tr>
             </thead>
             <tbody>
@@ -166,10 +171,10 @@ export default function BudgetView({ projectId }: { projectId: string }) {
                   <tr key={`h-${cat}`} className="border-y border-slate-200 bg-slate-50/70">
                     <td className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500" colSpan={7}>{cat}</td>
                     <td className="px-2 py-1.5 text-right text-xs font-bold text-slate-700">{inr(catTotal(rows))}</td>
-                    <td />
+                    <td colSpan={2} />
                   </tr>
                   {rows.map((r) => (
-                    <BudgetRow key={r.boqItemId} r={r} editable={editable} onSave={(v) => saveLine.mutate({ boqItemId: r.boqItemId, ...v })} />
+                    <BudgetRow key={r.boqItemId} r={r} editable={editable} onSave={(v) => saveLine.mutate({ boqItemId: r.boqItemId, ...v })} onQuotes={() => setQuoteFor(r.boqItemId)} />
                   ))}
                 </>
               ))}
@@ -177,6 +182,8 @@ export default function BudgetView({ projectId }: { projectId: string }) {
           </table>
         </div>
       </div>
+
+      {quoteFor && <QuotationModal projectId={projectId} boqItemId={quoteFor} onClose={() => setQuoteFor(null)} />}
     </div>
   );
 }
@@ -192,9 +199,10 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 // One BOQ line. Qty defaults to the BOQ quantity server-side, so in practice the
 // only thing that has to be typed is the RATE — 150 lines stay bearable.
-function BudgetRow({ r, editable, onSave }: {
+function BudgetRow({ r, editable, onSave, onQuotes }: {
   r: Row; editable: boolean;
   onSave: (v: { budgetQty?: number | null; budgetRate?: number | null; notes?: string | null }) => void;
+  onQuotes: () => void;
 }) {
   const [qty, setQty] = useState<string>(r.budgetQty != null ? String(r.budgetQty) : '');
   const [rate, setRate] = useState<string>(r.budgetRate != null ? String(r.budgetRate) : '');
@@ -233,6 +241,10 @@ function BudgetRow({ r, editable, onSave }: {
         {editable
           ? <input className="input h-7 w-full text-xs" placeholder="e.g. Bitzer quote Jun-26" value={notes} onChange={(e) => setNotes(e.target.value)} onBlur={commitNotes} />
           : <span className="text-xs text-slate-400">{r.notes || '—'}</span>}
+      </td>
+      {/* Compare 3 vendor quotes and award the vendor for this line (PRD §4). */}
+      <td className="px-2 text-right">
+        <button className="text-xs font-medium text-navy hover:underline" onClick={onQuotes} title="Vendor quotations & award">Quotes</button>
       </td>
     </tr>
   );

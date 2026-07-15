@@ -4,6 +4,7 @@ import { api, downloadFile, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, KPI, Spinner } from '../ui';
 import { fmtDate, fmtNum, inr } from '../../lib/format';
+import QuotationModal from '../procurement/QuotationModal';
 
 // The BOQ Cost sheet (Sprint PRD §6): the same BOQ rows as the Progress view,
 // with the financial columns layered on. Read-only — the money comes from
@@ -92,6 +93,7 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
   const [finance, setFinance] = useState<Record<string, boolean>>({});
   const [collapsedCat, setCollapsedCat] = useState<Record<string, boolean>>({});
   const [onlyWithPO, setOnlyWithPO] = useState(false);
+  const [quoteFor, setQuoteFor] = useState<string | null>(null);
 
   // Server strips every ₹ for hideFinancials users; this renders a dash rather
   // than a misleading ₹0 and prevents a flash of real values.
@@ -325,8 +327,11 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
                           onChange={(e) => annotate.mutate({ boqItemId: it.id, body: { invoicingDone: e.target.checked } })} />
                       </td>
                       {editable && (
-                        <td className="px-2 text-right">
-                          <button className="text-xs text-navy hover:underline" title="Edit finance overrides"
+                        <td className="whitespace-nowrap px-2 text-right">
+                          {/* Compare vendor quotes & award the vendor (PRD §4). */}
+                          <button className="text-xs font-medium text-navy hover:underline" title="Vendor quotations & award"
+                            onClick={(e) => { e.stopPropagation(); setQuoteFor(it.id); }}>Quotes</button>
+                          <button className="ml-2 text-xs text-navy hover:underline" title="Edit finance overrides"
                             onClick={(e) => { e.stopPropagation(); setFinance((c) => ({ ...c, [it.id]: !c[it.id] })); }}>✎</button>
                         </td>
                       )}
@@ -377,6 +382,9 @@ export default function BOQCostView({ projectId }: { projectId: string }) {
           </table>
         </div>
       </div>
+
+      {/* Vendor quotation comparison & award for one BOQ item (PRD §4/§6a). */}
+      {quoteFor && <QuotationModal projectId={projectId} boqItemId={quoteFor} onClose={() => setQuoteFor(null)} />}
 
       {/* PO lines that were never linked back to a BOQ item (PRD §6.3). */}
       {unlinked.length > 0 && (

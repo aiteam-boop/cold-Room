@@ -29,7 +29,7 @@ const PAY = [
 
 export default function DocBuilder({ projectId, docId, onClose }: { projectId: string; docId: string; role: string; onClose: () => void }) {
   const qc = useQueryClient();
-  const { canEdit, can, user } = useAuth();
+  const { canEdit, can, user, hideFinancials } = useAuth();
   const [d, setD] = useState<any>(null);
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [view, setView] = useState<'document' | 'form'>('document');
@@ -504,7 +504,169 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
       </div>
       </>}
+
+      {/* Budget vs Actual (BOQ & Budget PRD v1 §5) — sits BELOW the PO. Shows what
+          each BOQ item was budgeted at vs what this PO is spending on it, with the
+          variance. Internal only; never printed on the vendor PO. Hidden from
+          hideFinancials users. */}
+      {!hideFinancials && (
+        <BudgetVsActual projectId={projectId} docType={d.type} lineItems={d.lineItems} boqItems={boqItems} />
+      )}
     </div>
+  );
+}
+
+// The budget comparison panel on the PO/WO builder. Two ways to compare (PRD §5):
+//  • AUTO — every BOQ item this doc's line items are linked to, with its frozen
+//    budget pulled in and the doc's spend on that item computed live.
+//  • MANUAL — pick any BOQ item from the dropdown to compare against (its budget,
+//    unit and qty auto-fetch), or type a budget when the item has none.
+function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
+  projectId: string; docType: string; lineItems: any[]; boqItems: any[];
+}) {
+  const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
+  // A PO covers multiple items, so several manual comparison rows can be added.
+  const [manualRows, setManualRows] = useState<{ boqItemId: string; typedBudget: string }[]>([]);
+  const [pick, setPick] = useState('');
+
+  const sumQ = useQuery({
+    queryKey: ['budget-summary', projectId],
+    queryFn: async () => (await api.get(`/projects/${projectId}/budget/summary`)).data as {
+      frozen: boolean;
+      byItem: Record<string, { description: string; unit: string | null; budgetQty: number | null; budgetRate: number | null; budgetAmount: number | null }>;
+    },
+  });
+  const byItem = sumQ.data?.byItem ?? {};
+
+  // The doc's spend on a given BOQ item = its line totals (qty × unit price).
+  const actualForItem = (boqItemId: string) =>
+    lineItems.filter((l) => l.boqItemId === boqItemId && !l.isLeadTime)
+      .reduce((s, l) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+
+  // Auto rows: distinct BOQ items this doc's lines are linked to.
+  const linkedIds = [...new Set(lineItems.filter((l) => l.boqItemId).map((l) => l.boqItemId as string))];
+
+  const row = (boqItemId: string, manualBudget?: number | null) => {
+    const b = byItem[boqItemId];
+    const meta = boqItems.find((x) => x.id === boqItemId);
+    const budget = manualBudget != null ? manualBudget : b?.budgetAmount ?? null;
+    const actual = actualForItem(boqItemId);
+    const variance = budget != null && actual > 0 ? Math.round((actual - budget) * 100) / 100 : null;
+    const variancePct = variance != null && budget ? Math.round((variance / budget) * 1000) / 10 : null;
+    return {
+      boqItemId,
+      description: b?.description ?? meta?.description ?? '—',
+      unit: b?.unit ?? meta?.unit ?? '—',
+      budgetQty: b?.budgetQty ?? meta?.plannedQty ?? null,
+      budget, actual, variance, variancePct,
+      hasBudget: b?.budgetAmount != null,
+    };
+  };
+
+  const autoRows = linkedIds.map((id) => row(id));
+  // Manual rows the user added to compare against (excluding ones already auto-shown).
+  const manualRowsData = manualRows
+    .filter((m) => !linkedIds.includes(m.boqItemId))
+    .map((m) => ({ ...row(m.boqItemId, m.typedBudget !== '' ? Number(m.typedBudget) : undefined), _typed: m.typedBudget }));
+  const addManual = (id: string) => {
+    if (!id || manualRows.some((m) => m.boqItemId === id)) { setPick(''); return; }
+    setManualRows((rows) => [...rows, { boqItemId: id, typedBudget: '' }]);
+    setPick('');
+  };
+  const setTyped = (id: string, v: string) => setManualRows((rows) => rows.map((m) => (m.boqItemId === id ? { ...m, typedBudget: v } : m)));
+  const removeManual = (id: string) => setManualRows((rows) => rows.filter((m) => m.boqItemId !== id));
+
+  return (
+    <div className="card p-4">
+      <div className="mb-1 flex items-center justify-between">
+        <div className="text-sm font-semibold text-slate-600">Budget vs Actual</div>
+        {sumQ.data && (
+          <span className={`badge ${sumQ.data.frozen ? 'bg-navy/10 text-navy' : 'bg-amber-100 text-amber-700'}`}>
+            {sumQ.data.frozen ? '🔒 Budget frozen' : 'Budget draft'}
+          </span>
+        )}
+      </div>
+      <p className="mb-3 text-xs text-slate-400">
+        What each BOQ item was budgeted at vs what this {docType} spends on it. Link a line to a BOQ item (in the Form tab) and its budget appears here automatically — or compare against any item below. Internal only; never printed on the {docType}.
+      </p>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-left text-xs uppercase text-slate-400">
+            <tr>
+              <th className="py-1">BOQ Item</th>
+              <th>Unit</th>
+              <th className="text-right">Budget Qty</th>
+              <th className="text-right">Budget</th>
+              <th className="text-right">This {docType}</th>
+              <th className="text-right">Variance</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {autoRows.length === 0 && manualRowsData.length === 0 && (
+              <tr><td colSpan={7} className="py-2 text-xs italic text-slate-400">No BOQ item linked yet — link line items to BOQ items in the Form tab, or add items to compare below.</td></tr>
+            )}
+            {autoRows.map((r) => <BvaRow key={r.boqItemId} r={r} money={money} />)}
+            {manualRowsData.map((r) => (
+              <BvaRow key={`m-${r.boqItemId}`} r={r} money={money} manual
+                typed={r._typed} onTyped={(v) => setTyped(r.boqItemId, v)} onRemove={() => removeManual(r.boqItemId)} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Add one or more BOQ items to compare — a PO covers several items, so this
+          multi-selects (PRD §5). Budget/unit/qty auto-fetch; type a budget for an
+          item that has none (dropdown AND typing). */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+        <span className="text-xs text-slate-400">Add item to compare:</span>
+        <select className="input h-8 w-72 text-xs" value={pick} onChange={(e) => addManual(e.target.value)}>
+          <option value="">— pick a BOQ item —</option>
+          {boqItems
+            .filter((it) => !linkedIds.includes(it.id) && !manualRows.some((m) => m.boqItemId === it.id))
+            .map((it) => (
+              <option key={it.id} value={it.id}>{it.description?.slice(0, 60)}{byItem[it.id]?.budgetAmount != null ? '  ✓ budgeted' : ''}</option>
+            ))}
+        </select>
+        {manualRows.length > 0 && <button type="button" className="text-xs text-slate-400 hover:text-red-500" onClick={() => setManualRows([])}>clear all</button>}
+      </div>
+    </div>
+  );
+}
+
+function BvaRow({ r, money, manual, typed, onTyped, onRemove }: {
+  r: { boqItemId: string; description: string; unit: string; budgetQty: number | null; budget: number | null; actual: number; variance: number | null; variancePct: number | null; hasBudget: boolean };
+  money: (n: number | null | undefined) => string; manual?: boolean;
+  typed?: string; onTyped?: (v: string) => void; onRemove?: () => void;
+}) {
+  const under = r.variance != null && r.variance <= 0;
+  return (
+    <tr className="border-t border-slate-100">
+      <td className="py-1.5 text-xs text-slate-700">
+        {r.description.slice(0, 55)}
+        {manual && <span className="badge ml-1 bg-slate-100 text-slate-500">compare</span>}
+      </td>
+      <td className="text-xs text-slate-500">{r.unit}</td>
+      <td className="text-right text-xs text-slate-500">{r.budgetQty ?? '—'}</td>
+      <td className="text-right text-xs font-medium text-slate-700">
+        {/* An item with no frozen budget can be compared against a typed figure. */}
+        {!r.hasBudget && manual && onTyped
+          ? <input className="input h-6 w-24 text-right text-xs" type="number" placeholder="budget ₹" value={typed ?? ''} onChange={(e) => onTyped(e.target.value)} />
+          : money(r.budget)}
+      </td>
+      <td className="text-right text-xs font-medium text-navy">{r.actual > 0 ? money(r.actual) : '—'}</td>
+      <td className="text-right text-xs">
+        {r.variance == null
+          ? <span className="text-slate-300">—</span>
+          : <span className={`font-medium ${under ? 'text-green-700' : 'text-red-600'}`} title={under ? 'Under budget' : 'Over budget'}>
+              {under ? '−' : '+'}{money(Math.abs(r.variance))}{r.variancePct != null && <span className="ml-1 text-[10px] font-normal">({r.variancePct > 0 ? '+' : ''}{r.variancePct}%)</span>}
+            </span>}
+      </td>
+      <td className="text-right">
+        {onRemove && <button type="button" className="text-xs text-slate-300 hover:text-red-500" title="Remove" onClick={onRemove}>✕</button>}
+      </td>
+    </tr>
   );
 }
 

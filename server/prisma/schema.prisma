@@ -99,6 +99,7 @@ model Project {
   members   ProjectMember[]
   boqItems  BOQItem[]
   budgetLines BOQBudgetLine[]
+  quotations  VendorQuotation[]
   boqAnalysis BOQAnalysisItem[]
   drawings  Drawing[]
   zones     ProjectZone[]
@@ -169,6 +170,7 @@ model Vendor {
   kycDocs       ProcurementDocument[]
   itemLists     BOQItemList[]
   payments      VendorPayment[]
+  quotations    VendorQuotation[]
 }
 
 model VendorSiteMapping {
@@ -606,6 +608,16 @@ model BOQItem {
   scopeItems      RoomScopeItem[]
   // The frozen internal costing for this line — what we said it would cost.
   budgetLine      BOQBudgetLine?
+  // Vendor quotations collected for this line, and the awarded one (PRD §4).
+  quotations      VendorQuotation[]
+
+  // ── Award (BOQ & Budget PRD v1 §4) ──
+  // The quotation chosen for this item, and WHY. The reason is mandatory when the
+  // pick is not the lowest (L1) — see routes/quotations.ts.
+  awardedQuotationId String?
+  awardReason        String?
+  awardedById        String?
+  awardedAt          DateTime?
 
   @@index([projectId])
   @@index([parentId])
@@ -853,6 +865,12 @@ model MachineModel {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  // ── Price & datasheet (BOQ & Budget PRD v1 §6b) ──
+  // The reference (list) price for this model, and its technical datasheet (TDS),
+  // so picking the model surfaces "what this costs / what we paid last time".
+  unitPrice       Float?
+  tdsUrl          String?   // Technical Data Sheet / spec PDF
+
   boqItems        BOQItem[]
 }
 
@@ -883,6 +901,44 @@ model BOQBudgetLine {
   updatedAt    DateTime @updatedAt
 
   @@index([projectId])
+}
+
+// ── Vendor quotation (BOQ & Budget PRD v1 §4) ─────────────────────────────────
+// A price a vendor quoted for one BOQ item. Three (or more) are compared side by
+// side; the cheapest is marked L1 but is NOT automatically the winner — delivery,
+// quality and payment terms matter, so the award records the chosen vendor AND a
+// reason (mandatory when the pick is not L1).
+//
+// Revisions: a re-quote after negotiation supersedes the previous one. The old
+// row is kept (status SUPERSEDED, linked by parentId) so the history is never lost.
+model VendorQuotation {
+  id            String   @id @default(cuid()) @map("_id")
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  boqItemId     String
+  boqItem       BOQItem  @relation(fields: [boqItemId], references: [id], onDelete: Cascade)
+  vendorId      String?
+  vendor        Vendor?  @relation(fields: [vendorId], references: [id])
+  vendorName    String
+
+  price         Float                       // the quoted price for this item
+  deliveryDate  DateTime?
+  leadTimeText  String?                     // free text when there is no firm date
+  paymentTerms  String?
+  qualityRemarks String?
+  quotationPdfUrl String?                   // the supporting quotation document
+
+  // Revision chain — a re-quote points back to the one it replaces.
+  revision      Int      @default(1)
+  parentId      String?
+  status        String   @default("ACTIVE") // ACTIVE | SUPERSEDED | AWARDED
+
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([boqItemId])
 }
 
 model BOQItemList {

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Modal, Spinner } from '../components/ui';
+import { inr, fmtDate } from '../lib/format';
 
 const ROOMS = ['Blast Freezer', 'Freezer', 'Chiller', 'Ambient', 'Cold Anteroom', 'Anteroom'];
 const REFRIGERANTS = ['R404A', 'R134a', 'R407C', 'R448A', 'R32', 'R290'];
@@ -45,7 +46,7 @@ export default function MachineModelsPage() {
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-              <tr><th className="px-4 py-2">Make</th><th>Model Code</th><th>Capacity</th><th>Refrigerant</th><th>Compressor</th><th>Rooms</th><th>Status</th>{canManage && <th></th>}</tr>
+              <tr><th className="px-4 py-2">Make</th><th>Model Code</th><th>Capacity</th><th>Refrigerant</th><th className="text-right">Ref. Price</th><th className="text-right">Last Paid</th><th>TDS</th><th>Status</th>{canManage && <th></th>}</tr>
             </thead>
             <tbody>
               {models.map((m) => (
@@ -54,8 +55,14 @@ export default function MachineModelsPage() {
                   <td className="text-slate-700">{m.modelCode}</td>
                   <td className="text-slate-500">{m.capacityKW ? `${m.capacityKW} kW` : '—'}</td>
                   <td className="text-slate-500">{m.refrigerantType || '—'}</td>
-                  <td className="text-slate-500">{m.compressorType || '—'}</td>
-                  <td className="text-xs text-slate-500">{m.applicableRooms?.join(', ') || '—'}</td>
+                  {/* §6b — the reference price and what we actually paid last time. */}
+                  <td className="text-right text-slate-600">{m.unitPrice != null ? inr(m.unitPrice) : '—'}</td>
+                  <td className="text-right text-xs">
+                    {m.lastPaidPrice != null
+                      ? <span className="font-medium text-navy" title={`${m.lastPaidVendor ?? ''}${m.lastPaidAt ? ` · ${fmtDate(m.lastPaidAt)}` : ''}`}>{inr(m.lastPaidPrice)}</span>
+                      : <span className="text-slate-300">—</span>}
+                  </td>
+                  <td>{m.tdsUrl ? <a className="text-xs font-medium text-navy hover:underline" href={m.tdsUrl} target="_blank" rel="noreferrer">📄 TDS</a> : <span className="text-slate-300">—</span>}</td>
                   <td>{m.isActive ? <span className="badge bg-green-100 text-green-700">Active</span> : <span className="badge bg-slate-100 text-slate-500">Inactive</span>}</td>
                   {canManage && <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => { setEditing(m); setShow(true); }}>Edit</button></td>}
                 </tr>
@@ -75,11 +82,12 @@ function ModelModal({ model, onClose, onDone }: { model?: any; onClose: () => vo
     make: model?.make ?? '', modelCode: model?.modelCode ?? '', capacityKW: model?.capacityKW ?? '',
     refrigerantType: model?.refrigerantType ?? '', compressorType: model?.compressorType ?? '',
     applicableRooms: model?.applicableRooms ?? [], isActive: model?.isActive ?? true,
+    unitPrice: model?.unitPrice ?? '', tdsUrl: model?.tdsUrl ?? '',
   });
   const [err, setErr] = useState('');
   const m = useMutation({
     mutationFn: () => {
-      const payload = { ...f, capacityKW: f.capacityKW === '' ? null : Number(f.capacityKW) };
+      const payload = { ...f, capacityKW: f.capacityKW === '' ? null : Number(f.capacityKW), unitPrice: f.unitPrice === '' ? null : Number(f.unitPrice), tdsUrl: f.tdsUrl?.trim() || null };
       return isEdit ? api.patch(`/machine-models/${model.id}`, payload) : api.post('/machine-models', payload);
     },
     onSuccess: onDone, onError: (e) => setErr(errMsg(e)),
@@ -95,6 +103,9 @@ function ModelModal({ model, onClose, onDone }: { model?: any; onClose: () => vo
         <div><label className="label">Refrigerant</label><select className="input" value={f.refrigerantType} onChange={(e) => setF({ ...f, refrigerantType: e.target.value })}><option value="">—</option>{REFRIGERANTS.map((r) => <option key={r}>{r}</option>)}</select></div>
         <div><label className="label">Compressor</label><select className="input" value={f.compressorType} onChange={(e) => setF({ ...f, compressorType: e.target.value })}><option value="">—</option>{COMPRESSORS.map((r) => <option key={r}>{r}</option>)}</select></div>
         {isEdit && <div><label className="label">Status</label><select className="input" value={f.isActive ? '1' : '0'} onChange={(e) => setF({ ...f, isActive: e.target.value === '1' })}><option value="1">Active</option><option value="0">Inactive</option></select></div>}
+        {/* §6b — reference price + technical datasheet (TDS). */}
+        <div><label className="label">Reference Price (₹)</label><input className="input" type="number" step="any" value={f.unitPrice} onChange={(e) => setF({ ...f, unitPrice: e.target.value })} placeholder="list / standard price" /></div>
+        <div><label className="label">TDS / Datasheet URL</label><input className="input" value={f.tdsUrl} onChange={(e) => setF({ ...f, tdsUrl: e.target.value })} placeholder="link to the spec PDF" /></div>
         <div className="sm:col-span-2">
           <label className="label">Applicable Rooms</label>
           <div className="flex flex-wrap gap-2">{ROOMS.map((r) => <button type="button" key={r} onClick={() => toggleRoom(r)} className={`rounded-full px-3 py-1 text-xs ${f.applicableRooms.includes(r) ? 'bg-navy text-white' : 'bg-slate-100 text-slate-600'}`}>{r}</button>)}</div>
