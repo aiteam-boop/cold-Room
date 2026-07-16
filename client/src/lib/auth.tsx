@@ -7,6 +7,10 @@ import {
 
 // ADMIN = full access; any other value (USER, CEO, SITE_ENGINEER, …) is grant-based.
 export type Role = 'ADMIN' | 'USER' | 'CEO' | 'SITE_ENGINEER';
+
+// The single identity allowed to manage API keys. Keep in sync with the server's
+// API_SUPERADMIN_EMAIL (middleware/authMiddleware).
+export const SUPERADMIN_EMAIL = 'admin@crmcts.dev';
 export interface User {
   id: string;
   name: string;
@@ -27,6 +31,8 @@ interface AuthCtx {
   logout: () => void;
   // Permission helpers (ADMIN always passes; never hides financials).
   isAdmin: boolean;
+  // Key management is restricted to ONE named super-admin email.
+  isSuperAdmin: boolean;
   // True only for the room-wise DPR owner account(s), not every admin.
   isDprOwner: boolean;
   canView: (page: PageKey) => boolean;
@@ -77,6 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     register,
     logout,
     isAdmin: user?.role === 'ADMIN',
+    isSuperAdmin: user?.email?.toLowerCase() === SUPERADMIN_EMAIL,
     isDprOwner: !!user?.dprOwner,
     canView: (page) => canViewPage(user, page),
     canEdit: (page) => canEditPage(user, page),

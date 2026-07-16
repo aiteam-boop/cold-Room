@@ -18,11 +18,27 @@ const router = Router();
 // URL so the approver reviews the whole thing before deciding. Approve/Reject
 // POST back with an optional remark — the decision is never taken on page load,
 // so an email-scanner prefetch can't approve anything.
-function actPage(opts: { token: string; message?: string; done?: boolean; title?: string; subtitle?: string; pdfUrl?: string | null; intent?: string; amendments?: { remark: string; byName: string; at: string }[] }): string {
-  const { token, message, done, title, subtitle, pdfUrl, intent, amendments } = opts;
+function actPage(opts: { token: string; message?: string; done?: boolean; title?: string; subtitle?: string; pdfUrl?: string | null; intent?: string; amendments?: { remark: string; byName: string; at: string }[]; budget?: { description: string; budget: number | null; actual: number | null; variance: number | null; variancePct: number | null; wholePo?: boolean }[] }): string {
+  const { token, message, done, title, subtitle, pdfUrl, intent, amendments, budget } = opts;
   // A document amended after approval comes back for RE-approval: show that, and
   // the reason the raiser gave, before the approver looks at the PDF.
   const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+  const rs = (n: number | null | undefined) => (n == null ? '—' : 'Rs. ' + n.toLocaleString('en-IN'));
+  // Budget vs Actual for the approver (PRD §5) — same data as the builder's panel.
+  const budgetTable = budget?.length
+    ? `<div style="margin:12px 0;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px">
+        <div style="font-size:14px;font-weight:700;color:#0f2942;margin-bottom:6px">Budget vs Actual</div>
+        <table style="width:100%;border-collapse:collapse">
+          <tr style="background:#f1f5f9;color:#475569;font-size:11px;text-transform:uppercase"><td style="padding:6px 8px">BOQ Item</td><td style="padding:6px 8px;text-align:right">Budget</td><td style="padding:6px 8px;text-align:right">This Doc</td><td style="padding:6px 8px;text-align:right">Variance</td></tr>
+          ${budget.map((r) => { const under = r.variance != null && r.variance <= 0; return `<tr>
+            <td style="padding:6px 8px;border-top:1px solid #e2e8f0;font-size:13px">${esc(r.description.slice(0, 46))}</td>
+            <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:13px">${rs(r.budget)}</td>
+            <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:13px">${rs(r.actual)}${r.wholePo ? '<div style="font-size:9px;color:#94a3b8">whole PO</div>' : ''}</td>
+            <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:13px;color:${r.variance == null ? '#94a3b8' : under ? '#16a34a' : '#dc2626'};font-weight:600">${r.variance == null ? '—' : `${under ? '−' : '+'}${rs(Math.abs(r.variance)).replace('Rs. ', '₹')}${r.variancePct != null ? ` (${r.variancePct > 0 ? '+' : ''}${r.variancePct}%)` : ''}`}</td></tr>`; }).join('')}
+        </table>
+        <div style="font-size:10px;color:#94a3b8;margin-top:4px">Internal only — not on the vendor document. Green = under budget, red = over.</div>
+      </div>`
+    : '';
   const amendBanner = amendments?.length
     ? (() => {
         const latest = amendments[amendments.length - 1];
@@ -84,6 +100,7 @@ function actPage(opts: { token: string; message?: string; done?: boolean; title?
       <div style="font-weight:700;color:#0f172a;font-size:18px">CRMCTS &middot; ${title ? title : 'Approval'}</div>
       ${subtitle ? `<div style="color:#64748b;font-size:13px;margin-top:2px">${subtitle}</div>` : ''}
       ${done ? '' : amendBanner}
+      ${done ? '' : budgetTable}
       <p id="msg" style="color:#334155;font-size:14px;margin:12px 0">${message ?? ''}</p>
       <div id="actions">${form}</div>
     </div>
@@ -109,6 +126,7 @@ router.get('/act', asyncHandler(async (req, res) => {
       ? 'This document was amended after approval and resubmitted. Review the change and the reason below, then Approve — or put it On Hold with a note on what to correct.'
       : 'Review the document below, then Approve — or put it On Hold with a note on what to correct.',
     amendments: data?.amendments,
+    budget: data?.budget,
   }));
 }));
 

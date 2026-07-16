@@ -9,12 +9,12 @@ import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
 interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; }
 
-export default function DocList({ projectId, role, type }: { projectId: string; role: string; type: 'PO' | 'WO' }) {
+export default function DocList({ projectId, role, type, focusId }: { projectId: string; role: string; type: 'PO' | 'WO'; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit, hideFinancials } = useAuth();
   const isAdmin = canEdit(type === 'PO' ? 'po' : 'wo');
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(focusId ?? null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['proc-docs', projectId, type],

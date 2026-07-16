@@ -4,7 +4,7 @@ import NotificationBell from './NotificationBell';
 import ErrorBoundary from './ErrorBoundary';
 
 export default function AppShell() {
-  const { user, logout, isAdmin, canView } = useAuth();
+  const { user, logout, isAdmin, isSuperAdmin, canView } = useAuth();
   const { pathname } = useLocation();
   const navCls = ({ isActive }: { isActive: boolean }) => `rounded-lg px-2.5 py-1.5 ${isActive ? 'bg-white/15 text-white' : 'text-slate-200 hover:bg-white/10'}`;
 
@@ -34,6 +34,7 @@ export default function AppShell() {
               <NavLink to="/approvals" className={navCls}>Approvals</NavLink>
               {canView('machinemodels') && <NavLink to="/settings/machine-models" className={navCls}>Machine Models</NavLink>}
               {isAdmin && <NavLink to="/settings/users" className={navCls}>Users</NavLink>}
+              {isSuperAdmin && <NavLink to="/settings/api-keys" className={navCls}>API Keys</NavLink>}
             </nav>
           </div>
           <div className="flex items-center gap-3 text-sm">

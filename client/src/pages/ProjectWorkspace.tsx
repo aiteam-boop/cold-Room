@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -79,11 +79,28 @@ const MENU: { group: string; items: Item[] }[] = [
 
 export default function ProjectWorkspace() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { canView, isDprOwner, hideFinancials } = useAuth();
+  const { canView, isDprOwner, hideFinancials, can } = useAuth();
   // The room-wise DPR is the owner's personal cockpit — shown only to the DPR
   // owner account(s), NOT every admin and never via the 'dpr' grant.
   const showDpr = isDprOwner;
-  const [active, setActive] = useState<Nav | null>(null);
+
+  // Deep link support: a `?open=<entity>:<id>` param (set by the /go resolver)
+  // lands the user straight on the item's tab with that item opened/highlighted.
+  const [searchParams] = useSearchParams();
+  const deep = useMemo(() => {
+    const raw = searchParams.get('open');
+    if (!raw) return null;
+    const idx = raw.indexOf(':');
+    if (idx < 0) return null;
+    const entity = raw.slice(0, idx);
+    const id = raw.slice(idx + 1);
+    const KEY: Record<string, PageKey> = { po: 'po', wo: 'wo', grn: 'grn', payment: 'fms', task: 'gantt', boq: 'boq' };
+    const key = KEY[entity];
+    if (!key || !id) return null;
+    return { key, id };
+  }, [searchParams]);
+
+  const [active, setActive] = useState<Nav | null>(deep ? { key: deep.key } : null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project', projectId],
@@ -122,15 +139,22 @@ export default function ProjectWorkspace() {
 
   const fullMenu = [...MENU, ...(dprItems.length ? [{ group: 'DPR (Room-wise)', items: dprItems }] : [])];
 
+  // A budget capability (enter or freeze) IS the grant for the BOQ & Budget page —
+  // you can't cost a budget you can't see — so it shows even without the boq page
+  // grant or despite hideFinancials. Otherwise it needs boq view + visible pricing.
+  const canBudget = can('canEditBudget') || can('canFreezeBudget');
+  const canSeeBudget = canBudget || (canView('boq') && !hideFinancials);
+
   // Only the pages this user is granted (admins see all). Empty groups drop out.
-  // The budget is pricing: anyone with hideFinancials never sees the entry at all
-  // (the API refuses them too — this just stops a dead menu item).
   const menu = fullMenu
-    .map((g) => ({ group: g.group, items: g.items.filter((it) => canView(it.key) && !(it.view === 'budget' && hideFinancials)) }))
+    .map((g) => ({ group: g.group, items: g.items.filter((it) => (it.view === 'budget' ? canSeeBudget : canView(it.key))) }))
     .filter((g) => g.items.length > 0);
   const allNavs: Nav[] = menu.flatMap((g) => g.items.map((it) => ({ key: it.key, view: it.view })));
   const visibleIds = new Set(allNavs.map(navId));
   const current: Nav | null = active && visibleIds.has(navId(active)) ? active : allNavs[0] ?? null;
+
+  // Only feed a deep-link focus to the tab that is actually showing it.
+  const focusFor = (k: PageKey) => (deep && deep.key === k && current?.key === k ? deep.id : undefined);
 
   const openRoom = (zoneId: string) => setActive({ key: 'dpr', view: `room:${zoneId}` });
 
@@ -232,13 +256,13 @@ export default function ProjectWorkspace() {
         {current.key === 'boq' && current.view !== 'budget' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}
         {current.key === 'boq' && current.view === 'budget' && <BudgetView projectId={projectId!} />}
         {current.key === 'drawing' && <DrawingTab projectId={projectId!} role={role} />}
-        {current.key === 'gantt' && <GanttTab projectId={projectId!} />}
+        {current.key === 'gantt' && <GanttTab projectId={projectId!} focusId={focusFor('gantt')} />}
         {current.key === 'changeorders' && <ChangeOrdersTab projectId={projectId!} />}
         {current.key === 'pay' && <PaymentDashboard projectId={projectId!} role={role} />}
-        {current.key === 'fms' && <FMSView projectId={projectId!} />}
-        {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" />}
-        {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" />}
-        {current.key === 'grn' && <GRNView projectId={projectId!} role={role} />}
+        {current.key === 'fms' && <FMSView projectId={projectId!} focusId={focusFor('fms')} />}
+        {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" focusId={focusFor('po')} />}
+        {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" focusId={focusFor('wo')} />}
+        {current.key === 'grn' && <GRNView projectId={projectId!} role={role} focusId={focusFor('grn')} />}
         {current.key === 'vendors' && <VendorsView projectId={projectId!} role={role} />}
         {current.key === 'documents' && <DocumentsView projectId={projectId!} role={role} />}
         {current.key === 'reports' && <ReportsTab projectId={projectId!} />}

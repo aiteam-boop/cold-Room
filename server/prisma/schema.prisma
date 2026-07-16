@@ -239,6 +239,12 @@ model ProcurementDoc {
   // with a strikethrough) — they are never deleted. See services/procurement.ts.
   termsSections String?
 
+  // BOQ items this PO is compared against on its "Budget vs Actual" panel
+  // (BOQ & Budget PRD §5). Persisted so the comparison survives navigating away.
+  // JSON array of BOQ item ids. Line-linked items appear automatically; these are
+  // the extra ones the user picked to compare.
+  budgetCompareItemIds String?
+
   createdById   String?
   approvedById  String?
   approvedAt    DateTime?
@@ -576,6 +582,11 @@ model BOQItem {
   remarks     String?        // "Remarks" column from the BOQ sheet (specs/notes)
   plannedQty  Float          @default(0)
 
+  // The machine model number chosen for this line (Machine-Model/TDS PRD §5).
+  // NOT part of the BOQ — it is decided later and is vendor-specific, so it is a
+  // typed field, editable even after the BOQ is locked.
+  modelNumber String?
+
   // ── BOQ Enhancements (Gantt/Room PRD) — all additive, optional ──
   itemCategory     String?    // EQUIPMENT | MATERIAL | SERVICE (drives Make&Model UI)
   machineModelId   String?
@@ -869,7 +880,26 @@ model MachineModel {
   // The reference (list) price for this model, and its technical datasheet (TDS),
   // so picking the model surfaces "what this costs / what we paid last time".
   unitPrice       Float?
-  tdsUrl          String?   // Technical Data Sheet / spec PDF
+  tdsUrl          String?   // Technical Data Sheet / spec PDF (uploaded file OR a link)
+
+  // ── TDS auto-extraction (Machine-Model/TDS PRD §1–§4) ──
+  // Filled from the uploaded TDS. IDU and ODU sheets use different labels for the
+  // same thing (Evaporator Temp vs Evaporating SST), normalised on the way in.
+  // `specs` is the full extracted key/value map so nothing is lost as new datasheet
+  // formats appear; the columns below are the fields used for machine selection.
+  tdsFormat       String?   // IDU | ODU | OTHER — detected from the sheet
+  evaporatorTempC Float?
+  condenserTempC  Float?
+  ambientTempC    Float?
+  airflow         String?   // "21465 m3/h" / "24327 CMH" (unit kept as printed)
+  finSpacing      String?   // "7 MM"
+  fanDetail       String?   // "500 mm X 3" / "Axial Fans Ø500 X 4"
+  powerInputKw    Float?
+  weightKg        Float?
+  dimensions      String?   // "L x W x H"
+  voltage         String?   // "415V/3PH"
+  compressorModel String?   // "HGX56e/995-4L (Bock)" — distinct from compressorType
+  specs           Json?     // every field read off the TDS, incl. ones not columnised
 
   boqItems        BOQItem[]
 }
@@ -923,9 +953,12 @@ model VendorQuotation {
 
   price         Float                       // the quoted price for this item
   deliveryDate  DateTime?
+  deliveryWeeks Int?                        // delivery lead time in WEEKS (§6.2 — primary)
   leadTimeText  String?                     // free text when there is no firm date
-  paymentTerms  String?
+  paymentTerms  String?                     // dropdown preset OR typed (§6.1)
   qualityRemarks String?
+  modelNumber   String?                     // the vendor's own model number for this item (§6)
+  tdsUrl        String?                     // the vendor's TDS for their quote (§6.3)
   quotationPdfUrl String?                   // the supporting quotation document
 
   // Revision chain — a re-quote points back to the one it replaces.
@@ -1166,4 +1199,74 @@ model AuditLog {
   @@index([projectId])
   // The per-user activity view reads this trail by user, newest first.
   @@index([userId])
+}
+
+// ── API key (Integration Kit) ─────────────────────────────────────────────────
+// An admin-issued key that lets an external system read CRMCTS data through the
+// public /api/v1 endpoints. The raw key is shown ONCE at creation and never
+// stored — only its SHA-256 hash is kept, so a leaked DB reveals no usable keys.
+// `prefix` is the first few visible characters, so a key can be identified and
+// revoked without ever seeing the secret again.
+model ApiKey {
+  id          String    @id @default(cuid()) @map("_id")
+  name        String
+  keyHash     String    @unique
+  prefix      String
+  mode        String    @default("live")          // live | test
+  // Which data domains the key may reach (see lib/apiScopes REALMS).
+  realms      String[]  @default([])
+  // Which sensitive fields come back (see lib/apiScopes SCOPES). read:core is always on.
+  scopes      String[]  @default(["read:core"])
+  rateLimitPerMin Int   @default(600)
+  ipAllowlist String[]  @default([])               // empty = any IP
+  expiresAt   DateTime?                             // null = never expires
+  active        Boolean   @default(true)
+  revokedAt     DateTime?
+  revokedByName String?                            // who revoked it (provenance)
+  rotatedAt     DateTime?                          // last time the secret was rotated
+  callCount     Int       @default(0)              // lifetime successful calls
+  createdById   String?
+  createdByName String?                            // who minted it (provenance)
+  createdAt     DateTime  @default(now())
+  lastUsedAt    DateTime?
+}
+
+// Idempotency store for key-authenticated writes: a repeated Idempotency-Key
+// from the same key returns the first result instead of acting twice.
+model ApiIdempotencyRecord {
+  id       String   @id @default(cuid()) @map("_id")
+  keyId    String
+  idemKey  String
+  status   Int
+  response Json
+  at       DateTime @default(now())
+
+  @@unique([keyId, idemKey])
+  @@index([keyId])
+}
+
+// Per-day call tally for a key — cheap lifetime aggregate. One row per key/day.
+model ApiKeyUsage {
+  id     String @id @default(cuid()) @map("_id")
+  keyId  String
+  day    String                                     // YYYY-MM-DD (UTC)
+  count  Int    @default(0)
+
+  @@unique([keyId, day])
+  @@index([keyId])
+}
+
+// Per-request audit log — powers the "Usage" detail (route, status, latency, IP).
+// Trimmed to a rolling window so it stays bounded.
+model ApiKeyCall {
+  id     String   @id @default(cuid()) @map("_id")
+  keyId  String
+  method String
+  route  String
+  status Int
+  ms     Int
+  ip     String
+  at     DateTime @default(now())
+
+  @@index([keyId, at])
 }

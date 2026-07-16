@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { asyncHandler, notFound } from '../lib/errors';
+import { asyncHandler, badRequest, notFound } from '../lib/errors';
 import { requireAuth, requirePage, requireEdit } from '../middleware/authMiddleware';
+import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
+import { extractTds } from '../services/tdsExtract';
 
 const router = Router();
 router.use(requireAuth);
@@ -63,7 +65,75 @@ const modelSchema = z.object({
   // §6b — the model's reference price and its technical datasheet (TDS) link.
   unitPrice: z.coerce.number().nullable().optional(),
   tdsUrl: z.string().nullable().optional(),
+  // TDS-extracted specs (Machine-Model/TDS PRD §1–§4). All optional — filled from
+  // the datasheet or typed. `specs` is the full extracted key/value catch-all.
+  tdsFormat: z.string().nullable().optional(),
+  evaporatorTempC: z.coerce.number().nullable().optional(),
+  condenserTempC: z.coerce.number().nullable().optional(),
+  ambientTempC: z.coerce.number().nullable().optional(),
+  airflow: z.string().nullable().optional(),
+  finSpacing: z.string().nullable().optional(),
+  fanDetail: z.string().nullable().optional(),
+  powerInputKw: z.coerce.number().nullable().optional(),
+  weightKg: z.coerce.number().nullable().optional(),
+  dimensions: z.string().nullable().optional(),
+  voltage: z.string().nullable().optional(),
+  compressorModel: z.string().nullable().optional(),
+  specs: z.any().optional(),
 });
+
+// The optional spec columns, so create/update can spread them without listing
+// each one twice.
+const SPEC_KEYS = ['tdsFormat', 'evaporatorTempC', 'condenserTempC', 'ambientTempC', 'airflow', 'finSpacing', 'fanDetail', 'powerInputKw', 'weightKg', 'dimensions', 'voltage', 'compressorModel', 'unitPrice', 'tdsUrl'] as const;
+const specData = (b: Record<string, unknown>) => {
+  const out: Record<string, unknown> = {};
+  for (const k of SPEC_KEYS) if (b[k] !== undefined) out[k] = b[k];
+  if (b.specs !== undefined) out.specs = b.specs ?? undefined;
+  return out;
+};
+
+// POST /machine-models/extract-tds — upload a TDS and get the suggested fields
+// back (suggest-only, like KYC). The form fills itself; the user confirms + saves.
+// Handles the IDU and ODU formats (and any other via the vision fallback).
+router.post('/extract-tds', requireEdit('machinemodels'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded (field: file)');
+  const extracted = await extractTds(req.file.path, req.file.mimetype);
+  // Keep the uploaded file's URL so the form can save it as the model's TDS.
+  res.json({ extracted, tdsUrl: `/uploads/${req.file.filename}` });
+}));
+
+// POST /machine-models/:id/tds — attach a TDS to an existing model and re-extract,
+// merging any newly-found fields the record is still missing.
+router.post('/:id/tds', requireEdit('machinemodels'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded (field: file)');
+  const model = await prisma.machineModel.findUnique({ where: { id: req.params.id } });
+  if (!model) throw notFound('Machine model not found');
+  const extracted = await extractTds(req.file.path, req.file.mimetype);
+  const updated = await prisma.machineModel.update({
+    where: { id: model.id },
+    data: {
+      tdsUrl: `/uploads/${req.file.filename}`,
+      // Only fill blanks — never overwrite a value the user already set/confirmed.
+      ...(model.tdsFormat == null && extracted.tdsFormat && { tdsFormat: extracted.tdsFormat }),
+      ...(model.capacityKW == null && extracted.capacityKW != null && { capacityKW: extracted.capacityKW }),
+      ...(model.refrigerantType == null && extracted.refrigerantType && { refrigerantType: extracted.refrigerantType }),
+      ...(model.evaporatorTempC == null && extracted.evaporatorTempC != null && { evaporatorTempC: extracted.evaporatorTempC }),
+      ...(model.condenserTempC == null && extracted.condenserTempC != null && { condenserTempC: extracted.condenserTempC }),
+      ...(model.ambientTempC == null && extracted.ambientTempC != null && { ambientTempC: extracted.ambientTempC }),
+      ...(model.airflow == null && extracted.airflow && { airflow: extracted.airflow }),
+      ...(model.finSpacing == null && extracted.finSpacing && { finSpacing: extracted.finSpacing }),
+      ...(model.fanDetail == null && extracted.fanDetail && { fanDetail: extracted.fanDetail }),
+      ...(model.powerInputKw == null && extracted.powerInputKw != null && { powerInputKw: extracted.powerInputKw }),
+      ...(model.weightKg == null && extracted.weightKg != null && { weightKg: extracted.weightKg }),
+      ...(model.dimensions == null && extracted.dimensions && { dimensions: extracted.dimensions }),
+      ...(model.voltage == null && extracted.voltage && { voltage: extracted.voltage }),
+      ...(model.compressorModel == null && extracted.compressorModel && { compressorModel: extracted.compressorModel }),
+      specs: extracted.specs && Object.keys(extracted.specs).length ? extracted.specs : model.specs ?? undefined,
+    },
+  });
+  await audit({ userId: req.user!.sub, action: 'MACHINE_MODEL_TDS', entity: 'MachineModel', entityId: model.id, details: { format: extracted.tdsFormat, source: extracted.source } });
+  res.json({ ok: true, model: updated, extracted });
+}));
 
 router.post('/', requireEdit('machinemodels'), asyncHandler(async (req, res) => {
   const b = modelSchema.parse(req.body);
@@ -72,7 +142,7 @@ router.post('/', requireEdit('machinemodels'), asyncHandler(async (req, res) => 
       make: b.make, modelCode: b.modelCode, capacityKW: b.capacityKW ?? null,
       refrigerantType: b.refrigerantType ?? null, compressorType: b.compressorType ?? null,
       applicableRooms: b.applicableRooms ?? [],
-      unitPrice: b.unitPrice ?? null, tdsUrl: b.tdsUrl ?? null,
+      ...specData(b),
       fullDisplayName: displayName(b),
     },
   });
@@ -95,8 +165,7 @@ router.patch('/:id', requireEdit('machinemodels'), asyncHandler(async (req, res)
       ...(b.compressorType !== undefined && { compressorType: b.compressorType }),
       ...(b.applicableRooms !== undefined && { applicableRooms: b.applicableRooms }),
       ...(b.isActive !== undefined && { isActive: b.isActive }),
-      ...(b.unitPrice !== undefined && { unitPrice: b.unitPrice }),
-      ...(b.tdsUrl !== undefined && { tdsUrl: b.tdsUrl }),
+      ...specData(b),
       fullDisplayName: displayName(merged),
     },
   });

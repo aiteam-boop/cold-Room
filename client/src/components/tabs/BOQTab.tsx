@@ -36,6 +36,29 @@ interface BOQItem {
   id: string; srNo?: string; description: string; category?: string; roomZone?: string;
   unit?: string; makeModel?: string; remarks?: string; plannedQty: number; isGroup: boolean;
   installedQty: number; remainingQty: number; completionPct: number; colorStatus: string;
+  modelNumber?: string | null;
+}
+
+// Inline editable "Model No." — decided after the BOQ, so it saves via a dedicated
+// endpoint that works even when the BOQ is locked (PRD §5).
+function ModelNumberCell({ projectId, item, canWrite }: { projectId: string; item: BOQItem; canWrite: boolean }) {
+  const qc = useQueryClient();
+  const [val, setVal] = useState(item.modelNumber ?? '');
+  const save = useMutation({
+    mutationFn: (modelNumber: string) => api.patch(`/projects/${projectId}/boq/items/${item.id}/model-number`, { modelNumber: modelNumber.trim() || null }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['boq', projectId] }),
+    onError: (e) => alert(errMsg(e)),
+  });
+  if (!canWrite) return <span className="text-xs text-slate-500">{item.modelNumber || '—'}</span>;
+  return (
+    <input
+      className="input h-7 w-28 text-xs"
+      placeholder="model no."
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={() => { if ((val.trim() || null) !== (item.modelNumber ?? null)) save.mutate(val); }}
+    />
+  );
 }
 
 export default function BOQTab({ projectId, locked }: { projectId: string; role: string; locked: boolean }) {
@@ -165,6 +188,8 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
                     <th className="px-4 py-2">Description</th>
                     <th className="px-2">Room/Zone</th>
                     <th className="px-2">Make &amp; Model</th>
+                    {/* The chosen machine model number — decided later, vendor-specific (PRD §5). */}
+                    <th className="px-2">Model No.</th>
                     <th className="px-2">Remarks</th>
                     <th className="px-2 text-right">Planned</th>
                     <th className="px-2 text-right">Installed</th>
@@ -177,6 +202,7 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
                   {grouped.map((g) => (
                     <CategoryGroup
                       key={g.category}
+                      projectId={projectId}
                       group={g}
                       collapsed={!!collapsed[g.category]}
                       toggle={() => setCollapsed((c) => ({ ...c, [g.category]: !c[g.category] }))}
@@ -211,7 +237,8 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
   );
 }
 
-function CategoryGroup({ group, collapsed, toggle, canWrite, onAdd }: {
+function CategoryGroup({ projectId, group, collapsed, toggle, canWrite, onAdd }: {
+  projectId: string;
   group: { category: string; rows: BOQItem[] };
   collapsed: boolean; toggle: () => void; canWrite: boolean; onAdd: (it: BOQItem) => void;
 }) {
@@ -221,7 +248,7 @@ function CategoryGroup({ group, collapsed, toggle, canWrite, onAdd }: {
   return (
     <>
       <tr className="cursor-pointer bg-slate-100/60 font-semibold text-navy hover:bg-slate-100" onClick={toggle}>
-        <td className="px-4 py-2" colSpan={8}>
+        <td className="px-4 py-2" colSpan={9}>
           <span className="mr-2 inline-block w-3 text-slate-400">{collapsed ? '▶' : '▼'}</span>
           {group.category} <span className="ml-2 text-xs font-normal text-slate-400">({group.rows.length})</span>
         </td>
@@ -236,6 +263,8 @@ function CategoryGroup({ group, collapsed, toggle, canWrite, onAdd }: {
           </td>
           <td className="px-2 text-xs text-slate-500">{it.roomZone || '—'}</td>
           <td className="px-2 text-xs text-slate-500">{it.makeModel || '—'}</td>
+          {/* Chosen machine model number — typed, editable even when the BOQ is locked. */}
+          <td className="px-2">{it.isGroup ? null : <ModelNumberCell projectId={projectId} item={it} canWrite={canWrite} />}</td>
           <td className="px-2 text-xs text-slate-500 max-w-[16rem] whitespace-pre-wrap">{it.remarks || '—'}</td>
           <td className="px-2 text-right">{fmtNum(it.plannedQty)} <span className="text-xs text-slate-400">{it.unit}</span></td>
           <td className="px-2 text-right text-navy">{fmtNum(it.installedQty)}</td>

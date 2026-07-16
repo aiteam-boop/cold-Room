@@ -82,6 +82,18 @@ export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
   next();
 }
 
+// API-key management is a security surface, so it is restricted to ONE named
+// super-admin identity (an email), not every admin. Configurable via env.
+export const SUPERADMIN_EMAIL = (process.env.API_SUPERADMIN_EMAIL || 'admin@crmcts.dev').toLowerCase();
+export function isSuperAdmin(email?: string | null): boolean {
+  return !!email && email.toLowerCase() === SUPERADMIN_EMAIL;
+}
+export function requireSuperAdmin(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) return next(unauthorized());
+  if (!isSuperAdmin(req.user.email)) return next(forbidden('API key management is restricted to the super-admin.'));
+  next();
+}
+
 // Require the caller to be a room-wise DPR owner (a specific email allowlist,
 // NOT every admin). See lib/dprAccess.ts.
 export function requireDprOwner(req: Request, _res: Response, next: NextFunction) {
@@ -143,6 +155,18 @@ export function requireAnyEdit(...pages: PageKey[]) {
 export function requireFinancialView(req: Request, _res: Response, next: NextFunction) {
   if (!req.account) return next(unauthorized());
   if (shouldHideFinancials(req.account)) return next(forbidden('Financial data is hidden for your account'));
+  next();
+}
+
+// Access to the BOQ & Budget page. A budget capability (enter or freeze) IS the
+// grant — you can't cost a budget you can't see, so canEditBudget / canFreezeBudget
+// see it regardless of the boq page grant or hideFinancials. Otherwise fall back
+// to the normal rule: the boq page + financial view.
+export function requireBudgetView(req: Request, _res: Response, next: NextFunction) {
+  if (!req.account) return next(unauthorized());
+  if (hasSection(req.account, 'canEditBudget') || hasSection(req.account, 'canFreezeBudget')) return next();
+  if (shouldHideFinancials(req.account)) return next(forbidden('The budget is hidden for your account.'));
+  if (!canViewPage(req.account, 'boq')) return next(forbidden('You do not have access to the budget.'));
   next();
 }
 

@@ -293,6 +293,7 @@ const itemSchema = z.object({
   plannedQty: z.number().nonnegative().optional(),
   isGroup: z.boolean().optional(),
   zoneId: z.string().nullable().optional(),
+  modelNumber: z.string().nullable().optional(),
 });
 
 router.post(
@@ -323,6 +324,23 @@ router.patch(
     const item = await prisma.bOQItem.update({ where: { id: req.params.itemId }, data: body });
     await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'BOQ_ITEM_UPDATE', entity: 'BOQItem', entityId: item.id, details: body });
     res.json({ item });
+  })
+);
+
+// PATCH .../items/:itemId/model-number — set the chosen machine model number.
+// This is decided AFTER the BOQ (Machine-Model/TDS PRD §5), so it is allowed even
+// when the BOQ is locked: it annotates the line, it does not change the scope/qty.
+router.patch(
+  '/items/:itemId/model-number',
+  requireProjectMember,
+  requireEdit('boq'),
+  asyncHandler(async (req, res) => {
+    const { modelNumber } = z.object({ modelNumber: z.string().trim().nullable() }).parse(req.body);
+    const item = await prisma.bOQItem.findFirst({ where: { id: req.params.itemId, projectId: req.params.projectId }, select: { id: true } });
+    if (!item) throw notFound('BOQ item not found in this project');
+    const updated = await prisma.bOQItem.update({ where: { id: item.id }, data: { modelNumber: modelNumber || null } });
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'BOQ_MODEL_NUMBER', entity: 'BOQItem', entityId: item.id, details: { modelNumber } });
+    res.json({ item: updated });
   })
 );
 

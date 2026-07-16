@@ -159,6 +159,35 @@ export interface ApprovalDocEmail {
   // changed after a previous approval and is coming back for RE-approval, so the
   // approver is shown that fact plus the reason the raiser gave.
   amendments?: { remark: string; byName: string; at: string }[];
+  // Budget vs Actual rows for a PO/WO (PRD §5) — budget, this-PO spend, variance.
+  budget?: { description: string; budget: number | null; actual: number | null; variance: number | null; variancePct: number | null; wholePo?: boolean }[];
+}
+
+// The "Budget vs Actual" block — what each BOQ item was budgeted at vs what this
+// document spends on it. Shown to the approver so the variance is visible in-line.
+function budgetBlock(rows: ApprovalDocEmail['budget']): string {
+  if (!rows?.length) return '';
+  const body = rows.map((r) => {
+    const under = r.variance != null && r.variance <= 0;
+    const vTxt = r.variance == null ? '—'
+      : `<span style="color:${under ? '#16a34a' : '#dc2626'};font-weight:600">${under ? '−' : '+'}${money(Math.abs(r.variance))}${r.variancePct != null ? ` (${r.variancePct > 0 ? '+' : ''}${r.variancePct}%)` : ''}</span>`;
+    return `<tr>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;font-size:12px;color:#0f172a">${escapeHtml(r.description.slice(0, 46))}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px">${r.budget != null ? money(r.budget) : '—'}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px">${r.actual != null ? money(r.actual) : '—'}${r.wholePo ? '<div style="font-size:9px;color:#94a3b8">whole PO</div>' : ''}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px">${vTxt}</td>
+    </tr>`;
+  }).join('');
+  return `<div style="margin-top:16px;font-size:12px;font-weight:700;color:#0f2942">Budget vs Actual</div>
+    <table style="width:100%;border-collapse:collapse;margin-top:6px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+      <tr style="background:#f1f5f9;color:#475569;font-size:11px;text-transform:uppercase">
+        <td style="padding:6px 8px">BOQ Item</td>
+        <td style="padding:6px 8px;text-align:right">Budget</td>
+        <td style="padding:6px 8px;text-align:right">This Doc</td>
+        <td style="padding:6px 8px;text-align:right">Variance</td>
+      </tr>${body}
+    </table>
+    <div style="font-size:10px;color:#94a3b8;margin-top:3px">Internal only — not printed on the vendor document. Green = under budget, red = over.</div>`;
 }
 
 /** The amber "resubmitted after amendment" block — the reason it needs re-approval. */
@@ -235,6 +264,8 @@ export function approvalDocEmailHtml(m: ApprovalDocEmail): string {
           <td style="padding:6px 8px;text-align:center">Qty</td><td style="padding:6px 8px;text-align:right">Unit</td><td style="padding:6px 8px;text-align:right">Total</td>
         </tr>${rowsHtml}${more}
       </table>` : ''}
+
+      ${budgetBlock(m.budget)}
 
       <div style="margin-top:20px;text-align:center;color:#475569;font-size:13px">Click <b>View ${escapeHtml(m.label)}</b> to read the full document and record your decision there — <b>Approve</b>, or put it <b>On Hold</b> with a note on what needs correcting.</div>
       ${/* The decision buttons live on the review page, so say so on the button

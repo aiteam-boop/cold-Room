@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { errMsg } from '../lib/api';
 
@@ -14,6 +14,12 @@ const DEMO = [
 export default function Login() {
   const { user, login, register } = useAuth();
   const nav = useNavigate();
+  // Where to land after signing in. When arriving via a protected deep link
+  // (e.g. an item's /go/… link) RequireAuth stashes the target here, so login
+  // resumes straight to that item instead of dumping the user on the home page.
+  const loc = useLocation();
+  const from = (loc.state as { from?: { pathname?: string; search?: string } } | null)?.from;
+  const dest = from?.pathname ? `${from.pathname}${from.search ?? ''}` : '/';
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   // Fields start empty so credentials are never pre-filled for visitors. (The
@@ -23,7 +29,7 @@ export default function Login() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  if (user) return <Navigate to="/" replace />;
+  if (user) return <Navigate to={dest} replace />;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -32,7 +38,7 @@ export default function Login() {
     try {
       if (mode === 'login') await login(email, password);
       else await register(name, email, password);
-      nav('/');
+      nav(dest, { replace: true });
     } catch (e) {
       setErr(errMsg(e));
     } finally {

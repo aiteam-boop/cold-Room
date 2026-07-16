@@ -7,6 +7,7 @@ import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
+import { prisma } from './lib/prisma';
 import { UPLOADS_PATH } from './middleware/upload';
 
 import authRoutes from './routes/auth';
@@ -33,6 +34,8 @@ import syncRoutes from './routes/sync';
 import dprRoutes from './routes/dpr';
 import approvalRuleRoutes from './routes/approvalRules';
 import fmsRoutes from './routes/fms';
+import apiKeyRoutes from './routes/apiKeys';
+import publicApiRoutes from './routes/publicApi';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -66,6 +69,8 @@ app.use('/api/approval-chains', approvalChainRoutes);
 app.use('/api/machine-models', machineModelRoutes);
 app.use('/api/sync-sheets', syncRoutes);
 app.use('/api/approval-rules', approvalRuleRoutes);
+app.use('/api/api-keys', apiKeyRoutes);
+app.use('/api/v1', publicApiRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
@@ -117,4 +122,22 @@ app.listen(PORT, () => {
   // Pull the branding logo/signature back from Atlas if the disk cache is cold
   // (e.g. after a redeploy), so generated PO/GRN PDFs keep their logo.
   restoreBrandingCache(path.resolve(process.cwd(), 'assets')).catch(() => {});
+  // The API-key audit log is a CAPPED collection: its size cap IS the retention
+  // policy, so a chatty/abusive integration can never grow it unbounded. Convert
+  // it once (idempotent); recreate the secondary index convert() drops.
+  ensureCappedApiLog().catch((e) => console.warn('[api-key-log] cap ensure skipped:', (e as Error)?.message));
 });
+
+async function ensureCappedApiLog() {
+  const SIZE = 50 * 1024 * 1024; // 50 MB
+  let capped = false;
+  try {
+    const stats = (await prisma.$runCommandRaw({ collStats: 'ApiKeyCall' })) as { capped?: boolean };
+    capped = !!stats.capped;
+  } catch { /* collection absent — created on first insert; convert on next boot */ return; }
+  if (capped) return;
+  await prisma.$runCommandRaw({ convertToCapped: 'ApiKeyCall', size: SIZE });
+  // convertToCapped keeps only the _id index — recreate the query index.
+  await prisma.$runCommandRaw({ createIndexes: 'ApiKeyCall', indexes: [{ key: { keyId: 1, at: -1 }, name: 'keyId_at_capped' }] }).catch(() => {});
+  console.log('  API-key audit log → converted to capped (50 MB)');
+}

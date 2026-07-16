@@ -33,11 +33,11 @@ interface POOption { id: string; docNumber: string; vendorId: string | null; ven
 
 const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
 
-export default function FMSView({ projectId }: { projectId: string }) {
+export default function FMSView({ projectId, focusId }: { projectId: string; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit } = useAuth();
   const editable = canEdit('fms');
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(focusId ?? null);
   const [creating, setCreating] = useState(false);
 
   const { data, isLoading } = useQuery({

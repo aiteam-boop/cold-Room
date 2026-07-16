@@ -16,10 +16,13 @@ import { inr, fmtDate } from '../../lib/format';
 
 interface Quote {
   id: string; vendorId: string | null; vendorName: string; price: number;
-  deliveryDate: string | null; leadTimeText: string | null; paymentTerms: string | null;
-  qualityRemarks: string | null; quotationPdfUrl: string | null; revision: number;
-  status: string; rank: string;
+  deliveryDate: string | null; deliveryWeeks: number | null; leadTimeText: string | null; paymentTerms: string | null;
+  qualityRemarks: string | null; modelNumber: string | null; quotationPdfUrl: string | null; tdsUrl: string | null;
+  revision: number; status: string; rank: string;
 }
+
+// Common payment-term presets — dropdown AND typing (PRD §6.1).
+const PAYMENT_PRESETS = ['100% Advance', '50% Advance, 50% on Delivery', '30% Advance, 70% on Delivery', '25% Advance, 75% on Delivery', '20% Advance, 80% on Delivery', 'Against Delivery', '30 Days Credit', '45 Days Credit'];
 interface Data {
   item: { id: string; description: string; unit: string | null; plannedQty: number; budgetAmount: number | null; awardedQuotationId: string | null; awardReason: string | null; awardedAt: string | null };
   quotes: Quote[]; activeCount: number; minQuotes: number;
@@ -151,11 +154,12 @@ function CompareTab({ d, editable, onAdd, onDelete, onUpload, onAward, onUnaward
           <thead className="text-left text-xs uppercase text-slate-400">
             <tr>
               <th className="py-1">Vendor</th>
+              <th>Model No.</th>
               <th className="text-right">Quoted Price</th>
               <th>Delivery</th>
               <th>Payment Terms</th>
               <th>Quality / Remarks</th>
-              <th>PDF</th>
+              <th>Files</th>
               {editable && <th></th>}
             </tr>
           </thead>
@@ -170,14 +174,17 @@ function CompareTab({ d, editable, onAdd, onDelete, onUpload, onAward, onUnaward
                     {qt.rank && <span className={`badge ml-1 ${qt.rank === 'L1' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{qt.rank}</span>}
                     {qt.revision > 1 && <span className="ml-1 text-[10px] text-slate-400">rev {qt.revision}</span>}
                   </td>
+                  <td className="text-xs text-slate-500">{qt.modelNumber || '—'}</td>
                   <td className="text-right font-medium text-slate-800">{money(qt.price)}</td>
-                  <td className="text-xs text-slate-500">{qt.deliveryDate ? fmtDate(qt.deliveryDate) : qt.leadTimeText || '—'}</td>
+                  {/* Delivery in weeks (§6.2), falling back to a date / free text. */}
+                  <td className="text-xs text-slate-500">{qt.deliveryWeeks != null ? `${qt.deliveryWeeks} wk` : qt.deliveryDate ? fmtDate(qt.deliveryDate) : qt.leadTimeText || '—'}</td>
                   <td className="text-xs text-slate-500">{qt.paymentTerms || '—'}</td>
-                  <td className="max-w-[16rem] text-xs text-slate-500">{qt.qualityRemarks || '—'}</td>
-                  <td>
+                  <td className="max-w-[14rem] text-xs text-slate-500">{qt.qualityRemarks || '—'}</td>
+                  <td className="whitespace-nowrap">
                     {qt.quotationPdfUrl
-                      ? <a className="text-xs font-medium text-navy hover:underline" href={qt.quotationPdfUrl} target="_blank" rel="noreferrer">📄</a>
-                      : editable ? <label className="cursor-pointer text-xs text-slate-400 hover:text-navy">＋<input type="file" className="hidden" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && onUpload(qt.id, e.target.files[0])} /></label> : '—'}
+                      ? <a className="text-xs font-medium text-navy hover:underline" href={qt.quotationPdfUrl} target="_blank" rel="noreferrer" title="Quotation">📄 Quote</a>
+                      : editable ? <label className="cursor-pointer text-xs text-slate-400 hover:text-navy" title="Attach quotation">＋Quote<input type="file" className="hidden" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && onUpload(qt.id, e.target.files[0])} /></label> : '—'}
+                    {qt.tdsUrl && <a className="ml-2 text-xs font-medium text-navy hover:underline" href={qt.tdsUrl} target="_blank" rel="noreferrer" title="Vendor TDS">📄 TDS</a>}
                   </td>
                   {editable && (
                     <td className="whitespace-nowrap text-right">
@@ -198,21 +205,30 @@ function CompareTab({ d, editable, onAdd, onDelete, onUpload, onAward, onUnaward
 }
 
 function AddQuoteForm({ onAdd }: { onAdd: (b: any) => void }) {
-  const [f, setF] = useState({ vendorName: '', price: '', deliveryDate: '', paymentTerms: '', qualityRemarks: '' });
+  const [f, setF] = useState({ vendorName: '', modelNumber: '', price: '', deliveryWeeks: '', paymentTerms: '', qualityRemarks: '' });
   const set = (p: any) => setF((s) => ({ ...s, ...p }));
   const submit = () => {
     if (!f.vendorName.trim() || !f.price) return;
-    onAdd({ vendorName: f.vendorName.trim(), price: Number(f.price), deliveryDate: f.deliveryDate || null, paymentTerms: f.paymentTerms || null, qualityRemarks: f.qualityRemarks || null });
-    setF({ vendorName: '', price: '', deliveryDate: '', paymentTerms: '', qualityRemarks: '' });
+    onAdd({
+      vendorName: f.vendorName.trim(), modelNumber: f.modelNumber.trim() || null, price: Number(f.price),
+      deliveryWeeks: f.deliveryWeeks === '' ? null : Number(f.deliveryWeeks),
+      paymentTerms: f.paymentTerms || null, qualityRemarks: f.qualityRemarks || null,
+    });
+    setF({ vendorName: '', modelNumber: '', price: '', deliveryWeeks: '', paymentTerms: '', qualityRemarks: '' });
   };
   return (
     <div className="rounded-lg border border-slate-200 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Add a quotation</div>
-      <div className="grid gap-2 sm:grid-cols-5">
+      <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
         <input className="input h-8 text-xs" placeholder="Vendor name *" value={f.vendorName} onChange={(e) => set({ vendorName: e.target.value })} />
+        {/* Each vendor quotes their OWN model number (§6). */}
+        <input className="input h-8 text-xs" placeholder="Vendor model no." value={f.modelNumber} onChange={(e) => set({ modelNumber: e.target.value })} />
         <input className="input h-8 text-xs" type="number" placeholder="Price *" value={f.price} onChange={(e) => set({ price: e.target.value })} />
-        <input className="input h-8 text-xs" type="date" title="Delivery date" value={f.deliveryDate} onChange={(e) => set({ deliveryDate: e.target.value })} />
-        <input className="input h-8 text-xs" placeholder="Payment terms" value={f.paymentTerms} onChange={(e) => set({ paymentTerms: e.target.value })} />
+        {/* Delivery in WEEKS, not a date (§6.2). */}
+        <input className="input h-8 text-xs" type="number" min={0} placeholder="Delivery (weeks)" value={f.deliveryWeeks} onChange={(e) => set({ deliveryWeeks: e.target.value })} />
+        {/* Payment terms — dropdown preset AND free typing (§6.1). */}
+        <input className="input h-8 text-xs" list="pay-presets" placeholder="Payment terms" value={f.paymentTerms} onChange={(e) => set({ paymentTerms: e.target.value })} />
+        <datalist id="pay-presets">{PAYMENT_PRESETS.map((p) => <option key={p} value={p} />)}</datalist>
         <input className="input h-8 text-xs" placeholder="Quality / remarks" value={f.qualityRemarks} onChange={(e) => set({ qualityRemarks: e.target.value })} />
       </div>
       <button className="btn-primary mt-2 text-xs" disabled={!f.vendorName.trim() || !f.price} onClick={submit}>+ Add quote</button>

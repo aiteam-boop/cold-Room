@@ -16,8 +16,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
-import { requireAuth, requireProjectMember, requirePage, requireSection } from '../middleware/authMiddleware';
-import { requireFinancialView } from '../middleware/authMiddleware';
+import { requireAuth, requireProjectMember, requireSection, requireBudgetView, requireFinancialView } from '../middleware/authMiddleware';
 import { audit } from '../lib/audit';
 import { isAdmin } from '../lib/enums';
 
@@ -35,7 +34,7 @@ function lineAmount(qty: number | null | undefined, rate: number | null | undefi
 // GET /budget — the BOQ with its budget line, grouped by category, plus totals.
 // Behind requireFinancialView: the budget IS pricing, so anyone with
 // hideFinancials must never receive it.
-router.get('/', requireProjectMember, requirePage('boq'), requireFinancialView, asyncHandler(async (req, res) => {
+router.get('/', requireProjectMember, requireBudgetView, asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
   const [project, items] = await Promise.all([
     prisma.project.findUnique({
@@ -98,7 +97,7 @@ router.get('/', requireProjectMember, requirePage('boq'), requireFinancialView, 
 // "Budget vs Actual" panel. Gated only on requireFinancialView (NOT the boq page)
 // so anyone who may build a PO can see how it lands against budget. It is still
 // pricing, so hideFinancials users are refused.
-router.get('/summary', requireProjectMember, requireFinancialView, asyncHandler(async (req, res) => {
+router.get('/summary', requireProjectMember, requireBudgetView, asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
   const [project, lines] = await Promise.all([
     prisma.project.findUnique({ where: { id: projectId }, select: { budgetStatus: true } }),
@@ -134,7 +133,7 @@ const lineInput = z.object({
   budgetRate: z.coerce.number().nullable().optional(),
   notes: z.string().nullable().optional(),
 });
-router.patch('/lines/:boqItemId', requireProjectMember, requireSection('canEditBudget'), requireFinancialView, asyncHandler(async (req, res) => {
+router.patch('/lines/:boqItemId', requireProjectMember, requireSection('canEditBudget'), asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
   const item = await prisma.bOQItem.findFirst({ where: { id: req.params.boqItemId, projectId }, select: { id: true, plannedQty: true } });
   if (!item) throw notFound('BOQ item not found');
@@ -166,7 +165,7 @@ router.patch('/lines/:boqItemId', requireProjectMember, requireSection('canEditB
 }));
 
 // PATCH /budget/settings — project-level contingency %.
-router.patch('/settings', requireProjectMember, requireSection('canEditBudget'), requireFinancialView, asyncHandler(async (req, res) => {
+router.patch('/settings', requireProjectMember, requireSection('canEditBudget'), asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
   await assertNotFrozen(projectId);
   const { contingencyPct } = z.object({ contingencyPct: z.coerce.number().min(0).max(100) }).parse(req.body);
@@ -176,7 +175,7 @@ router.patch('/settings', requireProjectMember, requireSection('canEditBudget'),
 
 // POST /budget/freeze — lock it. This is the moment the budget becomes the
 // benchmark, so it needs the stronger right and at least one costed line.
-router.post('/freeze', requireProjectMember, requireSection('canFreezeBudget'), requireFinancialView, asyncHandler(async (req, res) => {
+router.post('/freeze', requireProjectMember, requireSection('canFreezeBudget'), asyncHandler(async (req, res) => {
   const projectId = req.params.projectId;
   const p = await prisma.project.findUnique({ where: { id: projectId }, select: { budgetStatus: true } });
   if (!p) throw notFound('Project not found');

@@ -76,6 +76,59 @@ export interface ApprovalDocData {
   // it has been amended and sent back, so a non-empty list means THIS approval is
   // a re-approval — the approver must see why, and what was changed.
   amendments: DocAmendment[];
+  // Budget vs Actual for a PO/WO (BOQ & Budget PRD §5): what each BOQ item was
+  // budgeted at vs what this document spends on it, so the approver sees the
+  // variance right in the approval. Empty when nothing is budgeted/compared.
+  budget?: BudgetRow[];
+}
+
+export interface BudgetRow {
+  description: string;
+  budget: number | null;
+  actual: number | null;
+  variance: number | null;
+  variancePct: number | null;
+  wholePo?: boolean;
+}
+
+// Compute the Budget-vs-Actual rows for a PO/WO — the same view as the builder's
+// panel: line-linked BOQ items plus the ones the raiser picked to compare, each
+// with its frozen budget and this document's spend on it.
+async function budgetRowsForDoc(
+  projectId: string,
+  lineItems: { boqItemId: string | null; qty: number; unitPrice: number }[],
+  budgetCompareJson: string | null,
+  poBasic: number,
+): Promise<BudgetRow[]> {
+  const linkedIds = [...new Set(lineItems.filter((l) => l.boqItemId).map((l) => l.boqItemId as string))];
+  let compareIds: string[] = [];
+  try { const a = budgetCompareJson ? JSON.parse(budgetCompareJson) : []; if (Array.isArray(a)) compareIds = a; } catch { /* */ }
+  const ids = [...new Set([...linkedIds, ...compareIds])];
+  if (!ids.length) return [];
+
+  const [budgetLines, items] = await Promise.all([
+    prisma.bOQBudgetLine.findMany({ where: { projectId, boqItemId: { in: ids } }, select: { boqItemId: true, budgetAmount: true } }),
+    prisma.bOQItem.findMany({ where: { id: { in: ids } }, select: { id: true, description: true } }),
+  ]);
+  const budgetBy = new Map(budgetLines.map((b) => [b.boqItemId, b.budgetAmount]));
+  const descBy = new Map(items.map((i) => [i.id, i.description]));
+  const noLinks = linkedIds.length === 0;
+
+  const rows: BudgetRow[] = [];
+  for (const id of ids) {
+    const budget = budgetBy.get(id) ?? null;
+    const linked = lineItems.filter((l) => l.boqItemId === id).reduce((s, l) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+    // Same fallback as the builder: a compare-only item on a PO with no line links
+    // is measured against the whole PO, so the variance is still visible.
+    const isCompareOnly = !linkedIds.includes(id);
+    const actual = linked > 0 ? linked : (isCompareOnly && noLinks ? poBasic : 0);
+    const wholePo = actual > 0 && linked === 0;
+    const variance = budget != null && actual > 0 ? Math.round((actual - budget) * 100) / 100 : null;
+    const variancePct = variance != null && budget ? Math.round((variance / budget) * 1000) / 10 : null;
+    rows.push({ description: descBy.get(id) ?? '—', budget, actual: actual || null, variance, variancePct, wholePo });
+  }
+  // Only worth showing if at least one row has a budget to compare against.
+  return rows.some((r) => r.budget != null) ? rows : [];
 }
 
 // `amendments` is stored as a JSON array of { at, byId, byName, byEmail, remark }.
@@ -117,6 +170,13 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
     include: { lineItems: { where: { isLeadTime: false }, orderBy: { sortOrder: 'asc' } }, project: { select: { name: true } } },
   });
   if (!d) return null;
+  const poBasic = d.lineItems.reduce((s, l) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+  const budget = await budgetRowsForDoc(
+    d.projectId,
+    d.lineItems.map((l) => ({ boqItemId: l.boqItemId ?? null, qty: l.qty, unitPrice: l.unitPrice })),
+    d.budgetCompareItemIds,
+    poBasic,
+  );
   return {
     label: d.type, docLabelLong: d.type === 'WO' ? 'Work Order' : 'Purchase Order', number: d.docNumber,
     vendorName: d.vendorName, projectName: d.project?.name ?? null,
@@ -124,6 +184,7 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
     rows: d.lineItems.map((l) => ({ description: l.description, qty: l.qty, unitPrice: l.unitPrice, total: l.totalPrice })),
     pdfPath: `/api/projects/${d.projectId}/procurement/docs/${d.id}/pdf`, projectId: d.projectId,
     amendments: parseAmendments(d.amendments),
+    budget,
   };
 }
 
@@ -197,6 +258,8 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
         reminder: kind === 'REMINDER',
         // Why it is back for approval — the reason given when it was amended.
         amendments: data.amendments,
+        // Budget vs Actual for the approver (PRD §5).
+        budget: data.budget,
       }),
     });
     return;

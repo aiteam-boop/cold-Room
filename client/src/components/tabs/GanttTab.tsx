@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -35,7 +35,7 @@ interface Activity {
 
 type CheckpointTarget = { activity: Activity; verb: 'start' | 'complete' };
 
-export default function GanttTab({ projectId }: { projectId: string }) {
+export default function GanttTab({ projectId, focusId }: { projectId: string; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit, isAdmin } = useAuth();
   const canManage = canEdit('gantt');
@@ -44,6 +44,10 @@ export default function GanttTab({ projectId }: { projectId: string }) {
   const [checkpoint, setCheckpoint] = useState<CheckpointTarget | null>(null);
   const [remarkFor, setRemarkFor] = useState<Activity | null>(null);
   const [showDrawings, setShowDrawings] = useState(false);
+  // Deep-link target: scroll the row into view and ring it so the user lands
+  // straight on the task they followed the link for and can act on it.
+  const focusRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { if (focusId && focusRef.current) focusRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [focusId]);
 
   const { data, isLoading } = useQuery({ queryKey: ['gantt', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/gantt`)).data });
   const refresh = () => qc.invalidateQueries({ queryKey: ['gantt', projectId] });
@@ -147,8 +151,10 @@ export default function GanttTab({ projectId }: { projectId: string }) {
                   : (a.delayDays > 0 ? todayLeft : null);
                 const showTail = tailEnd != null && tailEnd > left + width;
 
+                const focused = focusId === a.id;
                 return (
-                  <div key={a.id} className="group flex items-center gap-2 border-b border-slate-50 py-1.5">
+                  <div key={a.id} ref={focused ? focusRef : undefined}
+                    className={`group flex items-center gap-2 border-b border-slate-50 py-1.5 ${focused ? 'rounded-lg bg-amber-50 ring-2 ring-amber-400' : ''}`}>
                     <div className="w-60 shrink-0 truncate text-xs">
                       <span className="font-medium text-slate-700">{a.activityName}</span>
                       {a.delayDays > 0 && <span className="ml-1 font-semibold text-red-600">+{a.delayDays}d</span>}

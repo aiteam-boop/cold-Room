@@ -510,7 +510,8 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           variance. Internal only; never printed on the vendor PO. Hidden from
           hideFinancials users. */}
       {!hideFinancials && (
-        <BudgetVsActual projectId={projectId} docType={d.type} lineItems={d.lineItems} boqItems={boqItems} />
+        <BudgetVsActual projectId={projectId} docId={docId} docType={d.type} lineItems={d.lineItems} boqItems={boqItems}
+          persistedCompareIds={d.budgetCompareItemIds ?? []} poBasic={basic} />
       )}
     </div>
   );
@@ -521,13 +522,22 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 //    budget pulled in and the doc's spend on that item computed live.
 //  • MANUAL — pick any BOQ item from the dropdown to compare against (its budget,
 //    unit and qty auto-fetch), or type a budget when the item has none.
-function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
-  projectId: string; docType: string; lineItems: any[]; boqItems: any[];
+function BudgetVsActual({ projectId, docId, docType, lineItems, boqItems, persistedCompareIds, poBasic }: {
+  projectId: string; docId: string; docType: string; lineItems: any[]; boqItems: any[];
+  persistedCompareIds: string[]; poBasic: number;
 }) {
   const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
   // A PO covers multiple items, so several manual comparison rows can be added.
-  const [manualRows, setManualRows] = useState<{ boqItemId: string; typedBudget: string }[]>([]);
+  // Seeded from what was persisted on the PO, so the comparison survives navigation.
+  const [manualRows, setManualRows] = useState<{ boqItemId: string; typedBudget: string }[]>(
+    () => (persistedCompareIds ?? []).map((id) => ({ boqItemId: id, typedBudget: '' })),
+  );
   const [pick, setPick] = useState('');
+
+  // Persist the picked BOQ items on the PO so they are still here next time.
+  const persist = (rows: { boqItemId: string }[]) => {
+    api.patch(`/projects/${projectId}/procurement/docs/${docId}/budget-compare`, { itemIds: rows.map((r) => r.boqItemId) }).catch(() => {});
+  };
 
   const sumQ = useQuery({
     queryKey: ['budget-summary', projectId],
@@ -546,11 +556,18 @@ function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
   // Auto rows: distinct BOQ items this doc's lines are linked to.
   const linkedIds = [...new Set(lineItems.filter((l) => l.boqItemId).map((l) => l.boqItemId as string))];
 
-  const row = (boqItemId: string, manualBudget?: number | null) => {
+  // Auto rows: distinct BOQ items this doc's lines are linked to.
+  const row = (boqItemId: string, manualBudget?: number | null, isCompare = false) => {
     const b = byItem[boqItemId];
     const meta = boqItems.find((x) => x.id === boqItemId);
     const budget = manualBudget != null ? manualBudget : b?.budgetAmount ?? null;
-    const actual = actualForItem(boqItemId);
+    const linked = actualForItem(boqItemId);
+    // "This PO" for the item: its linked line total. If nothing is line-linked at
+    // all AND this is a compare row, fall back to the whole PO basic amount — that's
+    // the common single-item PO, so the variance ("kitna farak") is still visible.
+    const noLinks = linkedIds.length === 0;
+    const actual = linked > 0 ? linked : (isCompare && noLinks ? poBasic : 0);
+    const actualIsWholePo = actual > 0 && linked === 0;
     const variance = budget != null && actual > 0 ? Math.round((actual - budget) * 100) / 100 : null;
     const variancePct = variance != null && budget ? Math.round((variance / budget) * 1000) / 10 : null;
     return {
@@ -558,7 +575,7 @@ function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
       description: b?.description ?? meta?.description ?? '—',
       unit: b?.unit ?? meta?.unit ?? '—',
       budgetQty: b?.budgetQty ?? meta?.plannedQty ?? null,
-      budget, actual, variance, variancePct,
+      budget, actual, actualIsWholePo, variance, variancePct,
       hasBudget: b?.budgetAmount != null,
     };
   };
@@ -567,14 +584,14 @@ function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
   // Manual rows the user added to compare against (excluding ones already auto-shown).
   const manualRowsData = manualRows
     .filter((m) => !linkedIds.includes(m.boqItemId))
-    .map((m) => ({ ...row(m.boqItemId, m.typedBudget !== '' ? Number(m.typedBudget) : undefined), _typed: m.typedBudget }));
+    .map((m) => ({ ...row(m.boqItemId, m.typedBudget !== '' ? Number(m.typedBudget) : undefined, true), _typed: m.typedBudget }));
   const addManual = (id: string) => {
     if (!id || manualRows.some((m) => m.boqItemId === id)) { setPick(''); return; }
-    setManualRows((rows) => [...rows, { boqItemId: id, typedBudget: '' }]);
+    setManualRows((rows) => { const next = [...rows, { boqItemId: id, typedBudget: '' }]; persist(next); return next; });
     setPick('');
   };
   const setTyped = (id: string, v: string) => setManualRows((rows) => rows.map((m) => (m.boqItemId === id ? { ...m, typedBudget: v } : m)));
-  const removeManual = (id: string) => setManualRows((rows) => rows.filter((m) => m.boqItemId !== id));
+  const removeManual = (id: string) => setManualRows((rows) => { const next = rows.filter((m) => m.boqItemId !== id); persist(next); return next; });
 
   return (
     <div className="card p-4">
@@ -629,14 +646,14 @@ function BudgetVsActual({ projectId, docType, lineItems, boqItems }: {
               <option key={it.id} value={it.id}>{it.description?.slice(0, 60)}{byItem[it.id]?.budgetAmount != null ? '  ✓ budgeted' : ''}</option>
             ))}
         </select>
-        {manualRows.length > 0 && <button type="button" className="text-xs text-slate-400 hover:text-red-500" onClick={() => setManualRows([])}>clear all</button>}
+        {manualRows.length > 0 && <button type="button" className="text-xs text-slate-400 hover:text-red-500" onClick={() => { setManualRows([]); persist([]); }}>clear all</button>}
       </div>
     </div>
   );
 }
 
 function BvaRow({ r, money, manual, typed, onTyped, onRemove }: {
-  r: { boqItemId: string; description: string; unit: string; budgetQty: number | null; budget: number | null; actual: number; variance: number | null; variancePct: number | null; hasBudget: boolean };
+  r: { boqItemId: string; description: string; unit: string; budgetQty: number | null; budget: number | null; actual: number; actualIsWholePo?: boolean; variance: number | null; variancePct: number | null; hasBudget: boolean };
   money: (n: number | null | undefined) => string; manual?: boolean;
   typed?: string; onTyped?: (v: string) => void; onRemove?: () => void;
 }) {
@@ -655,7 +672,10 @@ function BvaRow({ r, money, manual, typed, onTyped, onRemove }: {
           ? <input className="input h-6 w-24 text-right text-xs" type="number" placeholder="budget ₹" value={typed ?? ''} onChange={(e) => onTyped(e.target.value)} />
           : money(r.budget)}
       </td>
-      <td className="text-right text-xs font-medium text-navy">{r.actual > 0 ? money(r.actual) : '—'}</td>
+      <td className="text-right text-xs font-medium text-navy">
+        {r.actual > 0 ? money(r.actual) : '—'}
+        {r.actualIsWholePo && <div className="text-[9px] font-normal text-slate-400">whole PO</div>}
+      </td>
       <td className="text-right text-xs">
         {r.variance == null
           ? <span className="text-slate-300">—</span>

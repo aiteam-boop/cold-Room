@@ -7,12 +7,12 @@ import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
 
-export default function GRNView({ projectId }: { projectId: string; role: string }) {
+export default function GRNView({ projectId, focusId }: { projectId: string; role: string; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit, can } = useAuth();
   const canRaise = canEdit('grn');
   const canApprove = can('canApprove');
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(focusId ?? null);
   const [raising, setRaising] = useState(false);
 
   const grnsQ = useQuery({ queryKey: ['grns', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/grns`)).data.grns as any[] });

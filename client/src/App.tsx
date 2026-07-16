@@ -8,7 +8,10 @@ import ProjectWorkspace from './pages/ProjectWorkspace';
 import VendorsPage from './pages/VendorsPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import UsersAdmin from './pages/UsersAdmin';
+import ApiKeysAdmin from './pages/ApiKeysAdmin';
 import MachineModelsPage from './pages/MachineModelsPage';
+import IntegrationKit from './pages/IntegrationKit';
+import GoResolver from './pages/GoResolver';
 import AppShell from './components/AppShell';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -33,10 +36,22 @@ function RequireAdmin({ children }: { children: JSX.Element }) {
   return children;
 }
 
+// Key management is a security surface — gated to the single super-admin, and
+// the route simply isn't reachable for anyone else.
+function RequireSuperAdmin({ children }: { children: JSX.Element }) {
+  const { isSuperAdmin } = useAuth();
+  if (!isSuperAdmin) return <Navigate to="/" replace />;
+  return children;
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      {/* Public — no auth. Documents the API for integrators. */}
+      <Route path="/integration-kit" element={<IntegrationKit />} />
+      {/* Deep-link resolver — authed but outside the shell; it redirects instantly. */}
+      <Route path="/go/:entity/:id" element={<RequireAuth><GoResolver /></RequireAuth>} />
       <Route
         element={
           <RequireAuth>
@@ -49,6 +64,7 @@ export default function App() {
         <Route path="/vendors" element={<RequirePage page="vendors"><VendorsPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
+        <Route path="/settings/api-keys" element={<RequireSuperAdmin><ApiKeysAdmin /></RequireSuperAdmin>} />
         <Route path="/settings/machine-models" element={<RequirePage page="machinemodels"><MachineModelsPage /></RequirePage>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

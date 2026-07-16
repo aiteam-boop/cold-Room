@@ -89,9 +89,11 @@ const quoteInput = z.object({
   vendorName: z.string().trim().min(1, 'Vendor name is required.'),
   price: z.coerce.number().positive('Quoted price must be greater than 0.'),
   deliveryDate: z.string().nullable().optional(),
+  deliveryWeeks: z.coerce.number().int().nonnegative().nullable().optional(), // §6.2 — delivery in weeks
   leadTimeText: z.string().nullable().optional(),
-  paymentTerms: z.string().nullable().optional(),
+  paymentTerms: z.string().nullable().optional(),                              // §6.1 — dropdown preset OR typed
   qualityRemarks: z.string().nullable().optional(),
+  modelNumber: z.string().nullable().optional(),                              // §6 — vendor's own model number
 });
 router.post('/item/:boqItemId', requireProjectMember, requireEdit('vendors'), requireFinancialView, asyncHandler(async (req, res) => {
   const { projectId, boqItemId } = req.params;
@@ -104,7 +106,9 @@ router.post('/item/:boqItemId', requireProjectMember, requireEdit('vendors'), re
       vendorId: b.vendorId ?? null, vendorName: b.vendorName,
       price: b.price,
       deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : null,
+      deliveryWeeks: b.deliveryWeeks ?? null,
       leadTimeText: b.leadTimeText ?? null, paymentTerms: b.paymentTerms ?? null, qualityRemarks: b.qualityRemarks ?? null,
+      modelNumber: b.modelNumber ?? null,
       createdById: req.user!.sub,
     },
   });
@@ -126,8 +130,9 @@ router.post('/:id/revise', requireProjectMember, requireEdit('vendors'), require
         projectId, boqItemId: old.boqItemId, vendorId: old.vendorId, vendorName: old.vendorName,
         price: b.price ?? old.price,
         deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : old.deliveryDate,
+        deliveryWeeks: b.deliveryWeeks ?? old.deliveryWeeks,
         leadTimeText: b.leadTimeText ?? old.leadTimeText, paymentTerms: b.paymentTerms ?? old.paymentTerms,
-        qualityRemarks: b.qualityRemarks ?? old.qualityRemarks,
+        qualityRemarks: b.qualityRemarks ?? old.qualityRemarks, modelNumber: b.modelNumber ?? old.modelNumber,
         revision: old.revision + 1, parentId: old.id, createdById: req.user!.sub,
       },
     }),
@@ -156,6 +161,16 @@ router.post('/:id/file', requireProjectMember, requireEdit('vendors'), requireFi
   const updated = await prisma.vendorQuotation.update({ where: { id }, data: { quotationPdfUrl: `/uploads/${req.file.filename}` } });
   await prisma.procurementDocument.create({ data: { projectId, type: 'QUOTATION', fileName: req.file.originalname, fileUrl: `/uploads/${req.file.filename}`, vendorName: q.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
   res.json({ ok: true, quotationPdfUrl: updated.quotationPdfUrl });
+}));
+
+// Upload the vendor's TDS for their quote (§6.3) — separate from the quotation PDF.
+router.post('/:id/tds', requireProjectMember, requireEdit('vendors'), requireFinancialView, upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded');
+  const { projectId, id } = req.params;
+  const q = await prisma.vendorQuotation.findFirst({ where: { id, projectId } });
+  if (!q) throw notFound('Quotation not found');
+  const updated = await prisma.vendorQuotation.update({ where: { id }, data: { tdsUrl: `/uploads/${req.file.filename}` } });
+  res.json({ ok: true, tdsUrl: updated.tdsUrl });
 }));
 
 // POST /quotations/item/:boqItemId/award — award a quotation to a vendor.

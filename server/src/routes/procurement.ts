@@ -116,6 +116,8 @@ function serializeDoc(d: any) {
     payTriggers: parseJson(d.payTriggers, {}),
     overrides: parseJson(d.overrides, {}),
     amendments: parseJson(d.amendments, []),
+    // The persisted "compare against" BOQ items on the Budget vs Actual panel (§5).
+    budgetCompareItemIds: parseJson(d.budgetCompareItemIds, []),
     paymentTotalPct: paymentTotalPct(d),
     // Derived, never stored (G7). Only when the caller loaded the GRNs.
     ...(Array.isArray(d.grns) ? { delivery: deliveryInfo(d, d.grns) } : {}),
@@ -331,6 +333,20 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_AMEND', entity: 'ProcurementDoc', entityId: doc.id, details: { remark: b.amendmentRemark } });
   }
   res.json({ doc: serializeDoc(doc) });
+}));
+
+// PATCH .../docs/:docId/budget-compare — persist the BOQ items the user picked to
+// compare on the Budget vs Actual panel (§5). Kept separate from the main PATCH so
+// it works whatever the document's status (it changes nothing on the vendor PO).
+router.patch('/docs/:docId/budget-compare', requireProjectMember, requireAnyEdit(...DOC_PAGES), requireFinancialView, asyncHandler(async (req, res) => {
+  const { itemIds } = z.object({ itemIds: z.array(z.string()) }).parse(req.body);
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, select: { id: true } });
+  if (!doc) throw notFound('Document not found');
+  // Keep only real BOQ items of this project.
+  const valid = await prisma.bOQItem.findMany({ where: { id: { in: itemIds }, projectId: req.params.projectId }, select: { id: true } });
+  const ids = valid.map((v) => v.id);
+  await prisma.procurementDoc.update({ where: { id: doc.id }, data: { budgetCompareItemIds: JSON.stringify(ids) } });
+  res.json({ ok: true, itemIds: ids });
 }));
 
 /**
