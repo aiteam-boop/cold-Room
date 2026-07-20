@@ -78,11 +78,22 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
   const gst = d.gstEnabled ? Math.round(basic * (Number(d.gstPct) / 100)) : 0;
   const final = basic + gst;
+  // The base each payment-term % is taken from — final (incl. GST) or basic.
+  const payBase = d.payGstInclusive ? final : basic;
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p[0]]) || 0), 0);
 
   const setLine = (i: number, patch: any) => setD({ ...d, lineItems: d.lineItems.map((l: any, idx: number) => (idx === i ? { ...l, ...patch } : l)) });
   const addLine = (lead = false) => setD({ ...d, lineItems: [...d.lineItems, { description: '', qty: 0, unitPrice: 0, totalPrice: 0, uom: isWO ? 'Nos.' : null, isLeadTime: lead, leadTimeText: lead ? '7 Days' : null }] });
   const delLine = (i: number) => setD({ ...d, lineItems: d.lineItems.filter((_: any, idx: number) => idx !== i) });
+
+  // User-added item columns (e.g. HSN Code, Make, Size). The definitions live on
+  // the doc; each row's value lives in its own customValues map.
+  const customCols: { key: string; label: string }[] = Array.isArray(d.customColumns) ? d.customColumns : [];
+  const newColKey = () => 'c' + Math.random().toString(36).slice(2, 8);
+  const addCol = () => setD({ ...d, customColumns: [...customCols, { key: newColKey(), label: 'New Column' }] });
+  const setColLabel = (key: string, label: string) => setD({ ...d, customColumns: customCols.map((c) => (c.key === key ? { ...c, label } : c)) });
+  const delCol = (key: string) => setD({ ...d, customColumns: customCols.filter((c) => c.key !== key), lineItems: d.lineItems.map((l: any) => { const cv = { ...(l.customValues || {}) }; delete cv[key]; return { ...l, customValues: cv }; }) });
+  const setCell = (i: number, key: string, val: string) => setLine(i, { customValues: { ...(d.lineItems[i].customValues || {}), [key]: val } });
   // The "To," block is a single editable text. Selecting a vendor fills it;
   // vendorName is kept as the first line so lists/dashboard still show a name.
   const selectVendor = (id: string) => {
@@ -130,7 +141,7 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
     );
   }, [editable]);
 
-  const cols = 6; // Sr, Description, UOM, Qty, Unit Price, Total (UOM shown for PO + WO)
+  const cols = 6 + customCols.length; // Sr, Description, [custom…], UOM, Qty, Unit Price, Total
 
   return (
     <div className="doc-sheet rounded-lg p-6 text-[11px] leading-snug text-slate-800">
@@ -197,6 +208,16 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           <tr className="bg-sky-700 text-white">
             <th className={`w-8 border ${B} p-1`}>Sr No.</th>
             <th className={`border ${B} p-1 text-left`}>Description</th>
+            {customCols.map((c) => (
+              <th key={c.key} className={`w-20 border ${B} p-1`}>
+                {editable ? (
+                  <span className="flex items-center justify-center gap-0.5">
+                    <input className="w-full bg-transparent text-center text-white placeholder-sky-200 outline-none" value={c.label} onChange={(e) => setColLabel(c.key, e.target.value)} placeholder="Column" />
+                    <button title="Remove column" className="text-sky-200 hover:text-red-300" onClick={() => delCol(c.key)}>✕</button>
+                  </span>
+                ) : c.label}
+              </th>
+            ))}
             <th className={`w-12 border ${B} p-1`}>UOM</th>
             <th className={`w-12 border ${B} p-1`}>Qty</th>
             <th className={`w-20 border ${B} p-1`}>Unit Price</th>
@@ -215,6 +236,9 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
             <tr key={i} className="align-top">
               <td className={`border ${B} p-1 text-center`}>{i + 1}</td>
               <td className={`border ${B} p-1`}><TA value={l.description} onChange={(x: string) => setLine(i, { description: x })} rows={Math.min((l.description || '').split('\n').length + 1, 10)} placeholder="Description / specification" /></td>
+              {customCols.map((c) => (
+                <td key={c.key} className={`border ${B} p-1`}><T value={l.customValues?.[c.key] ?? ''} onChange={(x: string) => setCell(i, c.key, x)} className="text-center" /></td>
+              ))}
               <td className={`border ${B} p-1`}><U value={l.uom} onChange={(x: string) => setLine(i, { uom: x })} className="text-center" /></td>
               <td className={`border ${B} p-1`}><T value={l.qty} onChange={(x: string) => setLine(i, { qty: x })} className="text-right" /></td>
               <td className={`border ${B} p-1`}><T value={l.unitPrice} onChange={(x: string) => setLine(i, { unitPrice: x })} className="text-right" /></td>
@@ -246,7 +270,7 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           </tr>
         </tbody>
       </table>
-      {editable && <div className="mt-1 flex gap-3 text-[10px]"><button className="text-navy hover:underline" onClick={() => addLine(false)}>+ Add row</button>{isWO && <button className="text-purple-600 hover:underline" onClick={() => addLine(true)}>+ Lead Time row</button>}</div>}
+      {editable && <div className="mt-1 flex gap-3 text-[10px]"><button className="text-navy hover:underline" onClick={() => addLine(false)}>+ Add row</button><button className="text-emerald-600 hover:underline" onClick={addCol}>+ Add column</button>{isWO && <button className="text-purple-600 hover:underline" onClick={() => addLine(true)}>+ Lead Time row</button>}</div>}
       <div className="text-right text-[9px] italic text-slate-400">TDS deductible as per Income Tax laws.</div>
 
       {/* Payment terms (6-field) */}
@@ -255,11 +279,18 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           <div className="text-[11px] font-bold text-navy">PAYMENT TERMS (6-field — must total 100%)</div>
           <span className={`badge ${Math.abs(payTotal - 100) < 0.01 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{payTotal}%</span>
         </div>
+        {/* Which amount the % is taken from — final (incl. GST) or basic. The
+            milestones (Payment Pipeline) follow the same choice. */}
+        <div className="mb-2 flex flex-wrap items-center gap-3 rounded bg-slate-50 px-2 py-1 text-[10px]">
+          <span className="font-semibold text-slate-600">Payment amount includes:</span>
+          <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: true })} />GST ({d.gstEnabled ? `${d.gstPct}% ` : ''}inclusive) — {inr(final)}</label>
+          <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: false })} />Basic only — {inr(basic)}</label>
+        </div>
         <div className="grid grid-cols-3 gap-2">
           {PAY.map(([k, label, mk]) => (
             <div key={k} className={`border ${B} bg-slate-50 p-2 text-[10px]`}>
               <div className="font-semibold text-slate-600">{label}</div>
-              <div className="flex items-center gap-1"><T value={d[k]} onChange={(x: string) => setD({ ...d, [k]: x })} className="w-12 text-right" />%<span className="ml-auto font-medium text-slate-500">{inr(Math.round(basic * (Number(d[k]) / 100)))}</span></div>
+              <div className="flex items-center gap-1"><T value={d[k]} onChange={(x: string) => setD({ ...d, [k]: x })} className="w-12 text-right" />%<span className="ml-auto font-medium text-slate-500">{inr(Math.round(payBase * (Number(d[k]) / 100)))}</span></div>
               <T value={d.payTriggers?.[mk]?.note} onChange={(x: string) => setD({ ...d, payTriggers: { ...d.payTriggers, [mk]: { ...d.payTriggers?.[mk], note: x } } })} className="mt-1 text-[9px]" placeholder="trigger condition" />
             </div>
           ))}

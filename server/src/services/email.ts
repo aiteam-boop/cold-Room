@@ -40,10 +40,17 @@ function transporter(): Transporter | null {
 export interface EmailAttachment { filename: string; content: Buffer; contentType?: string }
 export interface EmailInput {
   to: string;
+  cc?: string;
   subject: string;
   html: string;
   text?: string;
   attachments?: EmailAttachment[];
+}
+
+// Everyone who must be copied on every approval email (PO / WO / GRN / payment),
+// regardless of who the approver is. Configurable via env; comma-separated.
+export function approvalCcEmail(): string {
+  return process.env.APPROVAL_CC_EMAIL || 'auditor@crystalgroup.in';
 }
 
 // ── Mailgun HTTP API ─────────────────────────────────────────────────────────
@@ -51,7 +58,7 @@ export interface EmailInput {
 // FormData (Node 18+). Auth is HTTP Basic with username "api" and the API key.
 // FormData (multipart) is used so file attachments — e.g. the PO/WO/GRN PDF —
 // ride along; do NOT set Content-Type, fetch adds the multipart boundary.
-async function sendViaMailgun({ to, subject, html, text, attachments }: EmailInput): Promise<boolean> {
+async function sendViaMailgun({ to, cc, subject, html, text, attachments }: EmailInput): Promise<boolean> {
   const key = process.env.MAILGUN_API_KEY!;
   const domain = process.env.MAILGUN_DOMAIN!;
   const base = (process.env.MAILGUN_REGION || 'US').toUpperCase() === 'EU'
@@ -61,6 +68,7 @@ async function sendViaMailgun({ to, subject, html, text, attachments }: EmailInp
   const form = new FormData();
   form.set('from', fromAddress());
   form.set('to', to);
+  if (cc) form.set('cc', cc);
   form.set('subject', subject);
   form.set('html', html);
   form.set('text', text ?? html.replace(/<[^>]+>/g, ' '));
@@ -84,16 +92,16 @@ async function sendViaMailgun({ to, subject, html, text, attachments }: EmailInp
 
 // Send an email. Never throws — logs and resolves false on failure / no-config
 // so callers can fire-and-forget alongside in-app notifications.
-export async function sendEmail({ to, subject, html, text, attachments }: EmailInput): Promise<boolean> {
+export async function sendEmail({ to, cc, subject, html, text, attachments }: EmailInput): Promise<boolean> {
   if (!to) return false;
   try {
-    if (mailgunEnabled()) return await sendViaMailgun({ to, subject, html, text, attachments });
+    if (mailgunEnabled()) return await sendViaMailgun({ to, cc, subject, html, text, attachments });
     const t = transporter();
     if (!t) {
       console.log(`[email] (disabled — no Mailgun / SMTP) would send to ${to}: ${subject}`);
       return false;
     }
-    await t.sendMail({ from: fromAddress(), to, subject, html, text: text ?? html.replace(/<[^>]+>/g, ' '), attachments });
+    await t.sendMail({ from: fromAddress(), to, cc, subject, html, text: text ?? html.replace(/<[^>]+>/g, ' '), attachments });
     return true;
   } catch (e) {
     console.error('[email] send failed:', e);

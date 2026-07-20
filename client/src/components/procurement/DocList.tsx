@@ -26,6 +26,12 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
     onSuccess: (doc) => { qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }); setOpenId(doc.id); },
     onError: (e) => alert(errMsg(e)),
   });
+  // Only DRAFTs can be deleted — a submitted/approved doc is a record.
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/projects/${projectId}/procurement/docs/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }),
+    onError: (e) => alert(errMsg(e)),
+  });
 
   if (openId) return <DocBuilder projectId={projectId} docId={openId} role={role} onClose={() => { setOpenId(null); qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }); }} />;
   if (isLoading) return <Spinner label="Loading…" />;
@@ -61,7 +67,10 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
                   <td className="text-right font-medium">{money(d.finalAmount)}</td>
                   <td><span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}</span></td>
                   <td><DeliveryPill delivery={d.delivery} /></td>
-                  <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(d.id)}>Open →</button></td>
+                  <td className="px-2 text-right">
+                    {isAdmin && d.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${d.docNumber}? This can't be undone.`) && del.mutate(d.id)}>Delete</button>}
+                    <button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(d.id)}>Open →</button>
+                  </td>
                 </tr>
               ))}
             </tbody>

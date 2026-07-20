@@ -5,7 +5,7 @@
 import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma';
 import { notifyUser } from './notify';
-import { sendEmail, approvalEmailHtml, approvalDocEmailHtml, appBaseUrl, appClientUrl, isEmailEnabled } from './email';
+import { sendEmail, approvalEmailHtml, approvalDocEmailHtml, appBaseUrl, appClientUrl, isEmailEnabled, approvalCcEmail } from './email';
 import { buildMilestones, normalizeTermsSections } from './procurement';
 import { renderProcurementPdf, renderGRNPdf, renderToBuffer } from './procurementPdf';
 import { parseApprover, approverHandlesType, approvalTypeForDoc, type ApprovalType } from '../lib/permissions';
@@ -244,6 +244,8 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
     // Approve / Reject buttons open (helper buildApprovalPdf is kept for reuse).
     await sendEmail({
       to: step.approverEmail,
+      // The auditor is copied on every approval email (PO/WO/GRN/payment).
+      cc: approvalCcEmail(),
       subject: title,
       html: approvalDocEmailHtml({
         label: data.label, docLabelLong: data.docLabelLong, number: data.number,
@@ -265,7 +267,7 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
     return;
   }
   await sendEmail({
-    to: step.approverEmail, subject: title,
+    to: step.approverEmail, cc: approvalCcEmail(), subject: title,
     html: approvalEmailHtml({ heading: title, lines: [`Hi ${step.approverName},`, message, 'Review and record your decision using the button below.'], actionUrl: base, actionLabel: 'Review & Approve' }),
   });
 }

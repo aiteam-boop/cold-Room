@@ -37,9 +37,16 @@ interface DocForPdf {
   promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
-  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; leadTimeText?: string | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
+  customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
 }
+
+const asJson = <T>(v: unknown, fallback: T): T => {
+  if (v == null) return fallback;
+  if (typeof v !== 'string') return v as T;
+  try { return JSON.parse(v) as T; } catch { return fallback; }
+};
 
 const BORDER = '#000000';
 const HEAD_BG = '#0f2942';
@@ -120,10 +127,13 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   cell(L + halfW, y + 12, halfW, shipText, { size: 7.5 });
   y += ivH;
 
-  // ── Line items table (with UOM column) ──
+  // ── Line items table (with UOM + any user-added columns) ──
+  const customCols = asJson<{ key: string; label: string }[]>(doc.customColumns, []);
+  const cW = 58; // width of each user-added column
   const cols = [
     { k: 'sr', t: 'Sr No.', w: 28, align: 'center' as const },
-    { k: 'desc', t: 'Description', w: W - 28 - 42 - 38 - 66 - 78, align: 'left' as const },
+    { k: 'desc', t: 'Description', w: W - 28 - 42 - 38 - 66 - 78 - customCols.length * cW, align: 'left' as const },
+    ...customCols.map((c) => ({ k: `cv:${c.key}`, t: c.label || '', w: cW, align: 'center' as const })),
     { k: 'uom', t: 'UOM', w: 42, align: 'center' as const },
     { k: 'qty', t: 'Qty', w: 38, align: 'center' as const },
     { k: 'rate', t: 'Unit Price', w: 66, align: 'right' as const },
@@ -154,17 +164,24 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     if (y + rowH > PAGE_BOTTOM) { pdf.addPage(); y = L; drawHead(); }
     rect(L, y, W, rowH);
     let vx = L; for (const c of cols) { vx += c.w; if (vx < R) line(vx, y, vx, y + rowH); }
-    cell(colX(0), y, cols[0].w, String(it.srNo), { size: 7.5, align: 'center' });
-    cell(colX(1), y, cols[1].w, it.description, { size: 7.5 });
-    cell(colX(2), y, cols[2].w, it.uom || '', { size: 7.5, align: 'center' });
-    cell(colX(3), y, cols[3].w, it.qty ? it.qty.toLocaleString('en-IN') : '', { size: 7.5, align: 'center' });
-    cell(colX(4), y, cols[4].w, it.unitPrice ? INR(it.unitPrice) : '', { size: 7.5, align: 'right' });
-    cell(colX(5), y, cols[5].w, it.totalPrice ? INR(it.totalPrice) : '', { size: 7.5, align: 'right' });
+    const cv = asJson<Record<string, string>>(it.customValues, {});
+    cols.forEach((c, i) => {
+      let v = '';
+      if (c.k === 'sr') v = String(it.srNo);
+      else if (c.k === 'desc') v = it.description;
+      else if (c.k === 'uom') v = it.uom || '';
+      else if (c.k === 'qty') v = it.qty ? it.qty.toLocaleString('en-IN') : '';
+      else if (c.k === 'rate') v = it.unitPrice ? INR(it.unitPrice) : '';
+      else if (c.k === 'amt') v = it.totalPrice ? INR(it.totalPrice) : '';
+      else if (c.k.startsWith('cv:')) v = cv[c.k.slice(3)] ?? '';
+      cell(colX(i), y, c.w, v, { size: 7.5, align: c.align });
+    });
     y += rowH;
   }
 
-  // ── Totals (right-aligned bordered rows) ──
-  const totLabelX = colX(4), totLabelW = cols[4].w, totValW = cols[5].w;
+  // ── Totals (right-aligned bordered rows) — anchored to the last two columns ──
+  const rateIdx = cols.length - 2;
+  const totLabelX = colX(rateIdx), totLabelW = cols[rateIdx].w, totValW = cols[rateIdx + 1].w;
   const totRow = (label: string, val: string, bold = false) => {
     const h = 15;
     if (y + h > PAGE_BOTTOM) { pdf.addPage(); y = L; }

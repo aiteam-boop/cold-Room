@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg, openAuthedFile } from '../../lib/api';
+import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, KPI, Modal, Spinner } from '../ui';
 import { fmtDate, inr } from '../../lib/format';
@@ -115,7 +115,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                             : ' · tax invoice pending'}
                         </span>
                         <span className="flex items-center gap-3">
-                          <button className="font-medium text-navy hover:underline" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`)}>📄 GRN</button>
+                          <button className="font-medium text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`, `${g.grnNumber || 'GRN'}.pdf`)}>📄 GRN</button>
                           {g.piPdfUrl && <a className="font-medium text-navy hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">📄 PI</a>}
                           {g.invoicePdfUrl && <a className="font-medium text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 Invoice</a>}
                         </span>

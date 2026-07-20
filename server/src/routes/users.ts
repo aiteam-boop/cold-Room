@@ -32,11 +32,13 @@ const projectsInput = z
 
 function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
+  employeeCode?: string | null;
   whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
   lastLoginAt?: Date | null;
 }) {
   return {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
+    employeeCode: u.employeeCode ?? '',
     whatsapp: u.whatsapp ?? '',
     pageAccess: parseGrants(u.pageAccess),
     sectionPerms: parseSections(u.sectionPerms),
@@ -48,7 +50,7 @@ function publicUser(u: {
 
 // Column selection shared by the user endpoints (keeps `approver` included).
 const USER_SELECT = {
-  id: true, name: true, email: true, role: true, active: true,
+  id: true, name: true, email: true, role: true, active: true, employeeCode: true,
   whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
   lastLoginAt: true,
 } as const;
@@ -189,6 +191,7 @@ const createSchema = z.object({
   password: z.string(),
   role: z.enum(ROLES).default('USER'),
   active: z.boolean().default(true),
+  employeeCode: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -213,6 +216,7 @@ router.post(
         passwordHash: await hashPassword(body.password),
         role: body.role,
         active: body.active,
+        employeeCode: body.employeeCode?.trim() || null,
         whatsapp: body.whatsapp || null,
         pageAccess: JSON.stringify(cleanGrants(body.pageAccess)),
         sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)),
@@ -232,6 +236,7 @@ const updateSchema = z.object({
   name: z.string().min(1).optional(),
   role: z.enum(ROLES).optional(),
   active: z.boolean().optional(),
+  employeeCode: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -259,6 +264,7 @@ router.patch(
         ...(body.name !== undefined && { name: body.name }),
         ...(body.role !== undefined && { role: body.role }),
         ...(body.active !== undefined && { active: body.active }),
+        ...(body.employeeCode !== undefined && { employeeCode: body.employeeCode?.trim() || null }),
         ...(body.whatsapp !== undefined && { whatsapp: body.whatsapp || null }),
         ...(body.pageAccess !== undefined && { pageAccess: JSON.stringify(cleanGrants(body.pageAccess)) }),
         ...(body.sectionPerms !== undefined && { sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)) }),

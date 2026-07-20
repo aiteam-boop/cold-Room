@@ -7,13 +7,14 @@
 //     to a response you must classify it, and the leak test (see
 //     unclassifiedSensitiveKeys) fails if a sensitive-looking name is unclassified.
 
-export type RealmKey = 'projects' | 'procurement' | 'timeline' | 'finance' | 'vendors';
+export type RealmKey = 'projects' | 'procurement' | 'timeline' | 'finance' | 'vendors' | 'approvals';
 export type ScopeKey = 'read:core' | 'read:money' | 'read:parties' | 'read:people' | 'read:files' | 'write:tasks';
 
 export const REALMS: { key: RealmKey; label: string; desc: string; requiresScope?: ScopeKey }[] = [
-  { key: 'projects',    label: 'Projects',    desc: 'Projects, status, timelines, completion.' },
-  { key: 'procurement', label: 'Procurement', desc: 'Purchase & work orders, GRNs, BOQ line items.' },
-  { key: 'timeline',    label: 'Timeline',    desc: 'Gantt activities — progress, planned vs actual dates. Task writes need write:tasks.' },
+  { key: 'projects',    label: 'Projects',    desc: 'Projects, team, rooms/zones, milestones, drawings, change orders.' },
+  { key: 'procurement', label: 'Procurement', desc: 'Purchase & work orders, GRNs, BOQ, quotations, documents, payment milestones.' },
+  { key: 'timeline',    label: 'Timeline',    desc: 'Gantt activities, BOQ progress entries, daily progress (DPR). Task writes need write:tasks.' },
+  { key: 'approvals',   label: 'Approvals',   desc: 'Who has to approve what, right now — per person. The pending queue for POs, WOs, GRNs and payments.' },
   { key: 'finance',     label: 'Finance',     desc: 'Vendor payments (FMS) — amounts, status, paid dates.', requiresScope: 'read:money' },
   { key: 'vendors',     label: 'Vendors',     desc: 'The vendor master — names, GSTIN/PAN, contacts.', requiresScope: 'read:parties' },
 ];
@@ -36,19 +37,24 @@ export const SCOPE_KEYS = SCOPES.map((s) => s.key);
 const MONEY = new Set([
   'basicamount', 'finalamount', 'invoicevalue', 'amount', 'amounttopay', 'fullamount', 'balance',
   'unitprice', 'price', 'rate', 'tds', 'tdsamount', 'utr', 'utrnumber', 'paymentreference',
-  'budget', 'budgetamount', 'pivalue', 'gstpct', 'gstamount', 'value', 'total',
+  'budget', 'budgetamount', 'budgetrate', 'budgetqty', 'pivalue', 'gstpct', 'gstamount', 'value', 'total',
+  'costimpact', 'inramount', 'paymentterms',
 ]);
 const PARTY = new Set([
   'client', 'clientname', 'vendor', 'vendorname', 'contact', 'contactperson', 'phone', 'phones',
   'email', 'address', 'siteaddress', 'gstin', 'pan',
 ]);
 const PEOPLE = new Set([
-  'responsible', 'responsiblename', 'employeename', 'filledbyname', 'approvername',
+  'responsible', 'responsiblename', 'responsibleuserid', 'responsibleemail', 'responsibleemployeecode',
+  'approver', 'approvername', 'approveruserid', 'approveremail', 'approveremployeecode',
+  'submittedbyname', 'approvedbyname', 'uploadedbyname', 'handoverbyname', 'raisedbyname',
+  'employeename', 'employeecode', 'filledbyname', 'labourteam',
   'perdiem', 'allowance', 'slab', 'drivername',
 ]);
 const FILES = new Set([
   'pdfurl', 'invoicepdfurl', 'taxinvoicepdfurl', 'pipdfurl', 'kycpdfurl', 'tdsurl', 'drawingurl',
   'photourl', 'fileurl', 'url', 'paymentproofurl', 'packinglisturl',
+  'quotationpdfurl', 'handovercerturl',
 ]);
 // Always stripped, under every scope — never exposed via the public API.
 const HARD_DENY = new Set([

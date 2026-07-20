@@ -8,13 +8,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg, openAuthedFile } from '../../lib/api';
+import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
 import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import ChainBuilder from './ChainBuilder';
 import ApprovalTimeline from './ApprovalTimeline';
 
+interface KycDoc { id: string; kind: string; fileName: string; fileUrl: string }
 interface Payment {
   id: string; paymentNumber: string; status: string; department: string | null;
   piNumber: string | null; piDate: string | null;
@@ -25,6 +26,7 @@ interface Payment {
   gstInclusive: boolean; gstPct: number;
   payTermsSnapshot: PayTerms | null;
   piPdfUrl: string | null; taxInvoicePdfUrl: string | null; kycPdfUrl: string | null;
+  kycDocs?: KycDoc[];
   remark: string | null; paymentReference: string | null; paidAt: string | null; closedAt: string | null; createdAt: string;
 }
 interface PayTerms { advance: number; beforeDelivery: number; running: number; postDelivery: number; postCompletion: number; retention: number }
@@ -45,6 +47,12 @@ export default function FMSView({ projectId, focusId }: { projectId: string; foc
     queryFn: async () => (await api.get(`/projects/${projectId}/fms`)).data.payments as Payment[],
   });
 
+  // A DRAFT payment can be deleted; an approved/paid one can't (server enforces).
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/projects/${projectId}/fms/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['fms', projectId] }),
+    onError: (e) => alert(errMsg(e)),
+  });
   const create = useMutation({
     mutationFn: async () => (await api.post(`/projects/${projectId}/fms`, {})).data.payment as Payment,
     onSuccess: (p) => { qc.invalidateQueries({ queryKey: ['fms', projectId] }); setOpenId(p.id); setCreating(false); },
@@ -89,7 +97,10 @@ export default function FMSView({ projectId, focusId }: { projectId: string; foc
                     <td className="text-right font-medium">{money(p.amountToPay)}</td>
                     <td className="text-right">{money(p.balance)}</td>
                     <td><span className={`badge ${docStatusPill(p.status)}`}>{titleize(p.status)}</span></td>
-                    <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(p.id)}>Open →</button></td>
+                    <td className="px-2 text-right">
+                      {editable && p.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${p.paymentNumber}? This can't be undone.`) && del.mutate(p.id)}>Delete</button>}
+                      <button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(p.id)}>Open →</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -115,8 +126,10 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
 
   const { data } = useQuery({
     queryKey: ['fms-doc', paymentId],
-    queryFn: async () => { const r = (await api.get(`/projects/${projectId}/fms/${paymentId}`)).data; setP(structuredClone(r.payment)); return r as { payment: Payment; approval: any }; },
+    queryFn: async () => { const r = (await api.get(`/projects/${projectId}/fms/${paymentId}`)).data; setP(structuredClone(r.payment)); return r as { payment: Payment & { kycDocs?: KycDoc[] }; approval: any }; },
   });
+  // The vendor's on-file KYC set, resolved server-side from the vendor master.
+  const kycDocs: KycDoc[] = data?.payment?.kycDocs ?? [];
   const poOpts = useQuery({ queryKey: ['fms-pos', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/fms/po-options`)).data.pos as POOption[] });
 
   // Load the PO's milestones when a doc is set (on open or after selecting a PO).
@@ -152,8 +165,27 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   });
 
   const upload = useMutation({
-    mutationFn: async ({ kind, file }: { kind: 'pi' | 'kyc' | 'tax-invoice'; file: File }) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/fms/${paymentId}/${kind}`, fd); },
-    onSuccess: () => { setMsg({ ok: true, t: 'Uploaded.' }); refresh(); },
+    mutationFn: async ({ kind, file }: { kind: 'pi' | 'kyc' | 'tax-invoice'; file: File }) => {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await api.post(`/projects/${projectId}/fms/${paymentId}/${kind}`, fd);
+      return { kind, data: r.data };
+    },
+    onSuccess: ({ kind, data }) => {
+      // A PI is read on upload — fill what it told us, never clobbering a typed
+      // value. No refresh on that path: the server doesn't know these yet, so a
+      // refetch would wipe them before the user can Save.
+      const x = kind === 'pi' ? (data?.extracted as { piNumber?: string; piDate?: string; piValue?: number; source?: string } | undefined) : undefined;
+      const got: string[] = [];
+      if (x && x.source !== 'none' && p) {
+        const patch: Partial<Payment> = { piPdfUrl: data.piPdfUrl ?? p.piPdfUrl };
+        if (x.piNumber && !p.piNumber) { patch.piNumber = x.piNumber; got.push('number'); }
+        if (x.piDate && !p.piDate) { patch.piDate = x.piDate; got.push('date'); }
+        if (x.piValue != null && !p.fullAmount) { patch.fullAmount = x.piValue; got.push('value'); }
+        setP({ ...p, ...patch });
+      }
+      setMsg({ ok: true, t: got.length ? `PI uploaded — read its ${got.join(', ')}. Check them, then Save.` : 'Uploaded.' });
+      if (!got.length) refresh();
+    },
     onError: (e) => setMsg({ ok: false, t: errMsg(e) }),
   });
 
@@ -182,8 +214,11 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
         fullAmount: p.fullAmount || r.finalAmount || 0,
         gstInclusive: p.gstInclusive || !!r.gstEnabled,
         gstPct: r.gstPct ?? p.gstPct,
+        // The vendor's KYC is already on file against the vendor master, so attach
+        // it rather than asking for it again. An explicitly uploaded one wins.
+        kycPdfUrl: p.kycPdfUrl ?? r.kycPdfUrl ?? null,
       });
-      if (r.kycPdfUrl && !p.kycPdfUrl) setMsg({ ok: true, t: 'Vendor KYC on file — it will attach automatically.' });
+      if (r.kycPdfUrl && !p.kycPdfUrl) setMsg({ ok: true, t: 'Vendor KYC on file — attached from the vendor.' });
     } catch (e) { setMsg({ ok: false, t: errMsg(e) }); }
   }
 
@@ -303,12 +338,23 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
             {p.taxInvoicePdfUrl ? <button className="text-sm text-navy hover:underline" onClick={() => openFile(p.taxInvoicePdfUrl!)}>📄 View Tax Invoice</button> : <span className="text-xs text-slate-400">Comes after payment</span>}
             {editable && p.status !== 'CLOSED' && <input type="file" className="input mt-1 text-xs" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'tax-invoice', file: e.target.files[0] })} />}
           </F>
-          <F label="Vendor KYC PDF">
-            {p.kycPdfUrl ? <button className="text-sm text-navy hover:underline" onClick={() => openFile(p.kycPdfUrl!)}>📄 View KYC</button> : <span className="text-xs text-slate-400">Not uploaded</span>}
-            {canDo && <input type="file" className="input mt-1 text-xs" onChange={(e) => e.target.files?.[0] && upload.mutate({ kind: 'kyc', file: e.target.files[0] })} />}
+          {/* KYC is held against the vendor master — the whole set is listed here
+              rather than re-uploaded per payment. */}
+          <F label={`Vendor KYC${kycDocs.length ? ` (${kycDocs.length})` : ''}`}>
+            {kycDocs.length ? (
+              <div className="space-y-0.5">
+                {kycDocs.map((d) => (
+                  <button key={d.id} className="block text-sm text-navy hover:underline" title={d.fileName} onClick={() => openFile(d.fileUrl)}>
+                    📄 {d.kind.replace(/_/g, ' ')}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="text-xs text-amber-600">Vendor’s KYC is not uploaded — add it on the vendor.</span>
+            )}
           </F>
           <F label="PO (attached)">
-            {p.docId ? <button className="text-sm text-navy hover:underline" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${p.docId}/pdf`)}>📄 Open {p.poNumber}</button> : <span className="text-xs text-slate-400">No PO selected</span>}
+            {p.docId ? <button className="text-sm text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${p.docId}/pdf`, `${p.poNumber || 'PO'}.pdf`)}>📄 {p.poNumber}</button> : <span className="text-xs text-slate-400">No PO selected</span>}
           </F>
         </div>
 

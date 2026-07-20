@@ -12,6 +12,8 @@ import {
 import { maskFinancials } from '../lib/financial';
 import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
+import { extractPiFields } from '../services/piExtract';
+import { scheduleSheetSync } from '../services/sheetsSync';
 import {
   COMPANY, nextDocNumber, computeTotals, paymentTotalPct,
   defaultPOSections, defaultWOSections,
@@ -114,6 +116,9 @@ function serializeDoc(d: any) {
     // isCustom), even for documents saved before those flags existed.
     termsSections: normalizeTermsSections(parseJson(d.termsSections, [])),
     payTriggers: parseJson(d.payTriggers, {}),
+    // User-added item columns + each line's values for them.
+    customColumns: parseJson(d.customColumns, []),
+    ...(Array.isArray(d.lineItems) ? { lineItems: d.lineItems.map((l: any) => ({ ...l, customValues: parseJson(l.customValues, {}) })) } : {}),
     overrides: parseJson(d.overrides, {}),
     amendments: parseJson(d.amendments, []),
     // The persisted "compare against" BOQ items on the Budget vs Actual panel (§5).
@@ -206,6 +211,7 @@ const lineSchema = z.object({
   uom: z.string().optional().nullable(), qty: z.coerce.number().catch(0).default(0),
   unitPrice: z.coerce.number().catch(0).default(0), totalPrice: z.coerce.number().optional(),
   isLeadTime: z.boolean().optional(), leadTimeText: z.string().optional().nullable(),
+  customValues: z.any().optional(), // { [colKey]: value } for user-added columns
   // Links this PO line back to the BOQ item it fulfils — the join that powers
   // the BOQ Cost view (Sprint PRD §6.3). Optional but strongly recommended.
   boqItemId: z.string().nullable().optional(),
@@ -227,6 +233,8 @@ const updateSchema = z.object({
   basicAmount: num, gstAmount: num, finalAmount: num,
   payAdvancePct: num, payBeforeDeliveryPct: num, payRunningPct: num,
   payPostDeliveryPct: num, payPostCompletionPct: num, payRetentionPct: num,
+  payGstInclusive: z.boolean().optional(),
+  customColumns: z.any().optional(),
   payTriggers: z.any().optional(),
   termsSections: z.array(z.object({
     title: z.string(), text: z.string().default(''),
@@ -286,7 +294,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, leadTimeText: li.leadTimeText ?? null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
     }
     totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
@@ -319,6 +327,8 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
       ...(b.payPostDeliveryPct !== undefined && { payPostDeliveryPct: b.payPostDeliveryPct }),
       ...(b.payPostCompletionPct !== undefined && { payPostCompletionPct: b.payPostCompletionPct }),
       ...(b.payRetentionPct !== undefined && { payRetentionPct: b.payRetentionPct }),
+      ...(b.payGstInclusive !== undefined && { payGstInclusive: b.payGstInclusive }),
+      ...(b.customColumns !== undefined && { customColumns: JSON.stringify(b.customColumns) }),
       ...(b.payTriggers !== undefined && { payTriggers: JSON.stringify(b.payTriggers) }),
       ...(termsSections !== undefined && { termsSections: JSON.stringify(termsSections) }),
       ...(b.overrides !== undefined && { overrides: JSON.stringify(b.overrides) }),
@@ -455,6 +465,21 @@ router.post('/docs/:docId/recall', requireProjectMember, requireAnyEdit(...DOC_P
   res.json({ doc: serializeDoc(updated) });
 }));
 
+// DELETE .../docs/:docId — remove a DRAFT PO/WO. Only DRAFTs can be deleted; once
+// a document is submitted/approved it is a record and must be recalled/amended,
+// never deleted.
+router.delete('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHandler(async (req, res) => {
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
+  if (!doc) throw notFound();
+  if (doc.status !== 'DRAFT') throw forbidden('Only a draft can be deleted. Submitted or approved documents cannot be removed.');
+  // Line items cascade on delete; clear the loose bits that don't.
+  await prisma.approvalStep.deleteMany({ where: { docType: doc.type, docId: doc.id } });
+  await prisma.paymentMilestone.deleteMany({ where: { docId: doc.id } });
+  await prisma.procurementDoc.delete({ where: { id: doc.id } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_DELETE', entity: 'ProcurementDoc', entityId: doc.id, details: { docNumber: doc.docNumber, type: doc.type } });
+  res.json({ ok: true });
+}));
+
 // POST .../docs/:docId/approve — approve the CURRENT chain step (or, if no chain
 // was set, a direct admin/canApprove approval). Final approval e-signs + builds
 // milestones via finalizeApproval(). requireProjectMember is intentionally NOT
@@ -511,12 +536,22 @@ router.post('/docs/:docId/remind', requireProjectMember, asyncHandler(async (req
   res.json({ ok: true });
 }));
 
+// Build a human, filesystem-safe PDF name: "<number>-<vendor>-<project>.pdf",
+// e.g. "PO-IN801-A ONE INDUSTRIES-FKI Bhopal.pdf". Invalid path characters are
+// stripped and empty parts dropped so the name never breaks a download.
+function pdfFileName(...parts: (string | null | undefined)[]): string {
+  const clean = parts
+    .map((p) => (p || '').replace(/[\\/:*?"<>|\n\r]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  return (clean.join('-') || 'document') + '.pdf';
+}
+
 // GET .../docs/:docId/pdf — render the PO/WO PDF.
 router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES), requireFinancialView, asyncHandler(async (req, res) => {
-  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { sortOrder: 'asc' } } } });
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { sortOrder: 'asc' } }, project: { select: { name: true } } } });
   if (!doc) throw notFound();
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${doc.docNumber}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name)}"`);
   renderProcurementPdf({ ...doc, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res);
 }));
 
@@ -730,7 +765,7 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
     where: { id: req.params.grnId, projectId: req.params.projectId },
     include: {
       lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
-      doc: { select: { docNumber: true, type: true, finalAmount: true } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
     },
   });
   if (!grn) throw notFound();
@@ -739,8 +774,23 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
   // advance already paid, which auto-fills to compute the balance.
   const milestones = await milestonesForDoc(grn.docId);
   const advanceOnPo = await advancePaidOnDoc(grn.docId);
-  res.json({ grn: serializeGrn(grn, req.account), approval, milestones, advanceOnPo });
+  // The vendor's KYC already lives on the vendor master, so the payment section
+  // shows it rather than asking for it again — read-only, never re-uploaded here.
+  const kycDocs = await vendorKycDocs(grn.doc?.vendorId ?? null);
+  res.json({ grn: serializeGrn(grn, req.account), approval, milestones, advanceOnPo, kycDocs });
 }));
+
+/** EVERY KYC document on file for a vendor (GST certificate, PAN, cancelled
+ *  cheque, …) — the whole set, not just the newest one. */
+export async function vendorKycDocs(vendorId: string | null) {
+  if (!vendorId) return [];
+  const docs = await prisma.procurementDocument.findMany({
+    where: { vendorId, type: 'KYC' },
+    orderBy: { uploadedAt: 'desc' },
+    select: { id: true, kycKind: true, fileName: true, fileUrl: true },
+  });
+  return docs.map((d) => ({ id: d.id, kind: d.kycKind || 'KYC', fileName: d.fileName, fileUrl: d.fileUrl }));
+}
 
 // Accept null on optional fields — the client sends null (not undefined) for
 // empty text inputs and for line-item remarks pulled straight from the DB.
@@ -751,7 +801,7 @@ const grnUpdate = z.object({
   // Payment (§3): which PO milestone is being paid, the PI that drives it, and
   // the (editable, possibly partial) amount to pay.
   milestoneId: z.string().nullable().optional(), milestoneKey: z.string().nullable().optional(), milestoneName: z.string().nullable().optional(),
-  piNumber: z.string().nullable().optional(), piDate: z.string().nullable().optional(), piValue: z.coerce.number().nullable().optional(),
+  piNumber: z.string().nullable().optional(), piDate: z.string().nullable().optional(), paymentDueDate: z.string().nullable().optional(), piValue: z.coerce.number().nullable().optional(),
   amountToPay: z.coerce.number().nullable().optional(),
   lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
   // Required to amend an APPROVED GRN — the reason for the post-approval change.
@@ -792,7 +842,7 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
       ...(b.vehicleNumber !== undefined && { vehicleNumber: b.vehicleNumber }), ...(b.driverName !== undefined && { driverName: b.driverName }), ...(b.deliveryChallanNumber !== undefined && { deliveryChallanNumber: b.deliveryChallanNumber }),
       ...(b.invoiceNumber !== undefined && { invoiceNumber: b.invoiceNumber }), ...(b.invoiceDate !== undefined && { invoiceDate: b.invoiceDate ? new Date(b.invoiceDate) : null }), ...(b.invoiceValue !== undefined && { invoiceValue: b.invoiceValue }), ...(b.ewayBillNumber !== undefined && { ewayBillNumber: b.ewayBillNumber }),
       ...(b.milestoneId !== undefined && { milestoneId: b.milestoneId }), ...(b.milestoneKey !== undefined && { milestoneKey: b.milestoneKey }), ...(b.milestoneName !== undefined && { milestoneName: b.milestoneName }),
-      ...(b.piNumber !== undefined && { piNumber: b.piNumber }), ...(b.piDate !== undefined && { piDate: b.piDate ? new Date(b.piDate) : null }), ...(b.piValue !== undefined && { piValue: b.piValue }),
+      ...(b.piNumber !== undefined && { piNumber: b.piNumber }), ...(b.piDate !== undefined && { piDate: b.piDate ? new Date(b.piDate) : null }), ...(b.paymentDueDate !== undefined && { paymentDueDate: b.paymentDueDate ? new Date(b.paymentDueDate) : null }), ...(b.piValue !== undefined && { piValue: b.piValue }),
       ...(b.amountToPay !== undefined && { amountToPay: b.amountToPay }),
       ...(amendments !== undefined && { amendments }),
     },
@@ -803,6 +853,10 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
   } else if (closingTaxInvoice) {
     await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_TAX_INVOICE', entity: 'GRN', entityId: grn.id, details: { invoiceNumber: b.invoiceNumber, invoiceValue: b.invoiceValue } });
   }
+  // A DRAFT GRN's save (PI number/date/value, amount, due date, tax-invoice
+  // details) isn't audited above, but it still changes what the FMS sheet shows —
+  // so reflect EVERY successful save, not just approved-GRN amendments.
+  scheduleSheetSync();
   res.json({ grn: serializeGrn(updated, req.account) });
 }));
 
@@ -831,7 +885,11 @@ router.post('/grns/:grnId/pi', requireProjectMember, requireEdit('grn'), upload.
   const fileUrl = `/uploads/${req.file.filename}`;
   const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { piPdfUrl: fileUrl } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
-  res.json({ ok: true, piPdfUrl: grn.piPdfUrl });
+  // Read the PI so the number / date / value fill themselves. Best-effort: a
+  // reader failure must never block the upload, so it is returned as a suggestion.
+  const extracted = await extractPiFields(req.file.path, req.file.mimetype);
+  scheduleSheetSync(); // reflect the new PI (link + read values) onto the FMS sheet
+  res.json({ ok: true, piPdfUrl: grn.piPdfUrl, extracted });
 }));
 
 // Upload a photo of the received material (optional — Sprint PRD §7.2).
@@ -840,7 +898,19 @@ router.post('/grns/:grnId/photo', requireProjectMember, requireEdit('grn'), uplo
   const fileUrl = `/uploads/${req.file.filename}`;
   const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { photoUrl: fileUrl } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PHOTO', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  scheduleSheetSync();
   res.status(201).json({ ok: true, photoUrl: grn.photoUrl });
+}));
+
+// DELETE .../grns/:grnId — remove a DRAFT GRN only. Once approved it's a record.
+router.delete('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (grn.status !== 'DRAFT') throw forbidden('Only a draft GRN can be deleted. A submitted or approved GRN cannot be removed.');
+  await prisma.approvalStep.deleteMany({ where: { docType: 'GRN', docId: grn.id } });
+  await prisma.gRN.delete({ where: { id: grn.id } }); // GRN line items cascade
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_DELETE', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber } });
+  res.json({ ok: true });
 }));
 
 router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
@@ -964,6 +1034,7 @@ router.post('/grns/:grnId/payment-proof', requireProjectMember, requireSection('
   if (!req.file) throw badRequest('No file uploaded');
   const fileUrl = `/uploads/${req.file.filename}`;
   const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { paymentProofUrl: fileUrl } });
+  scheduleSheetSync();
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PAYMENT_PROOF', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
   res.json({ ok: true, paymentProofUrl: grn.paymentProofUrl });
 }));
@@ -972,10 +1043,10 @@ router.post('/grns/:grnId/payment-proof', requireProjectMember, requireSection('
 // entered — so it is NOT behind requireFinancialView: the site engineer who
 // raised it must be able to open their own document (Sprint PRD §7.3).
 router.get('/grns/:grnId/pdf', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
-  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true } } } });
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true } }, project: { select: { name: true } } } });
   if (!grn) throw notFound();
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${grn.grnNumber}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(grn.grnNumber, grn.vendorName, grn.project?.name)}"`);
   renderGRNPdf({ ...grn, docNumber: grn.doc.docNumber } as any, res);
 }));
 

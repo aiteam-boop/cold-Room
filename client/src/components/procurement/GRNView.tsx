@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg, openAuthedFile } from '../../lib/api';
+import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
 import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
@@ -23,6 +23,12 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
   const raise = useMutation({
     mutationFn: (docId: string) => api.post(`/projects/${projectId}/procurement/grns`, { docId }),
     onSuccess: (r) => { setRaising(false); qc.invalidateQueries({ queryKey: ['grns', projectId] }); setOpenId(r.data.grn.id); },
+    onError: (e) => alert(errMsg(e)),
+  });
+  // Draft GRNs can be deleted; approved/submitted ones are records.
+  const delGrn = useMutation({
+    mutationFn: (id: string) => api.delete(`/projects/${projectId}/procurement/grns/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['grns', projectId] }),
     onError: (e) => alert(errMsg(e)),
   });
 
@@ -93,7 +99,10 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
                       <div className="mt-0.5 text-[10px] leading-tight text-orange-600">tax invoice pending</div>
                     )}
                   </td>
-                  <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(g.id)}>Open →</button></td>
+                  <td className="px-2 text-right">
+                    {canRaise && g.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${g.grnNumber}? This can't be undone.`) && delGrn.mutate(g.id)}>Delete</button>}
+                    <button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(g.id)}>Open →</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -112,13 +121,32 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   // null-check is the whole rule here.
   const money = (n: number | null | undefined) => (n == null ? '—' : inr(n));
   const [g, setG] = useState<any>(null);
+  // True while piValue is just the PO's default (not typed) — a PI upload may replace it.
+  const piValueFromPo = useRef(false);
   const [msg, setMsg] = useState('');
   const [showChain, setShowChain] = useState(false);
   const [amending, setAmending] = useState(false);
   const [amendRemark, setAmendRemark] = useState('');
   const [askResubmit, setAskResubmit] = useState(false);
   const [resubmitMode, setResubmitMode] = useState(false);
-  const grnQ = useQuery({ queryKey: ['grn', grnId], queryFn: async () => { const res = (await api.get(`/projects/${projectId}/procurement/grns/${grnId}`)).data; setG(structuredClone(res.grn)); return res as { grn: any; approval?: any; milestones?: any[]; advanceOnPo?: number }; } });
+  const grnQ = useQuery({
+    queryKey: ['grn', grnId],
+    queryFn: async () => {
+      const res = (await api.get(`/projects/${projectId}/procurement/grns/${grnId}`)).data;
+      const grn = structuredClone(res.grn);
+      // Auto-fetch the PI value from the PO's final amount, exactly as the
+      // vendor-payment (FMS) form does — still editable if the vendor's actual
+      // proforma differs. Never overwrite a value already entered. The flag lets a
+      // PI upload replace this default (the PI is the authority) without ever
+      // replacing a figure the user typed.
+      if ((grn.piValue == null || grn.piValue === '') && grn.doc?.finalAmount != null) {
+        grn.piValue = grn.doc.finalAmount;
+        piValueFromPo.current = true;
+      }
+      setG(grn);
+      return res as { grn: any; approval?: any; milestones?: any[]; advanceOnPo?: number };
+    },
+  });
   const isLoading = grnQ.isLoading;
 
   const save = useMutation({
@@ -127,7 +155,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       invoiceNumber: g.invoiceNumber, invoiceDate: g.invoiceDate?.slice?.(0, 10), invoiceValue: g.invoiceValue ? Number(g.invoiceValue) : undefined, ewayBillNumber: g.ewayBillNumber,
       // Payment (GRN/Payment PRD v3 §3) — the milestone being paid, the PI, and the amount.
       milestoneId: g.milestoneId ?? null, milestoneKey: g.milestoneKey ?? null, milestoneName: g.milestoneName ?? null,
-      piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, piValue: g.piValue != null && g.piValue !== '' ? Number(g.piValue) : null,
+      piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, paymentDueDate: g.paymentDueDate?.slice?.(0, 10) || null, piValue: g.piValue != null && g.piValue !== '' ? Number(g.piValue) : null,
       amountToPay: g.amountToPay != null && g.amountToPay !== '' ? Number(g.amountToPay) : null,
       lineItems: g.lineItems.map((l: any) => ({ id: l.id, receiptQty: Number(l.receiptQty), defectQty: Number(l.defectQty || 0), remarks: l.remarks })),
       ...(amending ? { amendmentRemark: amendRemark } : {}),
@@ -149,7 +177,24 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   });
   const uploadPI = useMutation({
     mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/pi`, fd); },
-    onSuccess: () => { setMsg('PI uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
+    onSuccess: (r) => {
+      // The PI was read on upload. Fill what it told us — it may override the PO's
+      // default PI value (the PI itself is the authority on that), but never a
+      // value the user actually typed. No refetch: the server hasn't been told
+      // these yet, so a refetch would wipe them before the user can Save.
+      const x = r?.data?.extracted as { piNumber?: string; piDate?: string; piValue?: number; source?: string } | undefined;
+      const patch: Record<string, unknown> = {};
+      const got: string[] = [];
+      if (r?.data?.piPdfUrl) patch.piPdfUrl = r.data.piPdfUrl;
+      if (x && x.source !== 'none') {
+        if (x.piNumber && !g.piNumber) { patch.piNumber = x.piNumber; got.push('number'); }
+        if (x.piDate && !g.piDate) { patch.piDate = x.piDate; got.push('date'); }
+        const piUntouched = g.piValue == null || g.piValue === '' || piValueFromPo.current;
+        if (x.piValue != null && piUntouched) { patch.piValue = x.piValue; piValueFromPo.current = false; got.push('value'); }
+      }
+      setG({ ...g, ...patch });
+      setMsg(got.length ? `PI uploaded — read its ${got.join(', ')}. Check them, then Save.` : 'PI uploaded.');
+    },
     onError: (e) => setMsg(errMsg(e)),
   });
   const uploadPhoto = useMutation({
@@ -202,8 +247,13 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   // which auto-captures so the balance can compute.
   const milestones: any[] = grnQ.data?.milestones ?? [];
   const advanceOnPo: number = grnQ.data?.advanceOnPo ?? 0;
+  // The vendor's KYC set (GST certificate, PAN, cancelled cheque, …), resolved
+  // from the vendor master — shown here, never uploaded here.
+  const kycDocs: { id: string; kind: string; fileName: string; fileUrl: string }[] = (grnQ.data as any)?.kycDocs ?? [];
   const piValueNum = Number(g.piValue) || 0;
-  const balanceToPay = Math.max(Math.round((piValueNum - advanceOnPo) * 100) / 100, 0);
+  // Live balance, same formula as the vendor-payment (FMS) form:
+  // PI value − (advance already on the PO + what this entry pays).
+  const balanceToPay = Math.round((piValueNum - advanceOnPo - (Number(g.amountToPay) || 0)) * 100) / 100;
   const isMilestoneLocked = (m: any) => m.status === 'PAID' || m.status === 'TRIGGERED';
   // Payment lifecycle (§6): TRIGGERED → PAID → CLOSED, running alongside the
   // goods/approval status. A GRN can be PAID but still OPEN (tax invoice pending).
@@ -240,7 +290,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         </div>
         <div className="flex gap-2">
           {canRecordPaid && <button className="btn-primary text-sm" disabled={markPaid.isPending} onClick={doMarkPaid}>💳 Mark Paid</button>}
-          {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`)}>📄 PDF</button>}
+          {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`, `${g?.grnNumber || 'GRN'}.pdf`)}>📄 Download PDF</button>}
           {approved && canEditGrn && !amending && <button className="btn-outline text-sm" onClick={() => { setAmending(true); setMsg(''); }}>✎ Amend</button>}
           {amending && <button className="btn-outline text-sm" onClick={() => { setAmending(false); setAmendRemark(''); setG(structuredClone(grnQ.data!.grn)); }}>Cancel amend</button>}
           {editable && (
@@ -251,7 +301,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           {(g.status === 'DRAFT' || g.status === 'ON_HOLD') && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>{g.status === 'ON_HOLD' ? 'Resubmit' : 'Submit'}</button>}
           {g.status === 'OPEN' && hasChain && <button className="btn-outline text-sm" disabled={act.isPending} onClick={() => act.mutate({ verb: 'remind' })}>Send Reminder</button>}
           {/* Approvers see the document itself before deciding. */}
-          {canAct && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`)}>📄 View GRN</button>}
+          {canAct && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`, `${g?.grnNumber || 'GRN'}.pdf`)}>📄 Download GRN</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
           {canAct && <button className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600" onClick={() => promptRemarks('hold')}>⏸ Put On Hold</button>}
         </div>
@@ -371,52 +421,141 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         </div>
       </div>
 
-      {/* Payment (GRN/Payment PRD v3 §3) — Amisha pays the vendor from the GRN:
-          pick the payment term, upload the PI (drives the payment), and the
-          advance already paid on the PO auto-fills so the balance computes. On
-          GRN approval the chosen milestone is triggered into the Payment Pipeline. */}
       <div className="card p-4">
-        <div className="mb-1 text-sm font-semibold text-slate-600">Payment</div>
+        <div className="mb-1 text-sm font-semibold text-slate-600">Tax Invoice {isPaymentGrn ? '(arrives later — closes the entry)' : '(mandatory before submit)'}</div>
+        <p className="mb-3 text-xs text-slate-400">{isPaymentGrn ? 'The tax invoice comes AFTER payment. Uploading it on a paid GRN closes the entry and it leaves the bucket. Not required to submit — payment runs on the PI above.' : "Enter the value from the vendor's actual tax invoice — an invoice may cover only part of the PO. This is what flows into the payment pipeline as “Amount Invoiced”."}</p>
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <G label={`Invoice Number${isPaymentGrn ? '' : ' *'}`} v={g.invoiceNumber} on={(x) => setG({ ...g, invoiceNumber: x })} ed={taxInvoiceEditable} />
+            <F label={`Invoice Date${isPaymentGrn ? '' : ' *'}`}><input className="input" type="date" disabled={!taxInvoiceEditable} value={g.invoiceDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, invoiceDate: e.target.value })} /></F>
+            <G label={`Invoice Value (INR)${isPaymentGrn ? '' : ' *'}`} v={g.invoiceValue} on={(x) => setG({ ...g, invoiceValue: x })} ed={taxInvoiceEditable} />
+            <G label="E-Way Bill Number" v={g.ewayBillNumber} on={(x) => setG({ ...g, ewayBillNumber: x })} ed={taxInvoiceEditable} />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <F label={`Tax Invoice PDF${isPaymentGrn ? ' (closes the entry)' : ' *'}`}>
+              {g.invoicePdfUrl
+                ? <a className="text-sm text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 View invoice</a>
+                : <span className="text-xs text-slate-400">{isPaymentGrn ? 'Comes after payment' : 'Not uploaded'}</span>}
+              {canUploadTaxInvoice && <input className="input mt-1 text-xs" type="file" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} />}
+            </F>
+            <F label="Material Photo">
+              {g.photoUrl
+                ? <a className="text-sm text-navy hover:underline" href={g.photoUrl} target="_blank" rel="noreferrer">🖼 View photo</a>
+                : <span className="text-xs text-slate-400">Not uploaded</span>}
+              {editable && <input className="input mt-1 text-xs" type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && uploadPhoto.mutate(e.target.files[0])} />}
+            </F>
+          </div>
+        </div>
+        {/* On an approved payment GRN the main Save is hidden (it would demand an
+            amendment reason), so the tax invoice gets its own save — no reason needed. */}
+        {showTaxInvoiceSave && (
+          <div className="mt-3 flex items-center gap-2">
+            <button className="btn-primary text-sm" disabled={saveTaxInvoice.isPending} onClick={() => saveTaxInvoice.mutate()}>Save tax invoice</button>
+            <span className="text-[11px] text-slate-400">Recording the tax invoice is the closing step — no amendment reason needed.</span>
+          </div>
+        )}
+      </div>
+
+      {/* Payment sits BELOW the tax invoice and mirrors the vendor-payment (FMS)
+          form field-for-field, so both payment screens read identically. The flow
+          itself is unchanged: pick the term, upload the PI (which drives the
+          payment), and on GRN approval the milestone triggers into the Payment
+          Pipeline. (GRN/Payment PRD v3 §3) */}
+      <div className="card p-4">
+        <div className="mb-1 text-sm font-semibold text-slate-600">Vendor Payment</div>
         <p className="mb-3 text-xs text-slate-400">Pick which payment term is being paid, upload the vendor's Proforma Invoice (PI), and enter the amount. Already-paid terms are greyed out. The advance already paid on this PO is captured automatically; the balance is editable so you can pay partially.</p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <label className="label">Payment Term</label>
-            <select
-              className="input"
-              disabled={!editable}
-              value={g.milestoneId || ''}
-              onChange={(e) => {
-                const m = milestones.find((x) => x.id === e.target.value);
-                setG({ ...g, milestoneId: m?.id ?? null, milestoneKey: m?.fieldKey ?? null, milestoneName: m?.name ?? null });
-              }}
-            >
-              <option value="">Select a payment term…</option>
-              {milestones.map((m) => (
-                <option key={m.id} value={m.id} disabled={isMilestoneLocked(m) && m.id !== g.milestoneId}>
-                  {m.name}{m.percentage ? ` (${m.percentage}%)` : ''}{m.inrAmount != null ? ` — ${inr(m.inrAmount)}` : ''}{isMilestoneLocked(m) ? ` · ${titleize(m.status)}` : ''}
-                </option>
-              ))}
-            </select>
-            {milestones.length === 0 && <div className="mt-1 text-[11px] text-slate-400">This PO has no payment terms defined.</div>}
+        <div className="space-y-4">
+          {/* Who / PI — the PO and vendor are fixed: this GRN is raised against them. */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <F label="Department"><input className="input bg-slate-50 text-slate-600" value="Cold Room" disabled readOnly /></F>
+            <G label="PI Number" v={g.piNumber} on={(x) => setG({ ...g, piNumber: x })} ed={editable} />
+            <F label="PI Date"><input className="input" type="date" disabled={!editable} value={g.piDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, piDate: e.target.value })} /></F>
           </div>
-          <div>
-            <label className="label">PI PDF {g.piPdfUrl && <a className="text-green-600 hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label>
-            <input className="input text-xs" type="file" accept=".pdf,image/*" disabled={!editable} onChange={(e) => e.target.files?.[0] && uploadPI.mutate(e.target.files[0])} />
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            {/* When Accounts must pay by — carried straight to the FMS sheet. */}
+            <F label="Payment Due Date"><input className="input" type="date" disabled={!editable} value={g.paymentDueDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, paymentDueDate: e.target.value })} /></F>
+            <F label="PO Number (terms fetched)"><input className="input bg-slate-50 text-slate-600" value={g.doc?.docNumber ?? '—'} disabled readOnly /></F>
+            <F label="Vendor"><input className="input bg-slate-50 text-slate-600" value={g.vendorName ?? '—'} disabled readOnly /></F>
+            <F label="Which payment (term)">
+              <select
+                className="input"
+                disabled={!editable}
+                value={g.milestoneId || ''}
+                onChange={(e) => {
+                  const m = milestones.find((x) => x.id === e.target.value);
+                  // Picking a term pre-fills what it's worth (still editable for a
+                  // partial payment) — same behaviour as the vendor-payment form.
+                  setG({
+                    ...g, milestoneId: m?.id ?? null, milestoneKey: m?.fieldKey ?? null, milestoneName: m?.name ?? null,
+                    amountToPay: m?.inrAmount != null ? m.inrAmount : g.amountToPay,
+                  });
+                }}
+              >
+                <option value="">Select a payment term…</option>
+                {milestones.map((m) => (
+                  <option key={m.id} value={m.id} disabled={isMilestoneLocked(m) && m.id !== g.milestoneId}>
+                    {m.name}{m.percentage ? ` (${m.percentage}%)` : ''}{m.inrAmount != null ? ` — ${inr(m.inrAmount)}` : ''}{isMilestoneLocked(m) ? ` · ${titleize(m.status)}` : ''}
+                  </option>
+                ))}
+              </select>
+              {milestones.length === 0 && <div className="mt-1 text-[11px] text-slate-400">This PO has no payment terms defined.</div>}
+            </F>
           </div>
-          <G label="PI Number" v={g.piNumber} on={(x) => setG({ ...g, piNumber: x })} ed={editable} />
-          <div><label className="label">PI Date</label><input className="input" type="date" disabled={!editable} value={g.piDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, piDate: e.target.value })} /></div>
-          <G label="PI Value (INR)" v={g.piValue} on={(x) => setG({ ...g, piValue: x })} ed={editable} />
-          <div>
-            <label className="label">Advance already paid on PO</label>
-            <input className="input bg-slate-50 text-slate-500" disabled value={inr(advanceOnPo)} readOnly />
+
+          <div className="grid gap-3 sm:grid-cols-4">
+            <G label="PI / Invoice Value (final)" v={g.piValue} on={(x) => setG({ ...g, piValue: x })} ed={editable} />
+            <F label="Advance already paid (on PO)"><input className="input bg-slate-50 text-slate-600" disabled value={inr(advanceOnPo)} readOnly /></F>
+            <F label="Amount to Pay (editable — can be partial)">
+              <input className="input" type="number" disabled={!editable} value={g.amountToPay ?? ''} placeholder={String(balanceToPay)} onChange={(e) => setG({ ...g, amountToPay: e.target.value })} />
+            </F>
+            <F label="Balance to Pay (auto)"><input className="input bg-slate-50 font-semibold text-navy" disabled value={inr(balanceToPay)} readOnly /></F>
           </div>
-          <div>
-            <label className="label">Balance to Pay (auto)</label>
-            <input className="input bg-slate-50 text-slate-500" disabled value={inr(balanceToPay)} readOnly />
-          </div>
-          <div>
-            <label className="label">Amount to Pay (INR) <span className="text-[11px] font-normal text-slate-400">— editable, may be partial</span></label>
-            <input className="input" type="number" disabled={!editable} value={g.amountToPay ?? ''} placeholder={String(balanceToPay)} onChange={(e) => setG({ ...g, amountToPay: e.target.value })} />
+
+          {/* The PO's terms, same strip as the FMS form. */}
+          {milestones.length > 0 && (
+            <div className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-500">
+              <span className="font-semibold text-slate-600">Payment terms (from PO): </span>
+              {milestones.filter((m) => m.percentage).map((m) => `${m.name} ${m.percentage}%`).join(' · ') || '—'}
+            </div>
+          )}
+
+          {/* Attachments — the PI drives the payment; the tax invoice lives in its
+              own card above; the PO this GRN is against is one click away. */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <F label="PI (Proforma Invoice) PDF *">
+              {g.piPdfUrl
+                ? <a className="text-sm text-navy hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">📄 View PI</a>
+                : <span className="text-xs text-slate-400">Not uploaded</span>}
+              {editable && <input className="input mt-1 text-xs" type="file" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && uploadPI.mutate(e.target.files[0])} />}
+            </F>
+            <F label="Tax Invoice PDF (closes the entry)">
+              {g.invoicePdfUrl
+                ? <a className="text-sm text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 View invoice</a>
+                : <span className="text-xs text-slate-400">{isPaymentGrn ? 'Comes after payment' : 'Recorded in the Tax Invoice card above'}</span>}
+            </F>
+            {/* The PO PDF is a bearer-authed endpoint, so it can't be a plain link
+                (a new tab sends no token) — fetch it as a blob and open that. */}
+            <F label="PO (attached)">
+              {g.doc?.docNumber
+                ? <button className="text-sm text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${g.docId}/pdf`, `${g.doc?.docNumber || 'PO'}.pdf`)}>📄 {g.doc.docNumber}</button>
+                : <span className="text-xs text-slate-400">No PO linked</span>}
+            </F>
+            {/* KYC is held against the vendor master, so the whole set is fetched
+                and listed — never uploaded here. If there is none, say so plainly. */}
+            <F label={`Vendor KYC${kycDocs.length ? ` (${kycDocs.length})` : ''}`}>
+              {kycDocs.length ? (
+                <div className="space-y-0.5">
+                  {kycDocs.map((d) => (
+                    <a key={d.id} className="block text-sm text-navy hover:underline" href={d.fileUrl} target="_blank" rel="noreferrer" title={d.fileName}>
+                      📄 {titleize(d.kind)}
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-xs text-amber-600">Vendor’s KYC is not uploaded — add it on the vendor.</span>
+              )}
+            </F>
           </div>
         </div>
 
@@ -434,12 +573,14 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
               <span className={paymentClosed ? 'text-navy' : ''}>closed</span>
             </div>
             <div className="mt-2 grid gap-3 sm:grid-cols-2">
-              {g.utrNumber && <div><div className="label">UTR / Payment Ref</div><div className="text-sm font-medium text-slate-700">{g.utrNumber}{g.paidAt ? ` · ${fmtDate(g.paidAt)}` : ''}</div></div>}
+              {g.utrNumber && <F label="UTR / Payment Ref"><div className="text-sm font-medium text-slate-700">{g.utrNumber}{g.paidAt ? ` · ${fmtDate(g.paidAt)}` : ''}</div></F>}
               {(paidButOpen || paymentClosed) && (
-                <div>
-                  <label className="label">Payment Proof {g.paymentProofUrl && <a className="text-green-600 hover:underline" href={g.paymentProofUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label>
-                  <input className="input text-xs" type="file" accept=".pdf,image/*" disabled={!canMarkPaid} onChange={(e) => e.target.files?.[0] && uploadProof.mutate(e.target.files[0])} />
-                </div>
+                <F label="Payment Proof">
+                  {g.paymentProofUrl
+                    ? <a className="text-sm text-navy hover:underline" href={g.paymentProofUrl} target="_blank" rel="noreferrer">📄 View proof</a>
+                    : <span className="text-xs text-slate-400">Not uploaded</span>}
+                  {canMarkPaid && <input className="input mt-1 text-xs" type="file" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && uploadProof.mutate(e.target.files[0])} />}
+                </F>
               )}
             </div>
             {payStatus === 'TRIGGERED' && <div className="mt-2 text-[11px] text-amber-700">Triggered to Accounts — awaiting the UTR (Mark Paid).</div>}
@@ -448,30 +589,20 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           </div>
         )}
       </div>
-
-      <div className="card p-4">
-        <div className="mb-1 text-sm font-semibold text-slate-600">Tax Invoice {isPaymentGrn ? '(arrives later — closes the entry)' : '(mandatory before submit)'}</div>
-        <p className="mb-3 text-xs text-slate-400">{isPaymentGrn ? 'The tax invoice comes AFTER payment. Uploading it on a paid GRN closes the entry and it leaves the bucket. Not required to submit — payment runs on the PI above.' : "Enter the value from the vendor's actual tax invoice — an invoice may cover only part of the PO. This is what flows into the payment pipeline as “Amount Invoiced”."}</p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <G label={`Invoice Number${isPaymentGrn ? '' : ' *'}`} v={g.invoiceNumber} on={(x) => setG({ ...g, invoiceNumber: x })} ed={taxInvoiceEditable} />
-          <div><label className="label">Invoice Date{isPaymentGrn ? '' : ' *'}</label><input className="input" type="date" disabled={!taxInvoiceEditable} value={g.invoiceDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, invoiceDate: e.target.value })} /></div>
-          <G label={`Invoice Value (INR)${isPaymentGrn ? '' : ' *'}`} v={g.invoiceValue} on={(x) => setG({ ...g, invoiceValue: x })} ed={taxInvoiceEditable} />
-          <G label="E-Way Bill Number" v={g.ewayBillNumber} on={(x) => setG({ ...g, ewayBillNumber: x })} ed={taxInvoiceEditable} />
-          <div><label className="label">Invoice PDF{isPaymentGrn ? '' : ' *'} {g.invoicePdfUrl && <a className="text-green-600 hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label><input className="input text-xs" type="file" accept=".pdf,image/*" disabled={!canUploadTaxInvoice} onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} /></div>
-          <div><label className="label">Material Photo {g.photoUrl && <a className="text-green-600 hover:underline" href={g.photoUrl} target="_blank" rel="noreferrer">✓ uploaded</a>}</label><input className="input text-xs" type="file" accept="image/*" disabled={!editable} onChange={(e) => e.target.files?.[0] && uploadPhoto.mutate(e.target.files[0])} /></div>
-        </div>
-        {/* On an approved payment GRN the main Save is hidden (it would demand an
-            amendment reason), so the tax invoice gets its own save — no reason needed. */}
-        {showTaxInvoiceSave && (
-          <div className="mt-3 flex items-center gap-2">
-            <button className="btn-primary text-sm" disabled={saveTaxInvoice.isPending} onClick={() => saveTaxInvoice.mutate()}>Save tax invoice</button>
-            <span className="text-[11px] text-slate-400">Recording the tax invoice is the closing step — no amendment reason needed.</span>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
+// Field wrapper in the vendor-payment (FMS) form's format — small uppercase
+// label above the control — so the GRN's payment screen reads the same as FMS.
+function F({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</label>
+      {children}
+    </div>
+  );
+}
+
 function G({ label, v, on, ed }: { label: string; v: any; on: (x: string) => void; ed: boolean }) {
-  return <div><label className="label">{label}</label><input className="input" disabled={!ed} value={v || ''} onChange={(e) => on(e.target.value)} /></div>;
+  return <F label={label}><input className="input" disabled={!ed} value={v || ''} onChange={(e) => on(e.target.value)} /></F>;
 }

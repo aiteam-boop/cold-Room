@@ -94,13 +94,22 @@ export default function ProjectWorkspace() {
     if (idx < 0) return null;
     const entity = raw.slice(0, idx);
     const id = raw.slice(idx + 1);
-    const KEY: Record<string, PageKey> = { po: 'po', wo: 'wo', grn: 'grn', payment: 'fms', task: 'gantt', boq: 'boq' };
-    const key = KEY[entity];
-    if (!key || !id) return null;
-    return { key, id };
+    // Every entity the public API deep-links to → the tab that shows it. Some
+    // share a PageKey and are told apart by `view` (e.g. BOQ progress vs budget).
+    const KEY: Record<string, { key: PageKey; view?: string }> = {
+      po: { key: 'po' }, wo: { key: 'wo' }, grn: { key: 'grn' }, payment: { key: 'fms' },
+      task: { key: 'gantt' }, boq: { key: 'boq' }, progress: { key: 'boq' },
+      budget: { key: 'boq', view: 'budget' },
+      changeorder: { key: 'changeorders' }, drawing: { key: 'drawing' }, quotation: { key: 'boq' },
+      dpr: { key: 'dpr' }, document: { key: 'documents' }, team: { key: 'team' },
+      milestone: { key: 'pay' }, zone: { key: 'dpr' },
+    };
+    const hit = KEY[entity];
+    if (!hit || !id) return null;
+    return { key: hit.key, view: hit.view, id };
   }, [searchParams]);
 
-  const [active, setActive] = useState<Nav | null>(deep ? { key: deep.key } : null);
+  const [active, setActive] = useState<Nav | null>(deep ? { key: deep.key, view: deep.view } : null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project', projectId],

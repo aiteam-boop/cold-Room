@@ -5,8 +5,12 @@ import { Navigate, useParams, useSearchParams } from 'react-router-dom';
 // that into the real in-app destination: the project workspace, on the right tab,
 // with the item opened — so following a link from an integration lands the user
 // exactly where they can act on that thing.
-const PROJECT_TAB: Record<string, string> = {
-  po: 'po', wo: 'wo', grn: 'grn', payment: 'payment', task: 'task', boq: 'boq',
+// Every project-scoped entity the public API can hand out a link for. The
+// workspace maps each to its tab (and opens the item where it can).
+const PROJECT_TAB: Record<string, true> = {
+  po: true, wo: true, grn: true, payment: true, task: true, boq: true,
+  changeorder: true, drawing: true, quotation: true, dpr: true, budget: true,
+  document: true, team: true, milestone: true, progress: true, zone: true,
 };
 
 export default function GoResolver() {
@@ -16,6 +20,7 @@ export default function GoResolver() {
 
   // Global entities resolve to their own pages.
   if (entity === 'vendor') return <Navigate to="/vendors" replace />;
+  if (entity === 'machinemodel') return <Navigate to="/settings/machine-models" replace />;
   if (entity === 'project' && id) return <Navigate to={`/projects/${id}`} replace />;
 
   // Everything else is project-scoped and needs the owning project.

@@ -14,6 +14,9 @@ import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
 import { requireAuth, requireProjectMember, requireEdit, requirePage, requireSection } from '../middleware/authMiddleware';
 import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
+import { vendorKycDocs } from './procurement';
+import { extractPiFields } from '../services/piExtract';
+import { scheduleSheetSync } from '../services/sheetsSync';
 import { hasSection } from '../lib/permissions';
 import {
   buildChain, recordDecision, finalizeApproval, markDocOnHold,
@@ -130,8 +133,23 @@ router.get('/:id', requireProjectMember, requirePage('fms'), asyncHandler(async 
   });
   if (!p) throw notFound('Payment not found');
   const approval = await getChainState('PAYMENT', p.id);
-  res.json({ payment: { ...serialize(p), poNumber: p.poNumber || p.doc?.docNumber || null }, approval });
+  // KYC lives on the vendor master, so an entry never has to re-upload it: surface
+  // the vendor's whole on-file set (GST certificate, PAN, cancelled cheque, …).
+  const kycDocs = await paymentKycDocs(p.vendorId, p.docId);
+  const kycPdfUrl = p.kycPdfUrl ?? kycDocs[0]?.fileUrl ?? null;
+  res.json({ payment: { ...serialize(p), poNumber: p.poNumber || p.doc?.docNumber || null, kycPdfUrl, kycDocs }, approval });
 }));
+
+/** Every KYC doc on file for this payment's vendor — resolved by vendorId, else
+ *  via the PO it is against (older POs may only carry the vendor's name). */
+async function paymentKycDocs(vendorId: string | null, docId: string | null) {
+  let vid = vendorId;
+  if (!vid && docId) {
+    const doc = await prisma.procurementDoc.findUnique({ where: { id: docId }, select: { vendorId: true } });
+    vid = doc?.vendorId ?? null;
+  }
+  return vendorKycDocs(vid);
+}
 
 // ── Create / edit ──────────────────────────────────────────────────────────────
 const upsertSchema = z.object({
@@ -217,7 +235,10 @@ router.patch('/:id', requireProjectMember, requireEdit('fms'), asyncHandler(asyn
       ...(b.remark !== undefined && { remark: b.remark }),
     },
   });
-  res.json({ payment: serialize(payment) });
+  // Same vendor-KYC fallback as the detail read, so saving never "loses" the
+  // auto-attached KYC in the UI.
+  const kycDocs = await paymentKycDocs(payment.vendorId, payment.docId);
+  res.json({ payment: { ...serialize(payment), kycPdfUrl: payment.kycPdfUrl ?? kycDocs[0]?.fileUrl ?? null, kycDocs } });
 }));
 
 router.delete('/:id', requireProjectMember, requireEdit('fms'), asyncHandler(async (req, res) => {
@@ -233,7 +254,11 @@ router.delete('/:id', requireProjectMember, requireEdit('fms'), asyncHandler(asy
 router.post('/:id/pi', requireProjectMember, requireEdit('fms'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw badRequest('No file uploaded');
   const payment = await prisma.vendorPayment.update({ where: { id: req.params.id }, data: { piPdfUrl: `/uploads/${req.file.filename}` } });
-  res.json({ ok: true, piPdfUrl: payment.piPdfUrl });
+  // Read the PI so the number / date / value fill themselves. Best-effort: a
+  // reader failure must never block the upload, so it is returned as a suggestion.
+  const extracted = await extractPiFields(req.file.path, req.file.mimetype);
+  scheduleSheetSync();
+  res.json({ ok: true, piPdfUrl: payment.piPdfUrl, extracted });
 }));
 router.post('/:id/kyc', requireProjectMember, requireEdit('fms'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw badRequest('No file uploaded');

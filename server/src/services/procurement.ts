@@ -68,10 +68,15 @@ export function computeTotals(
 export interface PayTriggerMeta { [key: string]: { note?: string; inr?: number; expectedDate?: string } }
 export function buildMilestones(doc: {
   basicAmount: number;
+  gstEnabled?: boolean; gstPct?: number; payGstInclusive?: boolean;
   payAdvancePct: number; payBeforeDeliveryPct: number; payRunningPct: number;
   payPostDeliveryPct: number; payPostCompletionPct: number; payRetentionPct: number;
   payTriggers?: string | null;
 }) {
+  // The base a milestone % is taken from: the FINAL amount (incl. GST) when the PO
+  // says payment is GST-inclusive, else the BASIC amount.
+  const gst = doc.gstEnabled ? Math.round(doc.basicAmount * ((doc.gstPct || 0) / 100) * 100) / 100 : 0;
+  const payBase = doc.payGstInclusive ? doc.basicAmount + gst : doc.basicAmount;
   const meta: PayTriggerMeta = doc.payTriggers ? safeJson(doc.payTriggers) : {};
   const pctByKey: Record<string, number> = {
     advance: doc.payAdvancePct, beforeDelivery: doc.payBeforeDeliveryPct, running: doc.payRunningPct,
@@ -83,7 +88,7 @@ export function buildMilestones(doc: {
     const pct = pctByKey[f.key] || 0;
     const m = meta[f.key] || {};
     if (pct <= 0 && !m.inr) continue; // skip zero fields
-    const inr = m.inr != null ? m.inr : Math.round(doc.basicAmount * (pct / 100) * 100) / 100;
+    const inr = m.inr != null ? m.inr : Math.round(payBase * (pct / 100) * 100) / 100;
     out.push({
       fieldKey: f.key, name: f.name, triggerCondition: m.note ?? null,
       percentage: pct, inrAmount: inr,

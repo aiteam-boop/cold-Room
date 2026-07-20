@@ -19,6 +19,7 @@ interface Meta {
 interface UserRow {
   id: string; name: string; email: string; role: string; active: boolean;
   whatsapp: string;
+  employeeCode: string;
   pageAccess: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sectionPerms: Partial<Record<SectionKey, boolean>>;
   approver?: ApproverProfile;
@@ -32,7 +33,7 @@ type ProjAccess = Record<string, { included: boolean; role: string }>;
 interface Form {
   id?: string;
   name: string; email: string; password: string;
-  role: string; active: boolean; whatsapp: string;
+  role: string; active: boolean; whatsapp: string; employeeCode: string;
   grants: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sections: Partial<Record<SectionKey, boolean>>;
   projects: ProjAccess;
@@ -58,7 +59,7 @@ export default function UsersAdmin() {
 
   function openNew() {
     setEditing({
-      name: '', email: '', password: '', role: 'USER', active: true, whatsapp: '',
+      name: '', email: '', password: '', role: 'USER', active: true, whatsapp: '', employeeCode: '',
       grants: {}, sections: {}, projects: blankProjects(),
     });
   }
@@ -69,7 +70,8 @@ export default function UsersAdmin() {
     for (const p of u.projects) projects[p.projectId] = { included: true, role: p.role };
     setEditing({
       id: u.id, name: u.name, email: u.email, password: '', role: u.role, active: u.active,
-      whatsapp: u.whatsapp || '', grants: u.pageAccess || {}, sections: u.sectionPerms || {}, projects,
+      whatsapp: u.whatsapp || '', employeeCode: u.employeeCode || '',
+      grants: u.pageAccess || {}, sections: u.sectionPerms || {}, projects,
     });
   }
 
@@ -268,12 +270,12 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
       if (isNew) {
         await api.post('/users', {
           name: form.name, email: form.email, password: form.password,
-          role: form.role, active: form.active, whatsapp: form.whatsapp,
+          role: form.role, active: form.active, whatsapp: form.whatsapp, employeeCode: form.employeeCode,
           pageAccess: form.grants, sectionPerms: form.sections, projects: includedProjects,
         });
       } else {
         await api.patch(`/users/${form.id}`, {
-          name: form.name, role: form.role, active: form.active, whatsapp: form.whatsapp,
+          name: form.name, role: form.role, active: form.active, whatsapp: form.whatsapp, employeeCode: form.employeeCode,
           pageAccess: form.grants, sectionPerms: form.sections,
         });
         if (form.password) await api.post(`/users/${form.id}/password`, { password: form.password });
@@ -320,7 +322,15 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
                 {meta.roles.map((r) => <option key={r} value={r}>{meta.roleLabels[r] ?? r}</option>)}
               </select>
             </div>
-            <div className="sm:col-span-2"><label className="label">WhatsApp number (optional)</label><input className="input" value={form.whatsapp} placeholder="e.g. 919812345678" onChange={(e) => onChange({ ...form, whatsapp: e.target.value })} /></div>
+            <div>
+              <label className="label">Employee ID / Code (optional)</label>
+              <input className="input" value={form.employeeCode} placeholder="e.g. 9035"
+                onChange={(e) => onChange({ ...form, employeeCode: e.target.value })} />
+              {/* External systems (e.g. the Spares portal) identify a person by this
+                  code, so filling it lets them match this user's tasks over the API. */}
+              <p className="mt-1 text-xs text-slate-400">The company employee code. Lets integrations match this person’s tasks via the API.</p>
+            </div>
+            <div><label className="label">WhatsApp number (optional)</label><input className="input" value={form.whatsapp} placeholder="e.g. 919812345678" onChange={(e) => onChange({ ...form, whatsapp: e.target.value })} /></div>
           </div>
 
           <label className="flex items-center gap-2 text-sm font-medium text-slate-700">

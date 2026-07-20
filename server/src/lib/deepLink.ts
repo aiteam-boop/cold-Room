@@ -6,7 +6,12 @@
 
 import { appClientUrl } from '../services/email';
 
-export type DeepEntity = 'project' | 'po' | 'wo' | 'grn' | 'payment' | 'vendor' | 'task' | 'boq';
+export type DeepEntity =
+  | 'project' | 'po' | 'wo' | 'grn' | 'payment' | 'vendor' | 'task' | 'boq'
+  // Tab-level destinations for the rest of the system: the link lands the user on
+  // the right tab of the right project, ready to act.
+  | 'changeorder' | 'drawing' | 'quotation' | 'dpr' | 'budget' | 'document'
+  | 'team' | 'milestone' | 'progress' | 'zone' | 'machinemodel';
 
 /** Build the deep link for an entity. `projectId` is needed for project-scoped ones. */
 export function deepLink(entity: DeepEntity, id: string, projectId?: string): string {

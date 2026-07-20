@@ -58,7 +58,10 @@ const F = {
     { name: 'plannedEnd', type: 'ISO date', desc: 'Planned end.' },
     { name: 'actualStart', type: 'ISO date | null', desc: 'Actual start.' },
     { name: 'actualEnd', type: 'ISO date | null', desc: 'Actual end.' },
-    { name: 'responsible', type: 'string | null', desc: 'Accountable person. Needs read:people.' },
+    { name: 'responsible', type: 'string | null', desc: 'Who is accountable — a person’s name OR a role/vendor (e.g. "Logistics/Vendor"). Needs read:people.' },
+    { name: 'responsibleUserId', type: 'string | null', desc: 'The CRMCTS user id when the task is assigned to a real user (null for role/vendor tasks). Needs read:people.' },
+    { name: 'responsibleEmail', type: 'string | null', desc: 'That user’s email — usually the best key to match against your own directory. Needs read:people.' },
+    { name: 'responsibleEmployeeCode', type: 'string | null', desc: 'That user’s company employee ID/code (e.g. "9035"), if set in CRMCTS. Match this if your system keys people by employee code. Needs read:people.' },
     { name: 'deepLink', type: 'url', desc: 'Opens the Gantt with this task highlighted.' },
   ],
   boq: [
@@ -96,7 +99,17 @@ const ENDPOINTS: { group: string; anchor: string; items: Endpoint[] }[] = [
   { group: 'Projects', anchor: 'ep-projects', items: [
     { id: 'projects', method: 'GET', path: '/api/v1/projects', desc: 'List projects (paginated). Each carries a deepLink.',
       sample: `{\n  "data": [\n    {\n      "id": "clx123abc",\n      "name": "Cold Storage — Bhiwandi",\n      "client": "Acme Foods",\n      "status": "IN_PROGRESS",\n      "startDate": "2026-05-01T00:00:00.000Z",\n      "targetDate": "2026-09-30T00:00:00.000Z",\n      "deepLink": "{ORIGIN}/go/project/clx123abc?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.project, fieldsTitle: 'project object' },
-    { id: 'project', method: 'GET', path: '/api/v1/projects/{id}', desc: 'One project: details, counts, sub-resource links.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+    { id: 'team', method: 'GET', path: '/api/v1/projects/{id}/team', desc: 'Project members — who is on this project, with their employee code for matching.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "pm_1", "projectRole": "ENGINEER", "userId": "usr_abc",\n      "employeeName": "Ravi Kumar", "approverEmail": "ravi@acme.com", "employeeCode": "9035",\n      "systemRole": "USER", "deepLink": "{ORIGIN}/go/team/clx123abc?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'zones', method: 'GET', path: '/api/v1/projects/{id}/zones', desc: 'Rooms / zones — type, temperature band, handover dates.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "z_1", "zoneName": "Chiller Room 1", "roomType": "CHILLER", "heightM": 4.5,\n      "temperatureRange": "0 to 4", "isCommon": false,\n      "plannedHandover": "2026-08-01T00:00:00.000Z", "actualHandover": null,\n      "deepLink": "{ORIGIN}/go/zone/z_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'milestones', method: 'GET', path: '/api/v1/projects/{id}/milestones', desc: 'Project milestones — committed vs actual dates.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "ms_1", "name": "Panels erected", "zoneId": "z_1",\n      "committedDate": "2026-07-20T00:00:00.000Z", "actualDate": null, "remarks": null,\n      "deepLink": "{ORIGIN}/go/milestone/ms_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'drawings', method: 'GET', path: '/api/v1/projects/{id}/drawings', desc: 'Drawings — versions, approval status, file URLs (read:files).', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "dw_1", "fileName": "GA-Layout-R3.pdf", "fileUrl": "/api/…", "version": 3,\n      "status": "APPROVED", "discipline": "LAYOUT", "isFinal": true,\n      "deepLink": "{ORIGIN}/go/drawing/dw_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'change-orders', method: 'GET', path: '/api/v1/projects/{id}/change-orders', desc: 'Change orders — qty/cost impact and whether the client pays.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "co_1", "number": "CO-0002", "type": "ADDITION", "description": "Extra door",\n      "originalQty": 2, "changeQty": 1, "newTotalQty": 3, "unit": "Nos",\n      "costImpact": 85000, "paidByClient": true, "status": "APPROVED",\n      "deepLink": "{ORIGIN}/go/changeorder/co_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'project', method: 'GET', path: '/api/v1/projects/{id}', desc: 'One project: details, counts, and links to every sub-resource above.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
       sample: `{\n  "data": {\n    "id": "clx123abc",\n    "name": "Cold Storage — Bhiwandi",\n    "client": "Acme Foods",\n    "status": "IN_PROGRESS",\n    "counts": { "documents": 12, "grns": 5, "payments": 8, "tasks": 24, "boqItems": 140 },\n    "deepLink": "{ORIGIN}/go/project/clx123abc?project=clx123abc",\n    "links": {\n      "purchaseOrders": "/api/v1/projects/clx123abc/purchase-orders",\n      "tasks":          "/api/v1/projects/clx123abc/tasks"\n    }\n  }\n}` },
   ] },
   { group: 'Procurement', anchor: 'ep-procurement', items: [
@@ -109,17 +122,49 @@ const ENDPOINTS: { group: string; anchor: string; items: Endpoint[] }[] = [
     { id: 'boq-items', method: 'GET', path: '/api/v1/projects/{id}/boq-items', desc: 'Bill of quantities line items.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
       sample: `{\n  "data": [\n    {\n      "id": "boq_1200", "srNo": "1.4", "description": "PUF Panel 100mm — wall", "category": "Insulation",\n      "unit": "Sqm", "plannedQty": 320, "modelNumber": "KS1000-100",\n      "deepLink": "{ORIGIN}/go/boq/boq_1200?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.boq, fieldsTitle: 'boqItem object' },
   ] },
+  { group: 'Procurement (more)', anchor: 'ep-procurement2', items: [
+    { id: 'quotations', method: 'GET', path: '/api/v1/projects/{id}/quotations', desc: 'Vendor quotations against BOQ items — price, lead time, TDS/PDF links.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "q_1", "boqItemId": "boq_1200", "vendor": "Kingspan Jindal", "price": 450000,\n      "deliveryWeeks": 6, "modelNumber": "KS1000-100", "tdsUrl": "/api/…",\n      "quotationPdfUrl": "/api/…", "revision": 1, "status": "AWARDED",\n      "deepLink": "{ORIGIN}/go/quotation/q_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'documents', method: 'GET', path: '/api/v1/projects/{id}/documents', desc: 'The document register — generated PO/GRN PDFs, KYC, invoices (read:files for URLs).', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "pd_1", "type": "PO", "fileName": "PO-0007.pdf", "fileUrl": "/api/…",\n      "linkedDocNumber": "PO-0007", "vendor": "Kingspan Jindal",\n      "deepLink": "{ORIGIN}/go/document/pd_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'payment-milestones', method: 'GET', path: '/api/v1/projects/{id}/payment-milestones', desc: 'Payment milestones per PO/WO — %, amount, trigger, UTR (read:money).', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "pm_1", "docId": "po_88f2", "docNumber": "PO-0007", "name": "Advance",\n      "trigger": "On order", "percentage": 30, "inrAmount": 159300,\n      "status": "PAID", "paidOn": "2026-06-20T00:00:00.000Z", "utrNumber": "UTR123",\n      "deepLink": "{ORIGIN}/go/milestone/po_88f2?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+  ] },
+  { group: 'Timeline (more)', anchor: 'ep-timeline2', items: [
+    { id: 'progress', method: 'GET', path: '/api/v1/projects/{id}/progress', desc: 'BOQ progress entries — quantity installed per day, with photo.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "pe_1", "boqItemId": "boq_1200", "date": "2026-06-18T00:00:00.000Z",\n      "quantityInstalled": 40, "unit": "Sqm", "photoUrl": "/api/…", "status": "APPROVED",\n      "deepLink": "{ORIGIN}/go/progress/pe_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+    { id: 'dpr', method: 'GET', path: '/api/v1/projects/{id}/dpr', desc: 'Daily progress (room-wise DPR) — qty done today, labour team, photo.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "dpr_1", "roomScopeItemId": "rsi_1", "kind": "PANEL",\n      "date": "2026-06-18T00:00:00.000Z", "qtyDoneToday": 12, "labourTeam": "Team A",\n      "status": "SUBMITTED", "deepLink": "{ORIGIN}/go/dpr/dpr_1?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
+  ] },
   { group: 'Finance', anchor: 'ep-finance', items: [
+    { id: 'budget', method: 'GET', path: '/api/v1/projects/{id}/budget', desc: 'BOQ budget lines — internal costing (qty × rate). Finance realm, so read:money is required.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `{\n  "data": [\n    { "id": "bl_1", "boqItemId": "boq_1200", "budgetQty": 320, "budgetRate": 1400,\n      "budgetAmount": 448000, "notes": null,\n      "deepLink": "{ORIGIN}/go/budget/boq_1200?project=clx123abc" }\n  ],\n  ${LIST_PAGE}\n}` },
     { id: 'payments', method: 'GET', path: '/api/v1/projects/{id}/payments', desc: 'Vendor payments (FMS). Finance realm — requires read:money to call at all.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
       sample: `{\n  "data": [\n    {\n      "id": "fms_77ab", "number": "FMS-0001", "vendor": "Kingspan Jindal", "po": "PO-0007",\n      "amount": 265500, "status": "APPROVED", "paidAt": null,\n      "deepLink": "{ORIGIN}/go/payment/fms_77ab?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.payment, fieldsTitle: 'payment object' },
   ] },
   { group: 'Timeline', anchor: 'ep-timeline', items: [
-    { id: 'tasks', method: 'GET', path: '/api/v1/projects/{id}/tasks', desc: 'Gantt activities. A task’s deep link opens it ready to action.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
-      sample: `{\n  "data": [\n    {\n      "id": "act_9f31", "name": "Install PUF panels — Room 1", "status": "IN_PROGRESS", "percentComplete": 60,\n      "plannedStart": "2026-06-10T00:00:00.000Z", "plannedEnd": "2026-06-24T00:00:00.000Z",\n      "actualStart": "2026-06-11T00:00:00.000Z", "actualEnd": null, "responsible": "Site Engineer",\n      "deepLink": "{ORIGIN}/go/task/act_9f31?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.task, fieldsTitle: 'task object' },
+    { id: 'tasks', method: 'GET', path: '/api/v1/projects/{id}/tasks', desc: 'Gantt activities. A task assigned to a real person carries responsibleUserId / responsibleEmail / responsibleEmployeeCode — filter those with ?assignedTo=<userId | email | employeeCode> for a per-person "My Tasks" view. Tasks assigned to a role/vendor (e.g. "Logistics/Vendor") have those null and are programme tasks. An unmatched assignedTo returns an empty list, never an error.', pathParams: [{ name: 'id', type: 'string', desc: 'Project id.' }],
+      sample: `# per-person view — any of these work:\n#   ?assignedTo=ravi@acme.com     (email)\n#   ?assignedTo=9035              (employee code)\n#   ?assignedTo=usr_abc           (CRMCTS user id)\n{\n  "data": [\n    {\n      "id": "act_9f31", "name": "Install PUF panels — Room 1", "status": "IN_PROGRESS", "percentComplete": 60,\n      "plannedStart": "2026-06-10T00:00:00.000Z", "plannedEnd": "2026-06-24T00:00:00.000Z",\n      "actualStart": "2026-06-11T00:00:00.000Z", "actualEnd": null,\n      "responsible": "Ravi Kumar", "responsibleUserId": "usr_abc",\n      "responsibleEmail": "ravi@acme.com", "responsibleEmployeeCode": "9035",\n      "deepLink": "{ORIGIN}/go/task/act_9f31?project=clx123abc"\n    },\n    {\n      "id": "act_1002", "name": "Delivery to Site — Doors", "status": "NOT_STARTED", "percentComplete": 0,\n      "responsible": "Logistics/Vendor",\n      "responsibleUserId": null, "responsibleEmail": null, "responsibleEmployeeCode": null,\n      "deepLink": "{ORIGIN}/go/task/act_1002?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.task, fieldsTitle: 'task object' },
+  ] },
+  { group: 'Approvals', anchor: 'ep-approvals', items: [
+    { id: 'approvals', method: 'GET', path: '/api/v1/approvals', desc: 'The approval queue. Unlike Gantt tasks, an approval ALWAYS belongs to one person — so this is the natural per-person "what’s on my plate" feed. Filter with ?assignedTo=<userId | email | employeeCode> and ?status=PENDING (default) | APPROVED | ON_HOLD | ANY. The deepLink opens the PO/WO/GRN/payment itself, where the approver acts.',
+      sample: `# GET /api/v1/approvals?assignedTo=9035&status=PENDING\n{\n  "data": [\n    {\n      "id": "stp_01", "docType": "PO", "docId": "po_88f2", "docNumber": "PO-0007", "docStatus": "PENDING_APPROVAL",\n      "projectId": "clx123abc", "vendor": "Kingspan Jindal", "amount": 531000,\n      "step": 0, "status": "PENDING",\n      "approverName": "Ravi Kumar", "approverUserId": "usr_abc",\n      "approverEmail": "ravi@acme.com", "approverEmployeeCode": "9035",\n      "remarks": null, "raisedAt": "2026-07-12T09:00:00.000Z", "actedAt": null,\n      "deepLink": "{ORIGIN}/go/po/po_88f2?project=clx123abc"\n    }\n  ],\n  ${LIST_PAGE}\n}`,
+      fields: [
+        { name: 'docType', type: 'string', desc: 'PO | WO | GRN | PAYMENT — what is being approved.' },
+        { name: 'docNumber', type: 'string | null', desc: 'The document’s human number (PO-0007).' },
+        { name: 'amount', type: 'number | null', desc: 'The document’s value. Needs read:money.' },
+        { name: 'vendor', type: 'string | null', desc: 'Counterparty. Needs read:parties.' },
+        { name: 'step', type: 'number', desc: 'Position in the approval chain (0-based).' },
+        { name: 'status', type: 'string', desc: 'WAITING | PENDING (their turn) | APPROVED | ON_HOLD.' },
+        { name: 'approverUserId / approverEmail / approverEmployeeCode', type: 'string | null', desc: 'Who must act — match any of these to your directory. Needs read:people.' },
+        { name: 'deepLink', type: 'url', desc: 'Opens the document so this person can approve it.' },
+      ], fieldsTitle: 'approval object' },
   ] },
   { group: 'Masters', anchor: 'ep-masters', items: [
     { id: 'vendors', method: 'GET', path: '/api/v1/vendors', desc: 'The vendor master. Vendors realm — requires read:parties to call at all.',
       sample: `{\n  "data": [\n    {\n      "id": "v_301", "vendorName": "Kingspan Jindal", "type": "VENDOR", "gstin": "27ABCDE1234F1Z5",\n      "pan": "ABCDE1234F", "contact": "R. Mehta", "phone": "+91 98200 00000",\n      "deepLink": "{ORIGIN}/go/vendor/v_301"\n    }\n  ],\n  ${LIST_PAGE}\n}`, fields: F.vendor, fieldsTitle: 'vendor object' },
+    { id: 'machine-models', method: 'GET', path: '/api/v1/machine-models', desc: 'The machine model master — capacity, refrigerant, specs, price (read:money) and TDS link (read:files).',
+      sample: `{\n  "data": [\n    { "id": "mm_1", "make": "Kirloskar", "modelCode": "KC-500", "displayName": "KC-500 (5 TR)",\n      "capacityKW": 17.6, "refrigerant": "R404A", "compressorType": "SCROLL",\n      "unitPrice": 250000, "tdsUrl": "/api/…", "evaporatorTempC": -5, "condenserTempC": 45,\n      "powerInputKw": 6.2, "weightKg": 180, "voltage": "415V/3Ph",\n      "deepLink": "{ORIGIN}/go/machinemodel/mm_1" }\n  ],\n  ${LIST_PAGE}\n}` },
   ] },
 ];
 const ALL_OPS = ENDPOINTS.flatMap((g) => g.items);
@@ -139,11 +184,12 @@ const WRITE_OPS: WriteOp[] = [
 ];
 
 const REALM_DOCS = [
-  { key: 'projects', reach: 'Projects, status, timelines, completion.', needs: '' },
-  { key: 'procurement', reach: 'Purchase & work orders, GRNs, BOQ line items.', needs: '' },
-  { key: 'timeline', reach: 'Gantt tasks (read; write needs write:tasks).', needs: '' },
-  { key: 'finance', reach: 'Vendor payments (FMS).', needs: 'read:money' },
-  { key: 'vendors', reach: 'Vendor master — names, GSTIN/PAN, contacts.', needs: 'read:parties' },
+  { key: 'projects', reach: 'Projects, team, rooms/zones, milestones, drawings, change orders.', needs: '' },
+  { key: 'procurement', reach: 'POs, WOs, GRNs, BOQ items, quotations, documents, payment milestones.', needs: '' },
+  { key: 'timeline', reach: 'Gantt tasks, BOQ progress entries, daily progress (DPR). Writes need write:tasks.', needs: '' },
+  { key: 'approvals', reach: 'The pending approval queue — per person, across POs/WOs/GRNs/payments.', needs: '' },
+  { key: 'finance', reach: 'Vendor payments (FMS) + BOQ budget lines.', needs: 'read:money' },
+  { key: 'vendors', reach: 'Vendor master + machine model master.', needs: 'read:parties' },
 ];
 const SCOPE_DOCS = [
   { key: 'read:core', gives: 'Ids, numbers, descriptions, quantities, statuses, dates.', note: 'Always on.' },
@@ -189,8 +235,11 @@ const TOC = [
   { href: '#ep-health', label: 'Endpoints · Health' },
   { href: '#ep-projects', label: 'Endpoints · Projects' },
   { href: '#ep-procurement', label: 'Endpoints · Procurement' },
-  { href: '#ep-finance', label: 'Endpoints · Finance' },
+  { href: '#ep-procurement2', label: 'Endpoints · Procurement (more)' },
   { href: '#ep-timeline', label: 'Endpoints · Timeline' },
+  { href: '#ep-timeline2', label: 'Endpoints · Timeline (more)' },
+  { href: '#ep-approvals', label: 'Endpoints · Approvals' },
+  { href: '#ep-finance', label: 'Endpoints · Finance' },
   { href: '#ep-masters', label: 'Endpoints · Masters' },
   { href: '#writes', label: 'Write endpoints' },
   { href: '#deep-links', label: 'Deep links' },

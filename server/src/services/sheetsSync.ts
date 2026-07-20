@@ -245,15 +245,140 @@ export async function exportEntity(cfg: EntityConfig): Promise<number> {
   return rows.length;
 }
 
+// ── "payment Account FMS" — the accounts-facing payment pipeline ─────────────
+// One row per PO. Columns A→O mirror the group's A/C FMS "ADMIN" sheet EXACTLY
+// (same headers, same order, same dd/MM/yyyy formats) so the row can flow
+// straight into it; everything Cold-Room-specific is added from P onwards.
+// A PO with several GRNs still occupies ONE row — the per-GRN values stack
+// inside the cell, one under the other, PDFs included.
+
+export const FMS_TAB = 'payment Account FMS';
+/** A→O: byte-for-byte the ADMIN sheet's headers. Do not reorder or rename. */
+const FMS_ADMIN_HEADERS = [
+  'Timestamp', 'Email address', 'User', 'Invoice Number', 'Invoice Date',
+  'Bill received by User', 'Vendor Name', 'Full Amount', 'Amount To Pay',
+  'Payment Due Date', 'Payment Type', 'Payment Terms', 'Invoice with Supporting',
+  'PI', 'Department',
+];
+/** P onwards: the Cold Room detail the accounts sheet doesn't carry. */
+const FMS_EXTRA_HEADERS = [
+  'Project', 'PO Number', 'PO PDF', 'GRN Numbers', 'GRN PDFs', 'Invoiced', 'Paid',
+  'UTR / Payment Ref', 'Payment Remark', 'PO Status',
+];
+
+const dmy = (d: unknown): string => {
+  const dt = d instanceof Date ? d : d ? new Date(String(d)) : null;
+  if (!dt || Number.isNaN(dt.getTime())) return '';
+  return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
+};
+const dmyTime = (d: unknown): string => {
+  const dt = d instanceof Date ? d : d ? new Date(String(d)) : null;
+  if (!dt || Number.isNaN(dt.getTime())) return '';
+  return `${dmy(dt)} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`;
+};
+/** Stack one value per GRN, one under the other, inside a single cell. */
+const stack = (vals: unknown[]): string => vals.map((v) => (v == null || v === '' ? '—' : String(v))).join('\n');
+/** Absolute, click-from-the-sheet URL. /api/* PDFs are signed; /uploads/* are public. */
+function fileUrl(raw: unknown, base: string): string {
+  if (typeof raw !== 'string' || !raw.startsWith('/')) return '';
+  return base + (raw.startsWith('/api/') ? signApiPath(raw) : raw);
+}
+
+export async function exportPaymentAccountFms(): Promise<number> {
+  const db = await getDb();
+  const base = fileBaseUrl();
+  const [docs, grns, projects, users, milestones] = await Promise.all([
+    db.collection('ProcurementDoc').find({ type: { $in: ['PO', 'WO'] } }).sort({ createdAt: 1 }).toArray(),
+    db.collection('GRN').find({}).sort({ createdAt: 1 }).toArray(),
+    db.collection('Project').find({}).project({ name: 1 }).toArray(),
+    db.collection('User').find({}).project({ name: 1, email: 1 }).toArray(),
+    db.collection('PaymentMilestone').find({}).toArray(),
+  ]);
+  const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
+  const userById = new Map(users.map((u) => [String(u._id), u as { name: string; email: string }]));
+  const grnsByDoc = new Map<string, Record<string, unknown>[]>();
+  for (const g of grns) {
+    const k = String(g.docId);
+    (grnsByDoc.get(k) ?? grnsByDoc.set(k, []).get(k)!).push(g);
+  }
+  const msByDoc = new Map<string, Record<string, unknown>[]>();
+  for (const m of milestones) {
+    const k = String(m.docId);
+    (msByDoc.get(k) ?? msByDoc.set(k, []).get(k)!).push(m);
+  }
+
+  const rows = docs.map((d) => {
+    const id = String(d._id);
+    const ms = msByDoc.get(id) ?? [];
+    // A PO enters this (accounts) sheet ONLY once a payment is actually due —
+    // i.e. at least one milestone has been TRIGGERED ("Mark Triggered") or PAID.
+    // A PO whose milestones are all still PENDING is not yet an accounts item,
+    // even if it's approved.
+    const inPipeline = ms.some((m) => m.status === 'TRIGGERED' || m.status === 'PAID');
+    if (!inPipeline) return null;
+    // Show ONLY approved GRNs — a DRAFT / pending GRN (and its PI/invoice) isn't
+    // final, so it must not appear. Each triggered milestone's approved GRN stacks
+    // into this same PO row.
+    const gs = (grnsByDoc.get(id) ?? []).filter((g) => g.status === 'APPROVED');
+    const creator = d.createdById ? userById.get(String(d.createdById)) : undefined;
+    const term = (g: Record<string, unknown>) => {
+      const m = ms.find((x) => String(x._id) === String(g.milestoneId));
+      return m ? `${m.name}${m.percentage ? ` ${m.percentage}%` : ''}` : '';
+    };
+    const invoiced = gs.reduce((s, g) => s + (Number(g.invoiceValue) || 0), 0);
+    const paid = ms.filter((m) => m.status === 'PAID').reduce((s, m) => s + (Number(m.inrAmount) || 0), 0);
+    // UTR + its remark live on the milestone (set by Accounts on "Mark Paid"),
+    // whether the payment ran through the Pipeline or FMS. A PO can have several
+    // paid milestones, so stack one per milestone that carries a UTR/remark,
+    // prefixed with the milestone name so it's clear which payment it is.
+    const withUtr = ms.filter((m) => m.utrNumber || m.paymentReference || m.remarks);
+    const utrCell = stack(withUtr.map((m) => `${m.name}: ${m.utrNumber || m.paymentReference || '—'}`));
+    const remarkCell = stack(withUtr.map((m) => `${m.name}: ${m.remarks || '—'}`));
+
+    return [
+      dmyTime(d.createdAt),                                   // A Timestamp
+      creator?.email ?? '',                                    // B Email address
+      creator?.name ?? '',                                     // C User
+      stack(gs.map((g) => g.invoiceNumber)),                   // D Invoice Number (per GRN)
+      stack(gs.map((g) => dmy(g.invoiceDate))),                // E Invoice Date
+      stack(gs.map((g) => dmy(g.piDate))),                     // F Bill received by User = PI date
+      d.vendorName ?? '',                                      // G Vendor Name
+      Number(d.finalAmount) || 0,                              // H Full Amount
+      stack(gs.map((g) => g.amountToPay)),                     // I Amount To Pay
+      stack(gs.map((g) => dmy(g.paymentDueDate))),             // J Payment Due Date
+      stack(gs.map((g) => g.milestoneName || 'Full Payment')), // K Payment Type
+      stack(gs.map(term)),                                     // L Payment Terms (milestone name)
+      stack(gs.map((g) => fileUrl(g.invoicePdfUrl, base))),    // M Invoice with Supporting
+      stack(gs.map((g) => fileUrl(g.piPdfUrl, base))),         // N PI
+      'Coldroom',                                              // O Department
+      // ── P onwards: Cold Room detail ──
+      projName.get(String(d.projectId)) ?? '',                 // P Project
+      d.docNumber ?? '',                                       // Q PO Number
+      fileUrl(`/api/projects/${d.projectId}/procurement/docs/${id}/pdf`, base), // R PO PDF
+      stack(gs.map((g) => g.grnNumber)),                       // S GRN Numbers
+      stack(gs.map((g) => fileUrl(`/api/projects/${g.projectId}/procurement/grns/${String(g._id)}/pdf`, base))), // T GRN PDFs
+      invoiced,                                                // U Invoiced
+      paid,                                                    // V Paid
+      utrCell,                                                 // W UTR / Payment Ref (per milestone)
+      remarkCell,                                              // X Payment Remark (per milestone)
+      d.status ?? '',                                          // Y PO Status
+    ];
+  }).filter((r): r is (string | number)[] => r !== null);
+
+  await writeTab(FMS_TAB, [...FMS_ADMIN_HEADERS, ...FMS_EXTRA_HEADERS], rows as (string | number | boolean)[][]);
+  return rows.length;
+}
+
 /** Full export of every configured entity. */
 export async function exportAll(): Promise<ExportResult> {
   if (!sheetsEnabled()) throw new Error('Sheets sync disabled (missing env)');
-  await ensureTabs(ENTITIES.map((e) => e.tab));
+  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB]);
   const result: ExportResult = [];
   for (const cfg of ENTITIES) {
     const count = await exportEntity(cfg);
     result.push({ tab: cfg.tab, rows: count });
   }
+  result.push({ tab: FMS_TAB, rows: await exportPaymentAccountFms() });
   return result;
 }
 

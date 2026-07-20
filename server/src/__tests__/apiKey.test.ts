@@ -95,6 +95,25 @@ test('leak: representative v1 objects have no unclassified sensitive fields', ()
     { id: '5', name: 'T', status: 'OK', percentComplete: 10, plannedStart: null, plannedEnd: null, actualStart: null, actualEnd: null, responsible: 'R', deepLink: 'x' },
     { id: '6', srNo: '1', description: 'd', category: 'c', unit: 'u', plannedQty: 1, modelNumber: 'm', deepLink: 'x' },
     { id: '7', vendorName: 'V', type: 'VENDOR', gstin: 'G', pan: 'P', contact: 'C', phone: 'p', deepLink: 'x' },
+    // approvals
+    { id: '8', docType: 'PO', docId: 'd', docNumber: 'PO-1', docStatus: 'PENDING', projectId: 'p', vendor: 'V', amount: 10,
+      step: 0, status: 'PENDING', approverName: 'A', approverUserId: 'u', approverEmail: 'a@b.c', approverEmployeeCode: '9035',
+      remarks: null, raisedAt: null, actedAt: null, deepLink: 'x' },
+    // team / zones / milestones / drawings / change orders
+    { id: '9', projectRole: 'ENGINEER', userId: 'u', employeeName: 'N', approverEmail: 'a@b.c', employeeCode: '9035', systemRole: 'USER', deepLink: 'x' },
+    { id: '10', zoneName: 'Room 1', category: 'c', roomType: 'r', heightM: 3, temperatureRange: '-18', isCommon: false, plannedHandover: null, actualHandover: null, handoverCertUrl: 'u', deepLink: 'x' },
+    { id: '11', name: 'M', zoneId: 'z', committedDate: null, freezeDate: null, actualDate: null, remarks: null, deepLink: 'x' },
+    { id: '12', fileName: 'f.pdf', fileUrl: 'u', mimeType: 'application/pdf', fileSize: 1, version: 1, status: 'S', classification: 'c', discipline: 'd', isFinal: true, uploadedAt: null, finalisedAt: null, revisionNotes: null, deepLink: 'x' },
+    { id: '13', number: 'CO-1', type: 't', description: 'd', boqItemId: 'b', originalQty: 1, changeQty: 1, newTotalQty: 2, unit: 'u', costImpact: 100, paidByClient: true, justification: 'j', status: 'S', approvedAt: null, raisedAt: null, deepLink: 'x' },
+    // quotations / documents / payment milestones
+    { id: '14', boqItemId: 'b', vendor: 'V', price: 10, deliveryDate: null, deliveryWeeks: 2, leadTime: 'l', paymentTerms: 'p', remarks: 'r', modelNumber: 'm', tdsUrl: 'u', quotationPdfUrl: 'u', revision: 1, status: 'S', quotedAt: null, deepLink: 'x' },
+    { id: '15', type: 'PO', fileName: 'f', fileUrl: 'u', mimeType: 'm', linkedDocNumber: 'PO-1', vendor: 'V', uploadedAt: null, deepLink: 'x' },
+    { id: '16', docId: 'd', docNumber: 'PO-1', name: 'Advance', trigger: 't', percentage: 30, inrAmount: 100, expectedDate: null, triggeredAt: null, status: 'S', paidOn: null, utrNumber: 'U', remarks: null, deepLink: 'x' },
+    // progress / dpr / budget / machine models
+    { id: '17', boqItemId: 'b', date: null, quantityInstalled: 5, unit: 'u', photoUrl: 'u', remarks: 'r', status: 'S', approvedAt: null, deepLink: 'x' },
+    { id: '18', roomScopeItemId: 'r', kind: 'k', date: null, qtyDoneToday: 3, labourTeam: 'T', remarks: 'r', photoUrl: 'u', status: 'S', deepLink: 'x' },
+    { id: '19', boqItemId: 'b', budgetQty: 10, budgetRate: 5, budgetAmount: 50, notes: 'n', updatedAt: null, deepLink: 'x' },
+    { id: '20', make: 'K', modelCode: 'M', displayName: 'd', capacityKW: 5, refrigerant: 'R', compressorType: 'c', applicableRooms: [], unitPrice: 100, tdsUrl: 'u', evaporatorTempC: -5, condenserTempC: 45, airflow: 'a', powerInputKw: 2, weightKg: 30, dimensions: 'd', voltage: 'v', compressorModel: 'c', deepLink: 'x' },
   ];
   const leaks = unclassifiedSensitiveKeys(samples);
   assert.deepEqual(leaks, [], 'unclassified sensitive keys: ' + leaks.join(', '));

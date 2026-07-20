@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg, openAuthedFile } from '../../lib/api';
+import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Spinner } from '../ui';
 import { docStatusPill, inr, titleize } from '../../lib/format';
@@ -59,8 +59,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       gstEnabled: d.gstEnabled, gstPct: Number(d.gstPct),
       payAdvancePct: Number(d.payAdvancePct), payBeforeDeliveryPct: Number(d.payBeforeDeliveryPct), payRunningPct: Number(d.payRunningPct),
       payPostDeliveryPct: Number(d.payPostDeliveryPct), payPostCompletionPct: Number(d.payPostCompletionPct), payRetentionPct: Number(d.payRetentionPct),
+      payGstInclusive: !!d.payGstInclusive,
+      customColumns: d.customColumns ?? [],
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, leadTimeText: l.leadTimeText, boqItemId: l.boqItemId ?? null })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null })),
       // Only sent when amending an approved doc — the server logs it and requires it.
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,
@@ -124,6 +126,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p.key]) || 0), 0);
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+  const finalAmt = d.gstEnabled ? basic + Math.round(basic * (Number(d.gstPct) / 100)) : basic;
+  // The base each payment-term % is computed from — final (incl. GST) when the PO
+  // is GST-inclusive, else the basic. Milestones on the server use the same rule.
+  const payBase = d.payGstInclusive ? finalAmt : basic;
   const struck = (d.termsSections || []).filter((s: any) => s.isStruckOff).length;
 
   function setLine(i: number, patch: any) {
@@ -174,7 +180,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             <button onClick={() => setView('document')} className={`rounded px-2 py-1 font-medium ${view === 'document' ? 'bg-white text-navy shadow-sm' : 'text-slate-500'}`}>Document</button>
             <button onClick={() => setView('form')} className={`rounded px-2 py-1 font-medium ${view === 'form' ? 'bg-white text-navy shadow-sm' : 'text-slate-500'}`}>Form</button>
           </div>
-          <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`)}>📄 PDF</button>
+          <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`, `${d.docNumber || 'document'}.pdf`)}>📄 Download PDF</button>
           {/* Approved docs are locked. "Amend" unlocks them, and Save then needs a reason. */}
           {approved && canEditDoc && !amending && (
             <button className="btn-outline text-sm" onClick={() => { setAmending(true); setView('form'); setMsg(null); }}>✎ Amend</button>
@@ -202,7 +208,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           {canEditDoc && d.status === 'PENDING_APPROVAL' && <button className="btn-outline text-sm" onClick={() => doAction.mutate({ verb: 'recall' })}>Recall</button>}
           {canEditDoc && d.status === 'PENDING_APPROVAL' && hasChain && <button className="btn-outline text-sm" disabled={doAction.isPending} onClick={() => doAction.mutate({ verb: 'remind' })}>Send Reminder</button>}
           {/* Approvers see the document itself before deciding. */}
-          {canAct && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${d.id}/pdf`)}>📄 View {d.type}</button>}
+          {canAct && <button className="btn-outline text-sm" onClick={() => openAuthedFile(`/projects/${projectId}/procurement/docs/${d.id}/pdf`)}>👁 View {d.type}</button>}
           {canAct && <button className="btn-primary text-sm" onClick={() => promptRemarks('approve')}>✓ Approve</button>}
           {canAct && <button className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600" onClick={() => promptRemarks('hold')}>⏸ Put On Hold</button>}
         </div>
@@ -436,6 +442,19 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           <div className="text-sm font-semibold text-slate-600">Payment Terms (6-field, must total 100%)</div>
           <span className={`badge ${Math.abs(payTotal - 100) < 0.01 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>Total: {payTotal}%</span>
         </div>
+        {/* Which amount the % is taken from: FINAL (incl. GST) or BASIC. The
+            milestones (Payment Pipeline) follow the same choice. */}
+        <div className="mb-3 flex flex-wrap items-center gap-4 rounded-lg bg-slate-50 px-3 py-2">
+          <span className="text-xs font-medium text-slate-600">Payment amount includes:</span>
+          <label className="flex items-center gap-1.5 text-sm">
+            <input type="radio" disabled={!editable} checked={!!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: true })} />
+            GST ({d.gstEnabled ? `${d.gstPct}% ` : ''}inclusive) — of {inr(finalAmt)}
+          </label>
+          <label className="flex items-center gap-1.5 text-sm">
+            <input type="radio" disabled={!editable} checked={!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: false })} />
+            Basic value only — of {inr(basic)}
+          </label>
+        </div>
         <div className="grid gap-3 sm:grid-cols-3">
           {PAY.map((p) => (
             <div key={p.key} className="rounded-lg bg-slate-50 p-2">
@@ -444,7 +463,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                 <input className="input" type="number" disabled={!editable} value={d[p.key]} onChange={(e) => setD({ ...d, [p.key]: e.target.value })} />
                 <span className="text-xs text-slate-400">%</span>
               </div>
-              <div className="mt-1 text-xs text-slate-500">{inr(Math.round(basic * (Number(d[p.key]) / 100)))}</div>
+              <div className="mt-1 text-xs text-slate-500">{inr(Math.round(payBase * (Number(d[p.key]) / 100)))}</div>
               <input className="input mt-1 text-xs" disabled={!editable} placeholder="Trigger condition note" value={d.payTriggers?.[payKey(p.key)]?.note || ''} onChange={(e) => setD({ ...d, payTriggers: { ...d.payTriggers, [payKey(p.key)]: { ...d.payTriggers?.[payKey(p.key)], note: e.target.value } } })} />
             </div>
           ))}

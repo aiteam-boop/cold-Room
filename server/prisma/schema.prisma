@@ -23,6 +23,7 @@ model User {
   // Global account role: ADMIN (full access) | USER (grant-based). See enums.ts.
   role         String           @default("USER")
   active       Boolean          @default(true)
+  employeeCode String?          // company employee ID/code — lets external systems match a person
   whatsapp     String?          // optional, for parity with IMS (no alerting yet)
   // IMS-style per-user grants (admin-controlled). JSON, parsed in permissions.ts.
   pageAccess   String?          // { [pageKey]: { view: bool, edit: bool } }
@@ -232,11 +233,15 @@ model ProcurementDoc {
   payPostDeliveryPct   Float @default(0)
   payPostCompletionPct Float @default(0)
   payRetentionPct      Float @default(0)
+  // true → milestone ₹ = % of the FINAL amount (incl. GST); false → % of the BASIC.
+  payGstInclusive      Boolean @default(false)
   payTriggers          String? // JSON: per-field trigger condition notes + INR overrides
 
   // JSON array of T&C clauses. Each: { title, text, isStruckOff?, struckOffAt?,
   // isLocked?, isCustom? }. Struck-off clauses stay in the document (rendered
   // with a strikethrough) — they are never deleted. See services/procurement.ts.
+  // User-added item columns: JSON [{ key, label }]. Values live per line item.
+  customColumns String?
   termsSections String?
 
   // BOQ items this PO is compared against on its "Budget vs Actual" panel
@@ -389,6 +394,7 @@ model ProcurementLineItem {
   totalPrice  Float   @default(0)
   isLeadTime  Boolean @default(false) // special "Lead Time: 7 Days" row
   leadTimeText String?
+  customValues String? // JSON { [colKey]: value } for the doc's user-added columns
   sortOrder   Int     @default(0)
 
   // Back-link to the BOQ line this item fulfils. Drives the BOQ Cost view:
@@ -454,6 +460,8 @@ model GRN {
   // Proforma Invoice — drives the payment and comes BEFORE the tax invoice.
   piNumber      String?
   piDate        DateTime?
+  // When Accounts must pay by — feeds "Payment Due Date" on the FMS sheet.
+  paymentDueDate DateTime?
   piValue       Float?
   piPdfUrl      String?
   // The amount to release for this milestone (editable; may be partial). Balance
