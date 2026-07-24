@@ -70,7 +70,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(r.data.token);
     setUser(r.data.user);
   }
-  function logout() {
+  async function logout() {
+    // Stamp the logout for attendance before we drop the token. Await it (with a
+    // short timeout) so navigation doesn't cancel the request, but never let a
+    // slow/offline network block the user from signing out.
+    await api.post('/auth/logout', null, { timeout: 3000 }).catch(() => {});
     setToken(null);
     setUser(null);
     location.href = '/login';

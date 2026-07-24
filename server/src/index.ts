@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
+import { startFmsReverseSyncPoll } from './services/sheetsSync';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
@@ -126,6 +127,9 @@ app.listen(PORT, () => {
   // policy, so a chatty/abusive integration can never grow it unbounded. Convert
   // it once (idempotent); recreate the secondary index convert() drops.
   ensureCappedApiLog().catch((e) => console.warn('[api-key-log] cap ensure skipped:', (e as Error)?.message));
+  // Poll the accounts FMS sheet so UTRs Accounts enter there flow back into the
+  // Payment Pipeline (milestone → PAID). No-op when Sheets sync is disabled.
+  startFmsReverseSyncPoll();
 });
 
 async function ensureCappedApiLog() {

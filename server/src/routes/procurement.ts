@@ -550,9 +550,21 @@ function pdfFileName(...parts: (string | null | undefined)[]): string {
 router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES), requireFinancialView, asyncHandler(async (req, res) => {
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { sortOrder: 'asc' } }, project: { select: { name: true } } } });
   if (!doc) throw notFound();
+  // The clean PDF (for the supplier) carries NO approval trail. Only when the
+  // caller asks with ?approvals=1 do we print the internal FINAL APPROVAL stamp
+  // (who approved, when, with what remark) under the signature.
+  const withApprovals = req.query.approvals === '1';
+  let approvals: { name: string; role: string | null; at: Date | null; remarks: string | null }[] | undefined;
+  if (withApprovals) {
+    const chain = await getChainState(doc.type as DocType, doc.id);
+    approvals = chain.steps
+      .filter((s) => s.status === 'APPROVED')
+      .sort((a, b) => a.order - b.order)
+      .map((s) => ({ name: s.approverName, role: s.approverRole, at: s.actedAt, remarks: s.remarks }));
+  }
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name)}"`);
-  renderProcurementPdf({ ...doc, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res);
+  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, withApprovals ? 'Approved' : undefined)}"`);
+  renderProcurementPdf({ ...doc, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res);
 }));
 
 // ── Payment milestones ──────────────────────────────────────────────────────
@@ -560,6 +572,19 @@ router.post('/docs/:docId/milestones/:mid/trigger', requireProjectMember, requir
   const { date } = z.object({ date: z.string().optional() }).parse(req.body ?? {});
   const m = await prisma.paymentMilestone.findFirst({ where: { id: req.params.mid, docId: req.params.docId } });
   if (!m) throw notFound('Milestone not found');
+  // A payment can only be triggered once the GRN FOR THIS SPECIFIC milestone is
+  // approved — each payment term is backed by its own goods receipt, so another
+  // milestone's approved GRN must not unlock this one. Two distinct cases so the
+  // popup tells the user exactly what to do.
+  const grns = await prisma.gRN.findMany({ where: { docId: req.params.docId, milestoneId: m.id }, select: { status: true } });
+  const hasApprovedGrn = grns.some((g) => g.status === 'APPROVED');
+  if (!hasApprovedGrn) {
+    throw badRequest(
+      grns.length === 0
+        ? `No GRN has been raised for this payment (${m.name}) yet. Raise a GRN (Goods Receipt) for it and get it approved before triggering.`
+        : `The GRN for this payment (${m.name}) is still pending approval. Once the GRN is approved you can trigger this payment.`,
+    );
+  }
   const updated = await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'TRIGGERED', actualTriggerDate: date ? new Date(date) : new Date(), accountsNotifiedAt: new Date() } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'MILESTONE_TRIGGER', entity: 'PaymentMilestone', entityId: m.id, details: { name: m.name, inr: m.inrAmount } });
   const pdoc = await prisma.procurementDoc.findUnique({ where: { id: req.params.docId }, select: { docNumber: true, vendorName: true } });
@@ -1045,9 +1070,19 @@ router.post('/grns/:grnId/payment-proof', requireProjectMember, requireSection('
 router.get('/grns/:grnId/pdf', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true } }, project: { select: { name: true } } } });
   if (!grn) throw notFound();
+  // Clean GRN by default; ?approvals=1 adds the internal FINAL APPROVAL stamp.
+  const withApprovals = req.query.approvals === '1';
+  let approvals: { name: string; role: string | null; at: Date | null; remarks: string | null }[] | undefined;
+  if (withApprovals) {
+    const chain = await getChainState('GRN', grn.id);
+    approvals = chain.steps
+      .filter((s) => s.status === 'APPROVED')
+      .sort((a, b) => a.order - b.order)
+      .map((s) => ({ name: s.approverName, role: s.approverRole, at: s.actedAt, remarks: s.remarks }));
+  }
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(grn.grnNumber, grn.vendorName, grn.project?.name)}"`);
-  renderGRNPdf({ ...grn, docNumber: grn.doc.docNumber } as any, res);
+  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(grn.grnNumber, grn.vendorName, grn.project?.name, withApprovals ? 'Approved' : undefined)}"`);
+  renderGRNPdf({ ...grn, docNumber: grn.doc.docNumber, approvals } as any, res);
 }));
 
 // ── Document repository ──────────────────────────────────────────────────────
@@ -1125,7 +1160,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     where: { projectId: req.params.projectId, status: 'APPROVED' },
     // PI (proforma) fields ride alongside the tax invoice: payment is made on the
     // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
-    include: { milestones: true, grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } } },
+    include: { milestones: true, grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } } },
   });
   const rows = docs.map((d) => {
     const invoiced = d.grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
@@ -1142,7 +1177,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,
       milestonesTriggered: triggered, milestonesTotal: d.milestones.length,
       grnStatus: d.grns.length ? 'GRN Approved' : 'No GRN', delayed,
-      grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
+      grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, milestoneName: g.milestoneName, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
         id: m.id, name: m.name, percentage: m.percentage, inrAmount: m.inrAmount, status: m.status,
         triggerCondition: m.triggerCondition, expectedDate: m.expectedDate, actualTriggerDate: m.actualTriggerDate,

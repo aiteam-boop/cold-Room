@@ -154,14 +154,16 @@ router.get('/projects/:id/payments', requireRealm('finance'), asyncHandler(async
 // in `responsible`). Surfacing the user id + email lets an integrator slot the
 // assigned ones into a per-person "My Tasks" view; the rest are programme tasks.
 type TaskRow = { id: string; activityName: string; status: string; percentComplete: number; plannedStartDate: Date; plannedEndDate: Date; actualStartDate: Date | null; actualEndDate: Date | null; responsibleName: string | null; responsibleUserId: string | null };
-type Assignee = { email: string | null; employeeCode: string | null };
+type Assignee = { name?: string | null; email: string | null; employeeCode: string | null };
 const mapTask = (t: TaskRow, projectId: string, byId?: Map<string, Assignee>) => {
   const a = t.responsibleUserId ? byId?.get(t.responsibleUserId) : undefined;
   return {
     id: t.id, name: t.activityName, status: t.status, percentComplete: t.percentComplete,
     plannedStart: iso(t.plannedStartDate), plannedEnd: iso(t.plannedEndDate),
     actualStart: iso(t.actualStartDate), actualEnd: iso(t.actualEndDate),
-    responsible: t.responsibleName,
+    // The assigned person's name when owned by a real user; otherwise the
+    // free-text role/vendor label (e.g. "Refrigeration contractor").
+    responsible: a?.name ?? t.responsibleName,
     responsibleUserId: t.responsibleUserId ?? null,
     responsibleEmail: a?.email ?? null,
     responsibleEmployeeCode: a?.employeeCode ?? null,
@@ -189,8 +191,8 @@ router.get('/projects/:id/tasks', requireRealm('timeline'), asyncHandler(async (
   ]);
   // Resolve assignee email + employeeCode in one batch (ships only to read:people keys).
   const uids = [...new Set(tasks.map((t) => t.responsibleUserId).filter((v): v is string => !!v))];
-  const users = uids.length ? await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, email: true, employeeCode: true } }) : [];
-  const byId = new Map(users.map((u) => [u.id, { email: u.email, employeeCode: u.employeeCode }]));
+  const users = uids.length ? await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, name: true, email: true, employeeCode: true } }) : [];
+  const byId = new Map(users.map((u) => [u.id, { name: u.name, email: u.email, employeeCode: u.employeeCode }]));
   return sendList(req, res, tasks.map((t) => mapTask(t, req.params.id, byId)), total);
 }));
 
@@ -514,8 +516,8 @@ async function taskItem(id: string, projectId: string, scopes: string[]) {
   const t = await prisma.ganttActivity.findUnique({ where: { id }, select: TASK_SELECT });
   const byId = new Map<string, Assignee>();
   if (t?.responsibleUserId) {
-    const u = await prisma.user.findUnique({ where: { id: t.responsibleUserId }, select: { email: true, employeeCode: true } });
-    if (u) byId.set(t.responsibleUserId, { email: u.email, employeeCode: u.employeeCode });
+    const u = await prisma.user.findUnique({ where: { id: t.responsibleUserId }, select: { name: true, email: true, employeeCode: true } });
+    if (u) byId.set(t.responsibleUserId, { name: u.name, email: u.email, employeeCode: u.employeeCode });
   }
   return applyScopes(mapTask(t!, projectId, byId), scopes).data; // respect the key's scopes
 }

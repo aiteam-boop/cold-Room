@@ -34,7 +34,7 @@ function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
   employeeCode?: string | null;
   whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
-  lastLoginAt?: Date | null;
+  lastLoginAt?: Date | null; lastLogoutAt?: Date | null;
 }) {
   return {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
@@ -45,6 +45,7 @@ function publicUser(u: {
     approver: parseApprover(u.approver),
     createdAt: u.createdAt,
     lastLoginAt: u.lastLoginAt ?? null,
+    lastLogoutAt: u.lastLogoutAt ?? null,
   };
 }
 
@@ -52,7 +53,7 @@ function publicUser(u: {
 const USER_SELECT = {
   id: true, name: true, email: true, role: true, active: true, employeeCode: true,
   whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
-  lastLoginAt: true,
+  lastLoginAt: true, lastLogoutAt: true,
 } as const;
 
 // GET /api/users/meta — the page/section catalogue + project list for the UI.
@@ -128,10 +129,10 @@ router.get(
   '/:id/activity',
   asyncHandler(async (req, res) => {
     const userId = req.params.id;
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, role: true, lastLoginAt: true, createdAt: true } });
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, role: true, lastLoginAt: true, lastLogoutAt: true, createdAt: true } });
     if (!user) throw notFound('User not found');
 
-    const [docs, grnCount, paymentCount, vendorCount, changeOrderCount, decisions, loginCount, totalActions, logs] = await Promise.all([
+    const [docs, grnCount, paymentCount, vendorCount, changeOrderCount, decisions, loginCount, totalActions, logs, attendanceLogs] = await Promise.all([
       prisma.procurementDoc.findMany({ where: { createdById: userId }, select: { type: true } }),
       prisma.gRN.count({ where: { raisedById: userId } }),
       prisma.vendorPayment.count({ where: { filledById: userId } }),
@@ -146,7 +147,26 @@ router.get(
         take: 200,
         include: { project: { select: { name: true } } },
       }),
+      // Login/logout events, oldest→newest, so we can pair them into sessions.
+      prisma.auditLog.findMany({
+        where: { userId, action: { in: ['USER_LOGIN', 'USER_LOGOUT'] } },
+        orderBy: { createdAt: 'asc' },
+        take: 400,
+        select: { action: true, createdAt: true },
+      }),
     ]);
+
+    // Pair each login with the next logout into an attendance session. A login
+    // with no following logout is still shown (open / unknown checkout).
+    const attendance: { loginAt: Date; logoutAt: Date | null }[] = [];
+    for (const ev of attendanceLogs) {
+      if (ev.action === 'USER_LOGIN') {
+        attendance.push({ loginAt: ev.createdAt, logoutAt: null });
+      } else if (attendance.length && attendance[attendance.length - 1].logoutAt === null) {
+        attendance[attendance.length - 1].logoutAt = ev.createdAt;
+      }
+    }
+    attendance.reverse(); // most recent session first
 
     // Decisions tallied per document type (PO/WO, GRN, Payment, …). "On hold"
     // also absorbs the historical *_REJECT actions from before the rename.
@@ -162,6 +182,7 @@ router.get(
       user,
       summary: {
         lastLoginAt: user.lastLoginAt,
+        lastLogoutAt: user.lastLogoutAt,
         loginCount,
         totalActions,
         created: {
@@ -176,12 +197,70 @@ router.get(
         totalApproved: sum(approved),
         totalOnHold: sum(onHold),
       },
+      // Login → logout sessions (attendance), most recent first.
+      attendance: attendance.slice(0, 60).map((s) => ({
+        loginAt: s.loginAt,
+        logoutAt: s.logoutAt,
+        durationMs: s.logoutAt ? new Date(s.logoutAt).getTime() - new Date(s.loginAt).getTime() : null,
+      })),
       // Most recent first; capped so a heavy user doesn't blow up the response.
       actions: logs.map((l) => ({
         id: l.id, action: l.action, entity: l.entity, entityId: l.entityId,
         details: safeParse(l.details), at: l.createdAt, projectName: l.project?.name ?? null,
       })),
     });
+  })
+);
+
+// GET /api/users/:id/attendance?month=YYYY-MM — a per-day attendance calendar
+// built from the USER_LOGIN / USER_LOGOUT audit trail. For each calendar day
+// (India time) we report the FIRST login and the LAST logout of that day.
+const IST = 'Asia/Kolkata';
+const istDay = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: IST }); // YYYY-MM-DD
+const istTime = (d: Date) => d.toLocaleTimeString('en-GB', { timeZone: IST, hour: '2-digit', minute: '2-digit' }); // HH:mm
+
+router.get(
+  '/:id/attendance',
+  asyncHandler(async (req, res) => {
+    const userId = req.params.id;
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true } });
+    if (!user) throw notFound('User not found');
+
+    // Which month? Default to the current month (India time).
+    const nowDay = istDay(new Date()); // YYYY-MM-DD
+    const mReq = /^(\d{4})-(\d{2})$/.exec(String(req.query.month || ''));
+    const year = mReq ? Number(mReq[1]) : Number(nowDay.slice(0, 4));
+    const month0 = mReq ? Number(mReq[2]) - 1 : Number(nowDay.slice(5, 7)) - 1; // 0-based
+    const monthKey = `${year}-${String(month0 + 1).padStart(2, '0')}`;
+
+    // Pull a padded UTC window around the month so IST-day bucketing near the
+    // month edges can't drop an event.
+    const start = new Date(Date.UTC(year, month0, 1) - 12 * 3600 * 1000);
+    const end = new Date(Date.UTC(year, month0 + 1, 1) + 12 * 3600 * 1000);
+    const events = await prisma.auditLog.findMany({
+      where: { userId, action: { in: ['USER_LOGIN', 'USER_LOGOUT'] }, createdAt: { gte: start, lt: end } },
+      orderBy: { createdAt: 'asc' },
+      select: { action: true, createdAt: true },
+    });
+
+    const byDay: Record<string, { firstLogin: Date | null; lastLogout: Date | null }> = {};
+    for (const e of events) {
+      const day = istDay(e.createdAt);
+      const b = (byDay[day] ||= { firstLogin: null, lastLogout: null });
+      if (e.action === 'USER_LOGIN') { if (!b.firstLogin) b.firstLogin = e.createdAt; }
+      else { b.lastLogout = e.createdAt; }
+    }
+
+    const days = Object.entries(byDay)
+      .filter(([d]) => d.startsWith(monthKey))
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([date, b]) => ({
+        date,
+        login: b.firstLogin ? istTime(b.firstLogin) : null,
+        logout: b.lastLogout ? istTime(b.lastLogout) : null,
+      }));
+
+    res.json({ user, month: monthKey, today: nowDay, days });
   })
 );
 

@@ -40,6 +40,9 @@ interface DocForPdf {
   lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
   customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
+  // Approval trail printed under the signature once the document is e-signed:
+  // who approved, when, and their remark. In chain order (final approver last).
+  approvals?: { name: string; role?: string | null; at?: Date | string | null; remarks?: string | null }[];
 }
 
 const asJson = <T>(v: unknown, fallback: T): T => {
@@ -276,6 +279,39 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   cell(L + halfW, y + 36, halfW, 'Designation:', { size: 8 });
   cell(L + halfW, y + 50, halfW, 'Date:', { size: 8 });
   cell(L + halfW, y + 64, halfW, 'Sign and Stamp:', { size: 8 });
+  y += sigH;
+
+  // ── Final-approval stamp — printed under the signature once approved ──
+  // Shows each approver, the exact date & time they approved, and their remark,
+  // so the signed PO carries an auditable record of who authorised it and when.
+  const approvals = (doc.approvals || []).filter((a) => a.at);
+  if (doc.esignApplied && approvals.length) {
+    const fmtDT = (v: Date | string) => {
+      const d = v instanceof Date ? v : new Date(v);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+    };
+    // Measure exact heights (remarks can wrap to several lines) so nothing
+    // overlaps and the box is sized to fit. Indent is done via x, NOT pad.
+    const LH = 12;
+    const remarkH = (r: string) => { pdf.font('Helvetica').fontSize(8); return pdf.heightOfString(`Remark: ${r}`, { width: W - 16 }); };
+    let need = 20; // heading
+    for (const a of approvals) { need += LH; if (a.remarks) need += remarkH(a.remarks as string) + 4; }
+    need += 6;
+    if (y + need + 6 > PAGE_BOTTOM) { pdf.addPage(); y = L; }
+    y += 6;
+    rect(L, y, W, need);
+    cell(L, y + 4, W, 'FINAL APPROVAL (e-signed)', { font: 'Helvetica-Bold', size: 8.5 });
+    let ly = y + 20;
+    approvals.forEach((a, i) => {
+      const who = `${i + 1}. ${a.name}${a.role ? ` (${a.role})` : ''}`;
+      cell(L, ly, W * 0.62, who, { font: 'Helvetica-Bold', size: 8 });
+      cell(L + W * 0.62, ly, W * 0.38 - 6, `Approved: ${fmtDT(a.at as Date | string)}`, { size: 8, align: 'right' });
+      ly += LH;
+      if (a.remarks) { pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(`Remark: ${a.remarks}`, L + 10, ly, { width: W - 20 }); ly += remarkH(a.remarks as string) + 4; }
+    });
+    y += need;
+  }
 
   pdf.end();
 }
@@ -292,6 +328,8 @@ interface GRNForPdf {
   amountToPay?: number | null;
   paymentStatus?: string | null; utrNumber?: string | null; paidAt?: Date | null;
   lineItems: { srNo: number; description: string; uom?: string | null; poQty: number; previouslyReceivedQty: number; receiptQty: number; defectQty: number; acceptedQty: number; remarks?: string | null }[];
+  // Approval trail printed under the signatory once the GRN is approved.
+  approvals?: { name: string; role?: string | null; at?: Date | string | null; remarks?: string | null }[];
 }
 export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   const pdf = new PDFDocument({ size: 'A4', margin: 28 });
@@ -403,5 +441,28 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
 
   pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(HEAD_BG).text(COMPANY.name, L, pdf.y, { width: tableW });
   pdf.font('Helvetica').fontSize(8).fillColor('#111').text('Authorized Signatory', L, pdf.y + 16);
+
+  // ── Final-approval stamp — who approved this GRN, when, with what remark ──
+  const gApprovals = (grn.approvals || []).filter((a) => a.at);
+  if (gApprovals.length) {
+    const fmtDT = (v: Date | string) => {
+      const d = v instanceof Date ? v : new Date(v);
+      return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+    };
+    const gRemarkH = (r: string) => { pdf.font('Helvetica').fontSize(8); return pdf.heightOfString(`Remark: ${r}`, { width: tableW - 20 }); };
+    let need = 22;
+    for (const a of gApprovals) { need += 12; if (a.remarks) need += gRemarkH(a.remarks as string) + 4; }
+    if (pdf.y + need + 24 > pdf.page.height - 30) { pdf.addPage(); pdf.y = 40; }
+    const top = pdf.y + 14;
+    pdf.lineWidth(0.7).rect(L, top, tableW, need).stroke(BORDER);
+    pdf.font('Helvetica-Bold').fontSize(8.5).fillColor(HEAD_BG).text('FINAL APPROVAL (e-signed)', L + 6, top + 5, { width: tableW - 12 });
+    let ry = top + 20;
+    gApprovals.forEach((a, i) => {
+      pdf.font('Helvetica-Bold').fontSize(8).fillColor('#111').text(`${i + 1}. ${a.name}${a.role ? ` (${a.role})` : ''}`, L + 6, ry, { width: tableW * 0.62 });
+      pdf.font('Helvetica').fontSize(8).fillColor('#111').text(`Approved: ${fmtDT(a.at as Date | string)}`, L + tableW * 0.62, ry, { width: tableW * 0.38 - 8, align: 'right' });
+      ry += 12;
+      if (a.remarks) { pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(`Remark: ${a.remarks}`, L + 14, ry, { width: tableW - 20 }); ry += gRemarkH(a.remarks as string) + 4; }
+    });
+  }
   pdf.end();
 }

@@ -130,6 +130,14 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   // The base each payment-term % is computed from — final (incl. GST) when the PO
   // is GST-inclusive, else the basic. Milestones on the server use the same rule.
   const payBase = d.payGstInclusive ? finalAmt : basic;
+  // GST-inclusive: advance on BASIC (GST due on delivery, not advance), and the
+  // remaining milestones absorb the balance so the total stays the full amount.
+  // Advance 100% / "Basic only" follow payBase. Milestones use the same rule.
+  const advPct = Number(d.payAdvancePct) || 0;
+  const gstSplit = !!d.payGstInclusive && advPct > 0 && advPct < 100;
+  const advanceAmount = gstSplit ? Math.round(basic * (advPct / 100)) : 0;
+  const balance = gstSplit ? finalAmt - advanceAmount : 0;
+  const nonAdvPctSum = 100 - advPct;
   const struck = (d.termsSections || []).filter((s: any) => s.isStruckOff).length;
 
   function setLine(i: number, patch: any) {
@@ -181,6 +189,9 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             <button onClick={() => setView('form')} className={`rounded px-2 py-1 font-medium ${view === 'form' ? 'bg-white text-navy shadow-sm' : 'text-slate-500'}`}>Form</button>
           </div>
           <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`, `${d.docNumber || 'document'}.pdf`)}>📄 Download PDF</button>
+          {/* Internal copy: same PDF plus the FINAL APPROVAL stamp (who approved,
+              when, remark). Only for approved docs — the clean one goes to the supplier. */}
+          {approved && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf?approvals=1`, `${d.docNumber || 'document'} - Approved.pdf`)}>🕒 With Approval</button>}
           {/* Approved docs are locked. "Amend" unlocks them, and Save then needs a reason. */}
           {approved && canEditDoc && !amending && (
             <button className="btn-outline text-sm" onClick={() => { setAmending(true); setView('form'); setMsg(null); }}>✎ Amend</button>
@@ -463,7 +474,8 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                 <input className="input" type="number" disabled={!editable} value={d[p.key]} onChange={(e) => setD({ ...d, [p.key]: e.target.value })} />
                 <span className="text-xs text-slate-400">%</span>
               </div>
-              <div className="mt-1 text-xs text-slate-500">{inr(Math.round(payBase * (Number(d[p.key]) / 100)))}</div>
+              {/* GST-inclusive: advance on basic, others absorb the balance to full total. */}
+              <div className="mt-1 text-xs text-slate-500">{inr(gstSplit && p.key === 'payAdvancePct' ? advanceAmount : gstSplit && nonAdvPctSum > 0 ? Math.round(balance * (Number(d[p.key]) / nonAdvPctSum)) : Math.round(payBase * (Number(d[p.key]) / 100)))}</div>
               <input className="input mt-1 text-xs" disabled={!editable} placeholder="Trigger condition note" value={d.payTriggers?.[payKey(p.key)]?.note || ''} onChange={(e) => setD({ ...d, payTriggers: { ...d.payTriggers, [payKey(p.key)]: { ...d.payTriggers?.[payKey(p.key)], note: e.target.value } } })} />
             </div>
           ))}

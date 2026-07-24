@@ -24,6 +24,7 @@ interface UserRow {
   sectionPerms: Partial<Record<SectionKey, boolean>>;
   approver?: ApproverProfile;
   lastLoginAt?: string | null;
+  lastLogoutAt?: string | null;
 }
 
 const fmtDateTime = (s: string) => new Date(s).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -44,6 +45,7 @@ export default function UsersAdmin() {
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<Form | null>(null);
   const [activityFor, setActivityFor] = useState<UserRow | null>(null);
+  const [attendanceFor, setAttendanceFor] = useState<UserRow | null>(null);
 
   const metaQ = useQuery({ queryKey: ['users-meta'], queryFn: async () => (await api.get('/users/meta')).data as Meta });
   const usersQ = useQuery({ queryKey: ['users'], queryFn: async () => (await api.get('/users')).data.users as UserRow[] });
@@ -93,7 +95,7 @@ export default function UsersAdmin() {
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-            <tr><th className="px-4 py-2">Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th className="text-right">Actions</th></tr>
+            <tr><th className="px-4 py-2">Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th>Last logout</th><th className="text-right">Actions</th></tr>
           </thead>
           <tbody>
             {filtered.map((u) => (
@@ -104,9 +106,12 @@ export default function UsersAdmin() {
                 <td>{u.active ? <span className="badge bg-green-100 text-green-700">Active</span> : <span className="badge bg-red-100 text-red-700">Disabled</span>}</td>
                 {/* Stamped on every login; "—" means this account has never signed in. */}
                 <td className="text-slate-500">{u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : <span className="text-slate-300">never</span>}</td>
+                {/* Stamped when the user clicks Log out. */}
+                <td className="text-slate-500">{u.lastLogoutAt ? fmtDateTime(u.lastLogoutAt) : <span className="text-slate-300">—</span>}</td>
                 <td className="px-2 text-right">
                   <div className="flex justify-end gap-3">
                     <button className="text-xs font-medium text-navy hover:underline" onClick={() => setActivityFor(u)}>Activity</button>
+                    <button className="text-xs font-medium text-navy hover:underline" onClick={() => setAttendanceFor(u)}>Attendance</button>
                     <button className="text-xs font-medium text-navy hover:underline" onClick={() => openEdit(u.id)}>Edit →</button>
                   </div>
                 </td>
@@ -117,6 +122,7 @@ export default function UsersAdmin() {
       </div>
 
       {activityFor && <ActivityModal user={activityFor} onClose={() => setActivityFor(null)} />}
+      {attendanceFor && <AttendanceModal user={attendanceFor} onClose={() => setAttendanceFor(null)} />}
 
       <ApprovalPermissions users={users} meta={meta} onSaved={() => qc.invalidateQueries({ queryKey: ['users'] })} />
 
@@ -435,6 +441,7 @@ interface Activity {
   user: { id: string; name: string; email: string; role: string; lastLoginAt: string | null };
   summary: {
     lastLoginAt: string | null;
+    lastLogoutAt: string | null;
     loginCount: number;
     totalActions: number;
     created: { PO: number; WO: number; GRN: number; PAYMENT: number; VENDOR: number; CHANGE_ORDER: number };
@@ -443,8 +450,20 @@ interface Activity {
     totalApproved: number;
     totalOnHold: number;
   };
+  attendance: { loginAt: string; logoutAt: string | null; durationMs: number | null }[];
   actions: { id: string; action: string; entity: string | null; entityId: string | null; details: any; at: string; projectName: string | null }[];
 }
+
+// "2h 14m" style duration for an attendance session.
+const fmtDuration = (ms: number | null) => {
+  if (ms == null || ms < 0) return '—';
+  const mins = Math.round(ms / 60000);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
+};
+const fmtDate = (s: string) => new Date(s).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
+const fmtTime = (s: string) => new Date(s).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
 // Audit actions are stored as CONSTANT_CASE — render them as readable English.
 const prettyAction = (a: string) => a.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
@@ -487,9 +506,9 @@ function ActivityModal({ user, onClose }: { user: UserRow; onClose: () => void }
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Overview</div>
               <div className="grid gap-2 sm:grid-cols-4">
                 <Stat label="Last login" value={data.summary.lastLoginAt ? fmtDateTime(data.summary.lastLoginAt) : 'never'} accent="text-slate-700" />
+                <Stat label="Last logout" value={data.summary.lastLogoutAt ? fmtDateTime(data.summary.lastLogoutAt) : '—'} accent="text-slate-700" />
                 <Stat label="Logins" value={data.summary.loginCount} accent="text-slate-700" />
                 <Stat label="Approved" value={data.summary.totalApproved} accent="text-green-600" />
-                <Stat label="On hold" value={data.summary.totalOnHold} accent="text-orange-600" />
               </div>
             </div>
 
@@ -514,6 +533,31 @@ function ActivityModal({ user, onClose }: { user: UserRow; onClose: () => void }
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-orange-700">Put on hold by document type</div>
                 <div className="text-sm text-orange-900">{byType(data.summary.onHold)}</div>
               </div>
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Attendance — login / logout sessions</div>
+              {data.attendance.length === 0 ? (
+                <div className="rounded-lg border border-slate-200 px-3 py-6 text-center text-sm text-slate-400">No login sessions recorded yet.</div>
+              ) : (
+                <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-slate-400">
+                      <tr><th className="px-3 py-2">Date</th><th>Login</th><th>Logout</th><th>Duration</th></tr>
+                    </thead>
+                    <tbody>
+                      {data.attendance.map((s, i) => (
+                        <tr key={i} className="border-t border-slate-100">
+                          <td className="px-3 py-2 text-slate-700">{fmtDate(s.loginAt)}</td>
+                          <td className="text-green-700">{fmtTime(s.loginAt)}</td>
+                          <td className={s.logoutAt ? 'text-slate-600' : 'text-amber-600'}>{s.logoutAt ? fmtTime(s.logoutAt) : 'still signed in / unknown'}</td>
+                          <td className="text-slate-500">{fmtDuration(s.durationMs)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             <div>
@@ -544,6 +588,143 @@ function ActivityModal({ user, onClose }: { user: UserRow; onClose: () => void }
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Per-user attendance calendar (admin) ─────────────────────────────────────
+// A month grid built from the login/logout audit trail: each day shows the
+// first login and the last logout, with Present / Late / Absent / Weekly-off.
+interface AttendanceData {
+  user: { id: string; name: string; email: string };
+  month: string; // YYYY-MM
+  today: string; // YYYY-MM-DD (India time)
+  days: { date: string; login: string | null; logout: string | null }[];
+}
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LATE_AFTER = '09:30'; // first login later than this HH:mm ⇒ marked late
+
+function AttendanceModal({ user, onClose }: { user: UserRow; onClose: () => void }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month0, setMonth0] = useState(now.getMonth()); // 0-based
+  const monthStr = `${year}-${String(month0 + 1).padStart(2, '0')}`;
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['user-attendance', user.id, monthStr],
+    queryFn: async () => (await api.get(`/users/${user.id}/attendance?month=${monthStr}`)).data as AttendanceData,
+  });
+
+  const step = (delta: number) => {
+    const d = new Date(year, month0 + delta, 1);
+    setYear(d.getFullYear());
+    setMonth0(d.getMonth());
+  };
+
+  // Map YYYY-MM-DD → { login, logout } for quick per-cell lookup.
+  const byDate: Record<string, { login: string | null; logout: string | null }> = {};
+  (data?.days || []).forEach((d) => { byDate[d.date] = { login: d.login, logout: d.logout }; });
+  const today = data?.today || '';
+
+  const daysInMonth = new Date(year, month0 + 1, 0).getDate();
+  const firstWeekday = new Date(year, month0, 1).getDay(); // 0=Sun
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  // Present / Late / Absent / Weekly-off + a "no data yet" future state.
+  function evaluate(day: number) {
+    const dateStr = `${monthStr}-${String(day).padStart(2, '0')}`;
+    const weekday = new Date(year, month0, day).getDay();
+    const rec = byDate[dateStr];
+    const isFuture = !!today && dateStr > today;
+    if (rec?.login) {
+      const late = rec.login > LATE_AFTER;
+      return { code: 'P' as const, late, login: rec.login, logout: rec.logout };
+    }
+    if (weekday === 0) return { code: 'WO' as const, late: false, login: null, logout: null }; // Sunday off
+    if (isFuture) return { code: '' as const, late: false, login: null, logout: null };
+    return { code: 'AB' as const, late: false, login: null, logout: null };
+  }
+
+  const Badge = ({ code, late }: { code: string; late: boolean }) => {
+    if (!code) return null;
+    const cls =
+      code === 'P' ? 'bg-green-100 text-green-700' :
+      code === 'AB' ? 'bg-red-100 text-red-700' :
+      'bg-amber-100 text-amber-700'; // WO
+    return (
+      <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${cls}`}>
+        {code}{code === 'P' && late ? ' LT' : ''}
+      </span>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6" onClick={onClose}>
+      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
+          <div>
+            <h3 className="text-lg font-bold text-navy">Attendance — {user.name}</h3>
+            <p className="text-sm text-slate-500">{user.email}</p>
+          </div>
+          <button className="text-2xl leading-none text-slate-400 hover:text-slate-600" onClick={onClose}>×</button>
+        </div>
+
+        <div className="p-5">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button className="btn-outline px-2 py-1 text-sm" onClick={() => step(-1)}>←</button>
+              <div className="min-w-[130px] text-center text-base font-semibold text-navy">{MONTH_NAMES[month0]} {year}</div>
+              <button className="btn-outline px-2 py-1 text-sm" onClick={() => step(1)}>→</button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="flex items-center gap-1"><span className="rounded bg-green-100 px-1.5 py-0.5 font-bold text-green-700">P</span> Present</span>
+              <span className="flex items-center gap-1"><span className="rounded bg-green-100 px-1.5 py-0.5 font-bold text-green-700">P LT</span> Late</span>
+              <span className="flex items-center gap-1"><span className="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-700">AB</span> Absent</span>
+              <span className="flex items-center gap-1"><span className="rounded bg-amber-100 px-1.5 py-0.5 font-bold text-amber-700">WO</span> Week off</span>
+            </div>
+          </div>
+
+          {isLoading && <div className="p-6"><Spinner label="Loading attendance…" /></div>}
+          {error && <div className="p-6 text-sm text-red-600">{errMsg(error)}</div>}
+
+          {data && (
+            <div className="overflow-x-auto">
+              <div className="grid grid-cols-7 overflow-hidden rounded-lg border border-slate-200 text-sm">
+                {WEEKDAYS.map((w) => (
+                  <div key={w} className="border-b border-slate-200 bg-slate-50 px-2 py-2 text-center text-xs font-semibold text-slate-500">{w}</div>
+                ))}
+                {cells.map((day, i) => {
+                  if (day === null) return <div key={i} className="min-h-[74px] border-b border-r border-slate-100 bg-slate-50/40" />;
+                  const e = evaluate(day);
+                  const dateStr = `${monthStr}-${String(day).padStart(2, '0')}`;
+                  const isToday = dateStr === today;
+                  return (
+                    <div key={i} className={`min-h-[74px] border-b border-r border-slate-100 px-2 py-1.5 ${isToday ? 'bg-blue-50' : ''}`}>
+                      <div className="flex items-start justify-between">
+                        <span className="text-xs font-semibold text-slate-600">{String(day).padStart(2, '0')}</span>
+                        <Badge code={e.code} late={e.late} />
+                      </div>
+                      {(e.code === 'P' || e.code === 'WO' || e.code === 'AB') && (
+                        <div className={`mt-2 rounded px-1 py-0.5 text-center text-[11px] ${e.code === 'P' ? 'bg-sky-50 text-slate-600' : 'bg-slate-50 text-slate-400'}`}>
+                          {e.login || '00:00'} - {e.logout || '00:00'}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-xs text-slate-400">
+                Times are India time (IST). Login = first sign-in of the day, Logout = last sign-out. Logout is recorded only when the user clicks “Log out”.
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

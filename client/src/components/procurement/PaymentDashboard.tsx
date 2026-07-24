@@ -109,6 +109,8 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                             (arrives later and closes the entry) — both shown the same way. */}
                         <span className="text-slate-600">
                           {g.grnNumber}
+                          {/* Which payment term this GRN is for — so it's clear at a glance. */}
+                          {g.milestoneName && <span className="ml-1 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{g.milestoneName}</span>}
                           {(g.piNumber || g.piValue != null) ? ` · PI${g.piNumber ? ` ${g.piNumber}` : ''}${g.piValue != null ? ` · ${money(g.piValue)}` : ''}` : ''}
                           {(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl)
                             ? `${g.invoiceNumber ? ` · Invoice ${g.invoiceNumber}` : ' · Invoice'}${g.invoiceValue != null ? ` · ${money(g.invoiceValue)}` : ''}`

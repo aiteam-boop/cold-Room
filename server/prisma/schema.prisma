@@ -36,6 +36,8 @@ model User {
   // Stamped on every successful login, so the Users admin can show who is
   // actually using the system. Backfilled from the USER_LOGIN audit trail.
   lastLoginAt  DateTime?
+  // Stamped when the user explicitly logs out (attendance / last-seen).
+  lastLogoutAt DateTime?
 
   memberships  ProjectMember[]
   submitted    ProgressEntry[]  @relation("SubmittedBy")

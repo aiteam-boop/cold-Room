@@ -291,6 +291,8 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         <div className="flex gap-2">
           {canRecordPaid && <button className="btn-primary text-sm" disabled={markPaid.isPending} onClick={doMarkPaid}>💳 Mark Paid</button>}
           {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`, `${g?.grnNumber || 'GRN'}.pdf`)}>📄 Download PDF</button>}
+          {/* Internal copy with the FINAL APPROVAL stamp; clean one goes to the vendor. */}
+          {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf?approvals=1`, `${g?.grnNumber || 'GRN'} - Approved.pdf`)}>🕒 With Approval</button>}
           {approved && canEditGrn && !amending && <button className="btn-outline text-sm" onClick={() => { setAmending(true); setMsg(''); }}>✎ Amend</button>}
           {amending && <button className="btn-outline text-sm" onClick={() => { setAmending(false); setAmendRemark(''); setG(structuredClone(grnQ.data!.grn)); }}>Cancel amend</button>}
           {editable && (

@@ -76,19 +76,35 @@ export function buildMilestones(doc: {
   // The base a milestone % is taken from: the FINAL amount (incl. GST) when the PO
   // says payment is GST-inclusive, else the BASIC amount.
   const gst = doc.gstEnabled ? Math.round(doc.basicAmount * ((doc.gstPct || 0) / 100) * 100) / 100 : 0;
-  const payBase = doc.payGstInclusive ? doc.basicAmount + gst : doc.basicAmount;
+  const final = Math.round((doc.basicAmount + gst) * 100) / 100;
+  const payBase = doc.payGstInclusive ? final : doc.basicAmount;
   const meta: PayTriggerMeta = doc.payTriggers ? safeJson(doc.payTriggers) : {};
   const pctByKey: Record<string, number> = {
     advance: doc.payAdvancePct, beforeDelivery: doc.payBeforeDeliveryPct, running: doc.payRunningPct,
     postDelivery: doc.payPostDeliveryPct, postCompletion: doc.payPostCompletionPct, retention: doc.payRetentionPct,
   };
+  // GST-inclusive split: the advance is charged on BASIC (GST falls due on
+  // delivery, not on the advance) while the remaining milestones absorb the
+  // balance so the document still totals the full GST-inclusive amount. Only
+  // applies when there IS an advance below 100%; a 100% advance takes it all,
+  // and "Basic only" keeps every milestone on the basic value.
+  const advPct = pctByKey.advance || 0;
+  const gstSplit = !!doc.payGstInclusive && advPct > 0 && advPct < 100;
+  const advanceAmount = gstSplit ? Math.round(doc.basicAmount * (advPct / 100) * 100) / 100 : 0;
+  const balance = gstSplit ? Math.round((final - advanceAmount) * 100) / 100 : 0;
+  const nonAdvPctSum = 100 - advPct;
+
   const out: { fieldKey: string; name: string; triggerCondition: string | null; percentage: number; inrAmount: number; expectedDate: Date | null; sortOrder: number }[] = [];
   let order = 0;
   for (const f of PAY_FIELDS) {
     const pct = pctByKey[f.key] || 0;
     const m = meta[f.key] || {};
     if (pct <= 0 && !m.inr) continue; // skip zero fields
-    const inr = m.inr != null ? m.inr : Math.round(payBase * (pct / 100) * 100) / 100;
+    let inr: number;
+    if (m.inr != null) inr = m.inr;                                    // explicit override wins
+    else if (gstSplit && f.key === 'advance') inr = advanceAmount;      // advance on basic
+    else if (gstSplit && nonAdvPctSum > 0) inr = Math.round(balance * (pct / nonAdvPctSum) * 100) / 100; // balance share
+    else inr = Math.round(payBase * (pct / 100) * 100) / 100;           // basic-only / advance-100% / no-advance
     out.push({
       fieldKey: f.key, name: f.name, triggerCondition: m.note ?? null,
       percentage: pct, inrAmount: inr,

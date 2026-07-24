@@ -7,6 +7,7 @@
 
 import { google, sheets_v4 } from 'googleapis';
 import { MongoClient, Db } from 'mongodb';
+import { randomUUID } from 'crypto';
 import { signApiPath } from '../lib/signedUrl';
 
 // ── Entity → tab config ─────────────────────────────────────────────────────
@@ -260,10 +261,12 @@ const FMS_ADMIN_HEADERS = [
   'Payment Due Date', 'Payment Type', 'Payment Terms', 'Invoice with Supporting',
   'PI', 'Department',
 ];
-/** P onwards: the Cold Room detail the accounts sheet doesn't carry. */
+/** P onwards: the Cold Room detail the accounts sheet doesn't carry.
+ * 'Milestone Ref' (last column) is the stable key used by the reverse sync to map
+ * a sheet row back to its payment milestone — Accounts must not edit it. */
 const FMS_EXTRA_HEADERS = [
-  'Project', 'PO Number', 'PO PDF', 'GRN Numbers', 'GRN PDFs', 'Invoiced', 'Paid',
-  'UTR / Payment Ref', 'Payment Remark', 'PO Status',
+  'Project', 'PO Number', 'PO PDF', 'GRN Number', 'GRN PDF', 'Invoiced', 'Paid',
+  'Payment Status', 'UTR / Payment Ref', 'Payment Remark', 'PO Status', 'Vendor KYC', 'Milestone Ref',
 ];
 
 const dmy = (d: unknown): string => {
@@ -284,15 +287,78 @@ function fileUrl(raw: unknown, base: string): string {
   return base + (raw.startsWith('/api/') ? signApiPath(raw) : raw);
 }
 
+// ── Reverse sync: sheet → pipeline ───────────────────────────────────────────
+// Accounts records a payment by putting the UTR (and optional remark) against a
+// row in the 'payment Account FMS' tab (fed from their own a/c sheet). This reads
+// those back and marks the matching milestone PAID in the Payment Pipeline — the
+// same effect as clicking "Mark Paid" in the app. It is deliberately one-way and
+// safe: it ONLY promotes a TRIGGERED milestone to PAID, never un-pays or edits an
+// already-paid one, and matches on the hidden 'Milestone Ref' key so it can't hit
+// the wrong payment. Runs before every export so an overwrite never drops a UTR.
+export async function importPaidFromSheet(): Promise<number> {
+  if (!sheetsEnabled()) return 0;
+  let vals: string[][] = [];
+  try {
+    const resp = await getSheetsClient().spreadsheets.values.get({
+      spreadsheetId: getSpreadsheetId(),
+      // Read wide enough to always include the last columns (UTR/Remark/Milestone
+      // Ref) even as columns are added — matching is by header name, not position.
+      range: `${FMS_TAB}!A1:AH2000`,
+    });
+    vals = (resp.data.values as string[][]) || [];
+  } catch { return 0; } // tab missing / not yet created → nothing to import
+  if (vals.length < 2) return 0;
+
+  const H = vals[0];
+  const iRef = H.indexOf('Milestone Ref');
+  const iUtr = H.indexOf('UTR / Payment Ref');
+  const iRemark = H.indexOf('Payment Remark');
+  if (iRef < 0 || iUtr < 0) return 0;
+
+  const db = await getDb();
+  // These collections use string (cuid) _ids, not ObjectId — cast filters to any.
+  const milestones = db.collection('PaymentMilestone');
+  const docsCol = db.collection('ProcurementDoc');
+  const audit = db.collection('AuditLog');
+  let paid = 0;
+  for (const row of vals.slice(1)) {
+    const ref = (row[iRef] || '').trim();
+    const utr = (row[iUtr] || '').trim();
+    if (!ref || !utr || utr === '—') continue;
+    const m = await milestones.findOne({ _id: ref } as never);
+    if (!m) continue;
+    // Only promote a triggered-but-unpaid milestone; never touch PAID/PENDING.
+    if (m.status !== 'TRIGGERED') continue;
+    if (m.utrNumber === utr) continue; // already recorded — idempotent
+    const remark = iRemark >= 0 ? (row[iRemark] || '').trim() : '';
+    await milestones.updateOne(
+      { _id: m._id } as never,
+      { $set: { status: 'PAID', utrNumber: utr, paymentReference: utr, remarks: remark || m.remarks || null, paymentDate: new Date() } },
+    );
+    const doc = await docsCol.findOne({ _id: m.docId } as never, { projection: { projectId: 1 } });
+    await audit.insertOne({
+      _id: randomUUID(), projectId: (doc?.projectId as string) ?? null, userId: null,
+      action: 'MILESTONE_PAY_SHEET', entity: 'PaymentMilestone', entityId: String(m._id),
+      details: JSON.stringify({ utrNumber: utr, remark, source: 'accounts-sheet' }), createdAt: new Date(),
+    } as never);
+    paid++;
+  }
+  return paid;
+}
+
 export async function exportPaymentAccountFms(): Promise<number> {
+  // Consume any UTRs Accounts entered before we overwrite the tab.
+  try { await importPaidFromSheet(); } catch { /* import is best-effort */ }
   const db = await getDb();
   const base = fileBaseUrl();
-  const [docs, grns, projects, users, milestones] = await Promise.all([
+  const [docs, grns, projects, users, milestones, kycs] = await Promise.all([
     db.collection('ProcurementDoc').find({ type: { $in: ['PO', 'WO'] } }).sort({ createdAt: 1 }).toArray(),
     db.collection('GRN').find({}).sort({ createdAt: 1 }).toArray(),
     db.collection('Project').find({}).project({ name: 1 }).toArray(),
     db.collection('User').find({}).project({ name: 1, email: 1 }).toArray(),
     db.collection('PaymentMilestone').find({}).toArray(),
+    // Every vendor KYC document on file — Accounts needs these attached to each payment.
+    db.collection('ProcurementDocument').find({ type: 'KYC' }).toArray(),
   ]);
   const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
   const userById = new Map(users.map((u) => [String(u._id), u as { name: string; email: string }]));
@@ -306,64 +372,97 @@ export async function exportPaymentAccountFms(): Promise<number> {
     const k = String(m.docId);
     (msByDoc.get(k) ?? msByDoc.set(k, []).get(k)!).push(m);
   }
+  // Vendor KYC docs grouped by vendor, so every row for that vendor carries the
+  // full set of KYC PDF links (PAN, cancelled cheque, GST certificate, …).
+  const kycByVendor = new Map<string, Record<string, unknown>[]>();
+  for (const k of kycs) {
+    if (!k.vendorId) continue;
+    const key = String(k.vendorId);
+    (kycByVendor.get(key) ?? kycByVendor.set(key, []).get(key)!).push(k);
+  }
+  const kycCellFor = (vendorId: unknown): string => {
+    const list = vendorId ? kycByVendor.get(String(vendorId)) ?? [] : [];
+    return stack(list.map((k) => `${k.kycKind || 'KYC'}: ${fileUrl(k.fileUrl, base)}`));
+  };
 
-  const rows = docs.map((d) => {
+  const rows: (string | number)[][] = [];
+  for (const d of docs) {
     const id = String(d._id);
     const ms = msByDoc.get(id) ?? [];
     // A PO enters this (accounts) sheet ONLY once a payment is actually due —
     // i.e. at least one milestone has been TRIGGERED ("Mark Triggered") or PAID.
-    // A PO whose milestones are all still PENDING is not yet an accounts item,
-    // even if it's approved.
+    // A PO whose milestones are all still PENDING is not yet an accounts item.
     const inPipeline = ms.some((m) => m.status === 'TRIGGERED' || m.status === 'PAID');
-    if (!inPipeline) return null;
-    // Show ONLY approved GRNs — a DRAFT / pending GRN (and its PI/invoice) isn't
-    // final, so it must not appear. Each triggered milestone's approved GRN stacks
-    // into this same PO row.
+    if (!inPipeline) continue;
+    // Show ONLY approved GRNs — a DRAFT / pending GRN (and its PI/invoice) isn't final.
     const gs = (grnsByDoc.get(id) ?? []).filter((g) => g.status === 'APPROVED');
     const creator = d.createdById ? userById.get(String(d.createdById)) : undefined;
-    const term = (g: Record<string, unknown>) => {
-      const m = ms.find((x) => String(x._id) === String(g.milestoneId));
-      return m ? `${m.name}${m.percentage ? ` ${m.percentage}%` : ''}` : '';
-    };
-    const invoiced = gs.reduce((s, g) => s + (Number(g.invoiceValue) || 0), 0);
-    const paid = ms.filter((m) => m.status === 'PAID').reduce((s, m) => s + (Number(m.inrAmount) || 0), 0);
-    // UTR + its remark live on the milestone (set by Accounts on "Mark Paid"),
-    // whether the payment ran through the Pipeline or FMS. A PO can have several
-    // paid milestones, so stack one per milestone that carries a UTR/remark,
-    // prefixed with the milestone name so it's clear which payment it is.
-    const withUtr = ms.filter((m) => m.utrNumber || m.paymentReference || m.remarks);
-    const utrCell = stack(withUtr.map((m) => `${m.name}: ${m.utrNumber || m.paymentReference || '—'}`));
-    const remarkCell = stack(withUtr.map((m) => `${m.name}: ${m.remarks || '—'}`));
+    const kycCell = kycCellFor(d.vendorId);
 
-    return [
-      dmyTime(d.createdAt),                                   // A Timestamp
-      creator?.email ?? '',                                    // B Email address
-      creator?.name ?? '',                                     // C User
-      stack(gs.map((g) => g.invoiceNumber)),                   // D Invoice Number (per GRN)
-      stack(gs.map((g) => dmy(g.invoiceDate))),                // E Invoice Date
-      stack(gs.map((g) => dmy(g.piDate))),                     // F Bill received by User = PI date
-      d.vendorName ?? '',                                      // G Vendor Name
-      Number(d.finalAmount) || 0,                              // H Full Amount
-      stack(gs.map((g) => g.amountToPay)),                     // I Amount To Pay
-      stack(gs.map((g) => dmy(g.paymentDueDate))),             // J Payment Due Date
-      stack(gs.map((g) => g.milestoneName || 'Full Payment')), // K Payment Type
-      stack(gs.map(term)),                                     // L Payment Terms (milestone name)
-      stack(gs.map((g) => fileUrl(g.invoicePdfUrl, base))),    // M Invoice with Supporting
-      stack(gs.map((g) => fileUrl(g.piPdfUrl, base))),         // N PI
-      'Coldroom',                                              // O Department
-      // ── P onwards: Cold Room detail ──
-      projName.get(String(d.projectId)) ?? '',                 // P Project
-      d.docNumber ?? '',                                       // Q PO Number
-      fileUrl(`/api/projects/${d.projectId}/procurement/docs/${id}/pdf`, base), // R PO PDF
-      stack(gs.map((g) => g.grnNumber)),                       // S GRN Numbers
-      stack(gs.map((g) => fileUrl(`/api/projects/${g.projectId}/procurement/grns/${String(g._id)}/pdf`, base))), // T GRN PDFs
-      invoiced,                                                // U Invoiced
-      paid,                                                    // V Paid
-      utrCell,                                                 // W UTR / Payment Ref (per milestone)
-      remarkCell,                                              // X Payment Remark (per milestone)
-      d.status ?? '',                                          // Y PO Status
-    ];
-  }).filter((r): r is (string | number)[] => r !== null);
+    // ONE ROW PER GRN: when a PO has several GRNs (one per payment-term milestone),
+    // each GRN gets its own row — its own invoice, PI, GRN PDF, and the UTR/remark
+    // of the milestone it belongs to. In addition, any TRIGGERED/PAID milestone
+    // that has no GRN of its own (e.g. an advance paid without an invoice) gets a
+    // row too, so no payment/UTR is ever lost from the accounts sheet.
+    const milestoneOf = (g: Record<string, unknown>) =>
+      g.milestoneId ? ms.find((x) => String(x._id) === String(g.milestoneId)) ?? null : null;
+
+    const makeRow = (g: Record<string, unknown> | null, m: Record<string, unknown> | null): (string | number)[] => {
+      const paidAmt = m && m.status === 'PAID' ? Number(m.inrAmount) || 0 : 0;
+      const utr = m ? (m.utrNumber || m.paymentReference || '') as string : '';
+      const remark = m ? (m.remarks || '') as string : '';
+      const term = m ? `${m.name}${m.percentage ? ` ${m.percentage}%` : ''}` : '';
+      const amountToPay = g?.amountToPay ?? (m ? Number(m.inrAmount) || '' : '');
+      return [
+        dmyTime(d.createdAt),                                   // A Timestamp
+        creator?.email ?? '',                                    // B Email address
+        creator?.name ?? '',                                     // C User
+        (g?.invoiceNumber ?? '') as string,                      // D Invoice Number
+        dmy(g?.invoiceDate),                                     // E Invoice Date
+        dmy(g?.piDate),                                          // F Bill received by User = PI date
+        d.vendorName ?? '',                                      // G Vendor Name
+        Number(d.finalAmount) || 0,                              // H Full Amount (PO total)
+        amountToPay as string | number,                          // I Amount To Pay
+        dmy(g?.paymentDueDate),                                  // J Payment Due Date
+        (g?.milestoneName || m?.name || 'Full Payment') as string, // K Payment Type
+        term,                                                    // L Payment Terms (milestone)
+        fileUrl(g?.invoicePdfUrl, base),                         // M Invoice with Supporting
+        fileUrl(g?.piPdfUrl, base),                              // N PI
+        'Coldroom',                                              // O Department
+        // ── P onwards: Cold Room detail ──
+        projName.get(String(d.projectId)) ?? '',                 // P Project
+        d.docNumber ?? '',                                       // Q PO Number
+        fileUrl(`/api/projects/${d.projectId}/procurement/docs/${id}/pdf`, base), // R PO PDF
+        (g?.grnNumber ?? '') as string,                          // S GRN Number
+        g ? fileUrl(`/api/projects/${g.projectId}/procurement/grns/${String(g._id)}/pdf`, base) : '', // T GRN PDF
+        Number(g?.invoiceValue) || 0,                            // U Invoiced (this GRN)
+        paidAmt,                                                  // V Paid (this milestone)
+        // Payment Status: PAID / TRIGGERED / PENDING (empty for an invoice with
+        // no milestone yet) — so Accounts sees at a glance what is still due.
+        m ? String(m.status) : '',                               // W Payment Status
+        utr,                                                     // X UTR / Payment Ref (this milestone)
+        remark,                                                  // Y Payment Remark (this milestone)
+        d.status ?? '',                                          // Z PO Status
+        kycCell,                                                 // AA Vendor KYC (all docs)
+        m ? String(m._id) : '',                                  // AB Milestone Ref (reverse-sync key)
+      ];
+    };
+
+    // 1) one row per approved GRN (with its linked milestone's payment status)
+    const shownMs = new Set<string>();
+    for (const g of gs) {
+      const m = milestoneOf(g);
+      if (m) shownMs.add(String(m._id));
+      rows.push(makeRow(g, m));
+    }
+    // 2) one row per milestone not already shown by a GRN above — INCLUDING
+    // still-PENDING ones, so Accounts sees the whole payment schedule and knows
+    // exactly what is paid and what is still due for this PO.
+    for (const m of ms) {
+      if (shownMs.has(String(m._id))) continue;
+      rows.push(makeRow(null, m));
+    }
+  }
 
   await writeTab(FMS_TAB, [...FMS_ADMIN_HEADERS, ...FMS_EXTRA_HEADERS], rows as (string | number | boolean)[][]);
   return rows.length;
@@ -410,4 +509,26 @@ export function scheduleSheetSync(delayMs = DEBOUNCE_MS): void {
   if (process.env.SHEETS_LIVE_SYNC === 'off') return;
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => { void runAutoSync(); }, delayMs);
+}
+
+// ── Reverse-sync poll (sheet → pipeline) ─────────────────────────────────────
+// Accounts enter UTRs in their connected a/c sheet at any time, with no signal to
+// the app — so we poll. exportPaymentAccountFms() imports UTRs before it writes,
+// so one periodic call is the whole cycle (pull payments in, refresh the tab).
+let fmsPollTimer: NodeJS.Timeout | null = null;
+let fmsPolling = false;
+export function startFmsReverseSyncPoll(): void {
+  if (!sheetsEnabled() || process.env.SHEETS_LIVE_SYNC === 'off') return;
+  if (fmsPollTimer) return; // already running
+  const everyMs = Number(process.env.FMS_SYNC_POLL_MS) || 180_000; // default 3 min
+  fmsPollTimer = setInterval(() => {
+    if (fmsPolling) return;
+    fmsPolling = true;
+    void exportPaymentAccountFms()
+      .then((n) => { if (n >= 0) { /* imported + refreshed */ } })
+      .catch((e) => console.error('[sheetsSync] FMS reverse-sync poll failed:', (e as Error).message))
+      .finally(() => { fmsPolling = false; });
+  }, everyMs);
+  fmsPollTimer.unref?.(); // never keep the process alive just for this
+  console.log(`[sheetsSync] FMS reverse-sync poll every ${Math.round(everyMs / 1000)}s`);
 }

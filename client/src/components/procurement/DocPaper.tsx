@@ -80,6 +80,13 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
   const final = basic + gst;
   // The base each payment-term % is taken from — final (incl. GST) or basic.
   const payBase = d.payGstInclusive ? final : basic;
+  // GST-inclusive advance-on-basic split (advance carries no GST unless it's 100%);
+  // the remaining milestones absorb the balance so the total stays `final`.
+  const advPct = Number(d.payAdvancePct) || 0;
+  const gstSplit = !!d.payGstInclusive && advPct > 0 && advPct < 100;
+  const advanceAmount = gstSplit ? Math.round(basic * (advPct / 100)) : 0;
+  const balance = gstSplit ? final - advanceAmount : 0;
+  const nonAdvPctSum = 100 - advPct;
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p[0]]) || 0), 0);
 
   const setLine = (i: number, patch: any) => setD({ ...d, lineItems: d.lineItems.map((l: any, idx: number) => (idx === i ? { ...l, ...patch } : l)) });
@@ -287,13 +294,22 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: false })} />Basic only — {inr(basic)}</label>
         </div>
         <div className="grid grid-cols-3 gap-2">
-          {PAY.map(([k, label, mk]) => (
-            <div key={k} className={`border ${B} bg-slate-50 p-2 text-[10px]`}>
-              <div className="font-semibold text-slate-600">{label}</div>
-              <div className="flex items-center gap-1"><T value={d[k]} onChange={(x: string) => setD({ ...d, [k]: x })} className="w-12 text-right" />%<span className="ml-auto font-medium text-slate-500">{inr(Math.round(payBase * (Number(d[k]) / 100)))}</span></div>
-              <T value={d.payTriggers?.[mk]?.note} onChange={(x: string) => setD({ ...d, payTriggers: { ...d.payTriggers, [mk]: { ...d.payTriggers?.[mk], note: x } } })} className="mt-1 text-[9px]" placeholder="trigger condition" />
-            </div>
-          ))}
+          {PAY.map(([k, label, mk]) => {
+            const pct = Number(d[k]) || 0;
+            // GST-inclusive: advance on BASIC (GST due on delivery, not advance),
+            // remaining milestones absorb the balance so the total stays the full
+            // GST-inclusive amount. Advance 100% / Basic-only follow payBase.
+            const amt = gstSplit && k === 'payAdvancePct' ? advanceAmount
+              : gstSplit && nonAdvPctSum > 0 ? Math.round(balance * (pct / nonAdvPctSum))
+              : Math.round(payBase * (pct / 100));
+            return (
+              <div key={k} className={`border ${B} bg-slate-50 p-2 text-[10px]`}>
+                <div className="font-semibold text-slate-600">{label}</div>
+                <div className="flex items-center gap-1"><T value={d[k]} onChange={(x: string) => setD({ ...d, [k]: x })} className="w-12 text-right" />%<span className="ml-auto font-medium text-slate-500">{inr(amt)}</span></div>
+                <T value={d.payTriggers?.[mk]?.note} onChange={(x: string) => setD({ ...d, payTriggers: { ...d.payTriggers, [mk]: { ...d.payTriggers?.[mk], note: x } } })} className="mt-1 text-[9px]" placeholder="trigger condition" />
+              </div>
+            );
+          })}
         </div>
       </div>
 

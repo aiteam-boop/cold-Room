@@ -356,6 +356,39 @@ export async function remindCurrent(docType: DocType, docId: string, actor: Acto
   await logAction(docType, docId, current.id, actor, 'REMINDED');
 }
 
+// Email the person who RAISED the document that it is now fully approved, with
+// the approved PDF attached. The auditor is copied by default — same policy as
+// the approval-request emails. Best-effort: a mail failure must never break
+// finalization (the in-app notification has already been recorded).
+async function emailCreatorApproved(opts: { createdById: string | null; docType: DocType; docId: string; label: string; number: string; projectId: string }) {
+  if (!opts.createdById || !isEmailEnabled()) return;
+  try {
+    const creator = await prisma.user.findUnique({ where: { id: opts.createdById }, select: { name: true, email: true } });
+    if (!creator?.email) return;
+    const heading = `${opts.label} ${opts.number} approved`;
+    const attach = await buildApprovalPdf(opts.docType, opts.docId).catch(() => null);
+    await sendEmail({
+      to: creator.email,
+      // Auditor copied by default on every approval outcome (PO/WO/GRN/payment).
+      cc: approvalCcEmail(),
+      subject: heading,
+      html: approvalEmailHtml({
+        heading,
+        lines: [
+          `Hi ${creator.name || 'there'},`,
+          `Your ${opts.label} <b>${opts.number}</b> has been fully approved.`,
+          attach ? 'The approved document is attached. You can also open it in the app.' : 'You can open it in the app.',
+        ],
+        actionUrl: `${appClientUrl()}/projects/${opts.projectId}`,
+        actionLabel: 'Open in CRMCTS',
+      }),
+      attachments: attach ? [{ filename: attach.filename, content: attach.buffer, contentType: 'application/pdf' }] : undefined,
+    });
+  } catch (e) {
+    console.error('[emailCreatorApproved] failed:', e);
+  }
+}
+
 // ── Finalize (document-specific side-effects on last approval) ───────────────
 // Called by the route/email endpoint when recordDecision returns 'COMPLETED'.
 export async function finalizeApproval(docType: DocType, docId: string, actorId: string) {
@@ -364,6 +397,7 @@ export async function finalizeApproval(docType: DocType, docId: string, actorId:
     if (!p) return;
     await prisma.vendorPayment.update({ where: { id: p.id }, data: { status: 'APPROVED', approvedById: actorId, approvedAt: new Date() } });
     if (p.filledById) await notifyUser(p.filledById, { type: 'PAYMENT_APPROVED', title: 'Payment approved', message: `${p.paymentNumber} has been fully approved.`, projectId: p.projectId, relatedDocType: 'VendorPayment', relatedDocId: p.id, link: `/projects/${p.projectId}` });
+    await emailCreatorApproved({ createdById: p.filledById, docType: 'PAYMENT', docId: p.id, label: 'Payment', number: p.paymentNumber, projectId: p.projectId });
     return;
   }
   if (docType === 'GRN') {
@@ -372,6 +406,7 @@ export async function finalizeApproval(docType: DocType, docId: string, actorId:
     await prisma.gRN.update({ where: { id: grn.id }, data: { status: 'APPROVED', approvedById: actorId, approvedAt: new Date() } });
     await prisma.procurementDocument.create({ data: { projectId: grn.projectId, type: 'GRN', fileName: `${grn.grnNumber}.pdf`, fileUrl: `/api/projects/${grn.projectId}/procurement/grns/${grn.id}/pdf`, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, uploadedById: actorId } });
     if (grn.raisedById) await notifyUser(grn.raisedById, { type: 'GRN_APPROVED', title: 'GRN approved', message: `${grn.grnNumber} has been fully approved.`, projectId: grn.projectId, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${grn.projectId}` });
+    await emailCreatorApproved({ createdById: grn.raisedById, docType: 'GRN', docId: grn.id, label: 'GRN', number: grn.grnNumber, projectId: grn.projectId });
     return;
   }
   const doc = await prisma.procurementDoc.findUnique({ where: { id: docId } });
@@ -384,6 +419,7 @@ export async function finalizeApproval(docType: DocType, docId: string, actorId:
   ]);
   await prisma.procurementDocument.create({ data: { projectId: doc.projectId, type: doc.type, fileName: `${doc.docNumber}.pdf`, fileUrl: `/api/projects/${doc.projectId}/procurement/docs/${doc.id}/pdf`, linkedDocNumber: doc.docNumber, vendorId: doc.vendorId, vendorName: doc.vendorName, uploadedById: actorId } });
   if (doc.createdById) await notifyUser(doc.createdById, { type: 'DOC_APPROVED', title: `${doc.type} approved`, message: `${doc.docNumber} has been fully approved and e-signed.`, projectId: doc.projectId, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${doc.projectId}` });
+  await emailCreatorApproved({ createdById: doc.createdById, docType: doc.type as DocType, docId: doc.id, label: doc.type, number: doc.docNumber, projectId: doc.projectId });
 }
 
 // Put the parent document ON HOLD, carrying the approver's note about what needs

@@ -61,6 +61,17 @@ export default function GanttTab({ projectId, focusId }: { projectId: string; fo
     onSuccess: (r) => { refresh(); alert(`Added ${r.data.created} standard activities${r.data.skipped ? `, skipped ${r.data.skipped} already present` : ''}.`); },
     onError: (e) => alert(errMsg(e)),
   });
+  // Reassign a task to a real project member so it carries a person (and, via the
+  // API, their employeeCode) — turning a role-only programme task into an
+  // owned one. Picking a person clears the free-text role label.
+  const assign = useMutation({
+    mutationFn: (v: { id: string; responsibleUserId: string | null; responsibleName: string | null }) =>
+      api.patch(`/projects/${projectId}/gantt/${v.id}`, { responsibleUserId: v.responsibleUserId, responsibleName: v.responsibleName }),
+    onSuccess: refresh, onError: (e) => alert(errMsg(e)),
+  });
+  // Project team members feed the per-row "assign person" dropdown.
+  const projectQ = useQuery({ queryKey: ['project', projectId], queryFn: async () => (await api.get(`/projects/${projectId}`)).data });
+  const members: { user: { id: string; name: string } }[] = projectQ.data?.project?.members ?? [];
 
   const { activities = [], summary } = (data ?? {}) as { activities: Activity[]; summary: any };
   const drawing = data?.drawingApproval as DrawingApprovalData | undefined;
@@ -161,7 +172,20 @@ export default function GanttTab({ projectId, focusId }: { projectId: string; fo
                       <div className="text-[10px] text-slate-400">
                         {fmtDate(a.plannedStartDate)} → {fmtDate(a.plannedEndDate)} · {style.label(a)}
                       </div>
-                      {a.responsibleDisplay && <div className="truncate text-[10px] text-slate-400">👤 {a.responsibleDisplay}</div>}
+                      {canManage ? (
+                        <select
+                          className={`mt-0.5 w-full rounded border px-1 py-0.5 text-[10px] ${a.responsibleUserId ? 'border-slate-200 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-700'}`}
+                          value={a.responsibleUserId ?? ''}
+                          title="Assign this task to a team member (gives it an owner + employee code)"
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => { const val = e.target.value; assign.mutate({ id: a.id, responsibleUserId: val || null, responsibleName: val ? null : (a.responsibleName ?? null) }); }}
+                        >
+                          <option value="">👤 {a.responsibleName || 'Unassigned'} — assign person…</option>
+                          {members.map((mm) => <option key={mm.user.id} value={mm.user.id}>{mm.user.name}</option>)}
+                        </select>
+                      ) : (
+                        a.responsibleDisplay && <div className="truncate text-[10px] text-slate-400">👤 {a.responsibleDisplay}</div>
+                      )}
                     </div>
 
                     <div className="relative h-5 flex-1 rounded bg-slate-100" title={`Planned: ${a.tatDays} days${a.responsibleDisplay ? ` | Responsible: ${a.responsibleDisplay}` : ''}`}>

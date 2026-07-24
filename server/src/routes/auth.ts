@@ -77,6 +77,20 @@ router.post(
   })
 );
 
+// POST /api/auth/logout — stamp the logout so the Users admin can show
+// attendance (login → logout sessions). JWT is stateless, so this is a
+// best-effort attendance marker fired by the client's logout button.
+router.post(
+  '/logout',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.sub;
+    await prisma.user.update({ where: { id: userId }, data: { lastLogoutAt: new Date() } }).catch(() => {});
+    await audit({ userId, action: 'USER_LOGOUT', entity: 'User', entityId: userId });
+    res.json({ ok: true });
+  })
+);
+
 // GET /api/auth/me — current user from token.
 router.get(
   '/me',
