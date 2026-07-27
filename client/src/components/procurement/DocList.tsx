@@ -7,7 +7,7 @@ import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import DocBuilder from './DocBuilder';
 import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
-interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; }
+interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; pendingWith?: string | null; pendingWithRole?: string | null; }
 
 export default function DocList({ projectId, role, type, focusId }: { projectId: string; role: string; type: 'PO' | 'WO'; focusId?: string }) {
   const qc = useQueryClient();
@@ -65,7 +65,11 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
                   <td className="text-slate-500">{fmtDate(d.docDate)}</td>
                   <td className="text-right">{money(d.basicAmount)}</td>
                   <td className="text-right font-medium">{money(d.finalAmount)}</td>
-                  <td><span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}</span></td>
+                  <td>
+                    <span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}</span>
+                    {/* Who this document is currently waiting on to approve. */}
+                    {d.pendingWith && <div className="mt-0.5 text-[11px] text-amber-600">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
+                  </td>
                   <td><DeliveryPill delivery={d.delivery} /></td>
                   <td className="px-2 text-right">
                     {isAdmin && d.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${d.docNumber}? This can't be undone.`) && del.mutate(d.id)}>Delete</button>}

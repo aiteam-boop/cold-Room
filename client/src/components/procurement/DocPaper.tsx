@@ -325,12 +325,12 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
             return (
               <div key={i} className={struck ? 'opacity-60' : ''}>
                 <div className="flex items-center gap-1">
-                  {/* Standard clause titles are read-only: the title is the clause's
-                      identity on save. Only the body text is editable. */}
-                  {s.isCustom ? (
-                    <T value={s.title} onChange={(x: string) => patch({ title: x })} className={`text-[11px] font-bold ${struck ? 'text-slate-500 line-through' : 'text-slate-800'}`} />
-                  ) : (
+                  {/* Any clause heading is editable EXCEPT locked legal/compliance
+                      ones, which must survive untouched. */}
+                  {s.isLocked ? (
                     <span className={`flex-1 text-[11px] font-bold ${struck ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{s.title}</span>
+                  ) : (
+                    <T value={s.title} onChange={(x: string) => patch({ title: x })} className={`flex-1 text-[11px] font-bold ${struck ? 'text-slate-500 line-through' : 'text-slate-800'}`} />
                   )}
                   {s.isLocked && <span className="shrink-0 text-[9px] text-slate-400" title="Legal / compliance clause — cannot be edited or struck off">🔒</span>}
                   {editable && !s.isLocked && (

@@ -320,6 +320,24 @@ router.post(
 
 const memberSchema = z.object({ email: z.string().email(), role: z.enum(PROJECT_ROLES) });
 
+// Active accounts that are NOT already on this project — feeds the "Invite
+// Member" dropdown so admins pick from existing users instead of typing.
+router.get(
+  '/:projectId/invitable-users',
+  requireProjectMember,
+  requireEdit('team'),
+  asyncHandler(async (req, res) => {
+    const members = await prisma.projectMember.findMany({ where: { projectId: req.params.projectId }, select: { userId: true } });
+    const memberIds = members.map((m) => m.userId);
+    const users = await prisma.user.findMany({
+      where: { active: true, ...(memberIds.length ? { id: { notIn: memberIds } } : {}) },
+      select: { id: true, name: true, email: true, role: true },
+      orderBy: { name: 'asc' },
+    });
+    res.json({ users });
+  })
+);
+
 router.post(
   '/:projectId/members',
   requireProjectMember,

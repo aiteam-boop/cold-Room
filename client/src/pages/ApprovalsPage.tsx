@@ -1,4 +1,4 @@
-import { Fragment } from 'react';
+import { Fragment, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -10,12 +10,19 @@ interface Item {
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string;
   basicAmount?: number | null; finalAmount?: number | null;
-  submittedAt: string; myRole?: string | null; legacy?: boolean;
+  submittedAt: string; myRole?: string | null; pendingWith?: string | null; pendingWithRole?: string | null; legacy?: boolean;
   invoiceNumber?: string | null; invoicePdfUrl?: string | null;
   // Post-approval amendments (oldest → newest). Non-empty means the document was
   // changed after a previous approval and resubmitted — show WHY it needs
   // re-approval, so the approver isn't deciding blind.
   amendments?: { remark: string; byName: string; at: string }[];
+}
+
+interface ApprovedItem {
+  kind: 'PO' | 'WO' | 'GRN';
+  docId: string; projectId: string; projectName?: string;
+  number: string; vendorName?: string; finalAmount?: number | null;
+  approvedAt?: string | null; approvedBy?: string | null;
 }
 
 // "My Approvals" — documents where the signed-in user is the current approver.
@@ -25,10 +32,17 @@ export default function ApprovalsPage() {
   const { hideFinancials, isAdmin } = useAuth();
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
 
+  const [tab, setTab] = useState<'pending' | 'approved'>('pending');
   const { data, isLoading, error } = useQuery({
     queryKey: ['approvals-mine'],
     queryFn: async () => (await api.get('/approvals/mine')).data.items as Item[],
     refetchInterval: 30_000,
+  });
+  // Already-approved documents (read-only history) — loaded when that tab opens.
+  const approvedQ = useQuery({
+    queryKey: ['approvals-approved'],
+    queryFn: async () => (await api.get('/approvals/approved')).data.items as ApprovedItem[],
+    enabled: tab === 'approved',
   });
 
   const act = useMutation({
@@ -70,7 +84,14 @@ export default function ApprovalsPage() {
           {isAdmin ? 'Every document currently awaiting approval, across all projects.' : 'Documents awaiting your approval. Approve, or put on hold with a note, directly here.'}
         </p>
       </div>
-      {items.length === 0 ? (
+
+      {/* Pending (actionable) vs Approved (read-only history). */}
+      <div className="flex gap-2 border-b border-slate-200">
+        <button onClick={() => setTab('pending')} className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${tab === 'pending' ? 'border-navy text-navy' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>Pending{items.length ? ` (${items.length})` : ''}</button>
+        <button onClick={() => setTab('approved')} className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${tab === 'approved' ? 'border-navy text-navy' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>Approved{approvedQ.data ? ` (${approvedQ.data.length})` : ''}</button>
+      </div>
+
+      {tab === 'pending' && (items.length === 0 ? (
         <EmptyState title="Nothing pending" hint="You have no documents waiting for your approval right now." />
       ) : (
         <div className="card overflow-hidden">
@@ -89,7 +110,9 @@ export default function ApprovalsPage() {
                       <td className="px-4 py-2">
                         <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                         {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
-                        {d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
+                        {/* Who this document is currently waiting on (current pending approver). */}
+                        {d.pendingWith && <div className="text-xs text-amber-600">⏳ Pending with: <span className="font-medium">{d.pendingWith}</span>{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
+                        {!d.pendingWith && d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
                         {d.legacy && <div className="text-xs text-slate-400">no chain — admin action</div>}
                         {d.invoicePdfUrl
                           ? <a href={d.invoicePdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View invoice{d.invoiceNumber ? ` (${d.invoiceNumber})` : ''}</a>
@@ -131,6 +154,38 @@ export default function ApprovalsPage() {
             </tbody>
           </table>
         </div>
+      ))}
+
+      {tab === 'approved' && (
+        approvedQ.isLoading ? <Spinner label="Loading approved…" />
+        : (approvedQ.data ?? []).length === 0 ? <EmptyState title="Nothing approved yet" hint="Approved PO/WO/GRN will appear here." />
+        : (
+          <div className="card overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
+                <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Approved</th><th>Approved by</th><th className="text-right">Action</th></tr>
+              </thead>
+              <tbody>
+                {(approvedQ.data ?? []).map((d) => (
+                  <tr key={`${d.kind}-${d.docId}`} className="border-b border-slate-100 hover:bg-slate-50">
+                    <td className="px-4 py-2">
+                      <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
+                      <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
+                    </td>
+                    <td className="text-slate-600">{d.projectName}</td>
+                    <td className="text-slate-600">{d.vendorName || '—'}</td>
+                    <td className="text-right font-medium">{money(d.finalAmount)}</td>
+                    <td className="text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
+                    <td className="text-slate-500">{d.approvedBy || '—'}</td>
+                    <td className="px-2 text-right">
+                      <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.kind}</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
     </div>
   );

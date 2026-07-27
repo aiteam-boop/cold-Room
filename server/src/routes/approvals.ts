@@ -208,12 +208,14 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
   // `amendments` (non-empty) means the doc was changed after a previous approval
   // and resubmitted — the approver sees that, and the reason, before deciding.
   const items = steps.map((s) => {
+    // `pendingWith` = the person this document is currently waiting on (the
+    // current pending approver), so the queue shows who must act next.
     if (s.docType === 'GRN') {
       const g = grnById.get(s.docId);
-      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) };
+      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) };
     }
     const d = docById.get(s.docId);
-    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, amendments: parseAmendments(d.amendments) };
+    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, amendments: parseAmendments(d.amendments) };
   }).filter(Boolean) as any[];
 
   // Admins also see legacy items that were submitted without an approval chain.
@@ -226,6 +228,38 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
     for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true, amendments: parseAmendments(d.amendments) });
     for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) });
   }
+
+  res.json({ items: maskFinancials(items, req.account) });
+}));
+
+// GET /api/approvals/approved — documents (PO/WO/GRN) already fully approved.
+// Admins see all (recent) across projects; everyone else sees the ones THEY
+// approved (they were a step in the chain and approved it). Read-only history.
+router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
+  const me = req.account!;
+  const admin = me.role === 'ADMIN';
+  let docWhere: any = { status: 'APPROVED' };
+  let grnWhere: any = { status: 'APPROVED' };
+  if (!admin) {
+    const mySteps = await prisma.approvalStep.findMany({ where: { approverId: me.id, status: 'APPROVED' }, select: { docId: true, docType: true } });
+    const poIds = mySteps.filter((s) => s.docType !== 'GRN').map((s) => s.docId);
+    const grnIds = mySteps.filter((s) => s.docType === 'GRN').map((s) => s.docId);
+    docWhere = { status: 'APPROVED', id: { in: poIds } };
+    grnWhere = { status: 'APPROVED', id: { in: grnIds } };
+  }
+  const [docs, grns] = await Promise.all([
+    prisma.procurementDoc.findMany({ where: docWhere, orderBy: { approvedAt: 'desc' }, take: 100, include: { project: { select: { name: true } } } }),
+    prisma.gRN.findMany({ where: grnWhere, orderBy: { approvedAt: 'desc' }, take: 100, include: { project: { select: { name: true } } } }),
+  ]);
+  // Resolve the finaliser's name for the "approved by" column.
+  const approverIds = [...new Set([...docs.map((d) => d.approvedById), ...grns.map((g) => g.approvedById)].filter(Boolean) as string[])];
+  const approvers = approverIds.length ? await prisma.user.findMany({ where: { id: { in: approverIds } }, select: { id: true, name: true } }) : [];
+  const nameById = new Map(approvers.map((a) => [a.id, a.name]));
+
+  const items = [
+    ...docs.map((d) => ({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null })),
+    ...grns.map((g) => ({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null })),
+  ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 
   res.json({ items: maskFinancials(items, req.account) });
 }));

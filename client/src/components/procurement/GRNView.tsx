@@ -95,6 +95,8 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
                       closes it — so flag the ones still waiting for it (§6). */}
                   <td className="pl-2">
                     <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>
+                    {/* Who this GRN is currently waiting on to approve. */}
+                    {g.pendingWith && <div className="mt-0.5 text-[11px] text-amber-600">⏳ {g.pendingWith}{g.pendingWithRole ? ` · ${g.pendingWithRole}` : ''}</div>}
                     {(g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl) && (
                       <div className="mt-0.5 text-[10px] leading-tight text-orange-600">tax invoice pending</div>
                     )}

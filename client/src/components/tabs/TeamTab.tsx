@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Modal } from '../ui';
@@ -59,6 +59,12 @@ function InviteModal({ projectId, onClose, onDone }: { projectId: string; onClos
   const [email, setEmail] = useState('');
   const [role, setRole] = useState('ENGINEER');
   const [err, setErr] = useState('');
+  // Existing accounts not already on this project — for the quick-pick dropdown.
+  const usersQ = useQuery({
+    queryKey: ['invitable-users', projectId],
+    queryFn: async () => (await api.get(`/projects/${projectId}/invitable-users`)).data.users as { id: string; name: string; email: string; role: string }[],
+  });
+  const options = usersQ.data ?? [];
   const m = useMutation({
     mutationFn: () => api.post(`/projects/${projectId}/members`, { email, role }),
     onSuccess: onDone,
@@ -67,8 +73,15 @@ function InviteModal({ projectId, onClose, onDone }: { projectId: string; onClos
   return (
     <Modal title="Invite Member" onClose={onClose}>
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); m.mutate(); }} className="space-y-3">
-        <p className="text-xs text-slate-500">The user must already have an account. Enter their email and assign a project role.</p>
-        <div><label className="label">Email</label><input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+        <p className="text-xs text-slate-500">The user must already have an account. Pick an existing user below, or type their email, and assign a project role.</p>
+        <div>
+          <label className="label">Select user{options.length ? ` (${options.length} available)` : ''}</label>
+          <select className="input" value={email} onChange={(e) => setEmail(e.target.value)}>
+            <option value="">{usersQ.isLoading ? 'Loading users…' : '— select a user —'}</option>
+            {options.map((u) => <option key={u.id} value={u.email}>{u.name} — {u.email}</option>)}
+          </select>
+        </div>
+        <div><label className="label">…or type email</label><input className="input" type="email" required value={email} placeholder="name@company.com" onChange={(e) => setEmail(e.target.value)} /></div>
         <div><label className="label">Role</label><select className="input" value={role} onChange={(e) => setRole(e.target.value)}>{ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></div>
         {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
         <div className="flex justify-end gap-2 pt-1">

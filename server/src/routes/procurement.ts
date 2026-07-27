@@ -150,6 +150,12 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
     },
   });
   const creators = await creatorsById(docs.map((d) => d.createdById));
+  // For docs still awaiting approval, who is it currently pending with?
+  const pendingIds = docs.filter((d) => d.status === 'PENDING_APPROVAL').map((d) => d.id);
+  const pendingSteps = pendingIds.length
+    ? await prisma.approvalStep.findMany({ where: { docId: { in: pendingIds }, status: 'PENDING' }, select: { docId: true, approverName: true, approverRole: true } })
+    : [];
+  const pendingBy = new Map(pendingSteps.map((s) => [s.docId, s]));
   res.json({
     docs: maskFinancials(
       docs.map((d) => ({
@@ -158,6 +164,8 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         counts: d._count,
         delivery: deliveryInfo(d, d.grns), // G7 — promised vs actual, derived
         createdBy: (d.createdById && creators.get(d.createdById)) || null,
+        pendingWith: pendingBy.get(d.id)?.approverName ?? null,
+        pendingWithRole: pendingBy.get(d.id)?.approverRole ?? null,
       })),
       req.account,
     ),
@@ -742,10 +750,18 @@ router.get('/grns', requireProjectMember, requirePage('grn'), asyncHandler(async
   const grns = await prisma.gRN.findMany({ where: { projectId: req.params.projectId }, orderBy: { createdAt: 'desc' }, include: { doc: { select: { docNumber: true, type: true, finalAmount: true } } } });
   // Who raised each GRN — shown on the register so it is clear who to go back to.
   const creators = await creatorsById(grns.map((g) => g.raisedById));
+  // Current pending approver for GRNs still awaiting approval (status OPEN).
+  const pendingIds = grns.filter((g) => g.status === 'OPEN').map((g) => g.id);
+  const pendingSteps = pendingIds.length
+    ? await prisma.approvalStep.findMany({ where: { docType: 'GRN', docId: { in: pendingIds }, status: 'PENDING' }, select: { docId: true, approverName: true, approverRole: true } })
+    : [];
+  const pendingBy = new Map(pendingSteps.map((s) => [s.docId, s]));
   res.json({
     grns: grns.map((g) => ({
       ...serializeGrn(g, req.account),
       createdBy: (g.raisedById && creators.get(g.raisedById)) || null,
+      pendingWith: pendingBy.get(g.id)?.approverName ?? null,
+      pendingWithRole: pendingBy.get(g.id)?.approverRole ?? null,
     })),
   });
 }));
