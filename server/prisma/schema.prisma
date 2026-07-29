@@ -252,6 +252,12 @@ model ProcurementDoc {
   // the extra ones the user picked to compare.
   budgetCompareItemIds String?
 
+  // Per-payment-term Proforma Invoices uploaded on the PO, so the approver sees
+  // each term's PI and a GRN raised for that term auto-fetches it. JSON keyed by
+  // the term key (advance | beforeDelivery | running | postDelivery |
+  // postCompletion | retention): { [termKey]: { piNumber, piDate, piValue, piPdfUrl } }.
+  termPis String?
+
   createdById   String?
   approvedById  String?
   approvedAt    DateTime?

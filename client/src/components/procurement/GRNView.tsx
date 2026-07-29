@@ -488,11 +488,19 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
                 value={g.milestoneId || ''}
                 onChange={(e) => {
                   const m = milestones.find((x) => x.id === e.target.value);
+                  const pi = m?.pi; // PI uploaded on the PO for this term (auto-fetch)
                   // Picking a term pre-fills what it's worth (still editable for a
-                  // partial payment) — same behaviour as the vendor-payment form.
+                  // partial payment) — same behaviour as the vendor-payment form —
+                  // and auto-fetches the PO's PI for that term.
                   setG({
                     ...g, milestoneId: m?.id ?? null, milestoneKey: m?.fieldKey ?? null, milestoneName: m?.name ?? null,
                     amountToPay: m?.inrAmount != null ? m.inrAmount : g.amountToPay,
+                    ...(pi ? {
+                      piNumber: pi.piNumber ?? g.piNumber,
+                      piDate: pi.piDate ?? g.piDate,
+                      piValue: pi.piValue ?? g.piValue,
+                      piPdfUrl: pi.piPdfUrl ?? g.piPdfUrl,
+                    } : {}),
                   });
                 }}
               >

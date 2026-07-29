@@ -123,6 +123,8 @@ function serializeDoc(d: any) {
     amendments: parseJson(d.amendments, []),
     // The persisted "compare against" BOQ items on the Budget vs Actual panel (§5).
     budgetCompareItemIds: parseJson(d.budgetCompareItemIds, []),
+    // Per-payment-term Proforma Invoices uploaded on the PO.
+    termPis: parseJson(d.termPis, {}),
     paymentTotalPct: paymentTotalPct(d),
     // Derived, never stored (G7). Only when the caller loaded the GRNs.
     ...(Array.isArray(d.grns) ? { delivery: deliveryInfo(d, d.grns) } : {}),
@@ -243,6 +245,7 @@ const updateSchema = z.object({
   payPostDeliveryPct: num, payPostCompletionPct: num, payRetentionPct: num,
   payGstInclusive: z.boolean().optional(),
   customColumns: z.any().optional(),
+  termPis: z.any().optional(),
   payTriggers: z.any().optional(),
   termsSections: z.array(z.object({
     title: z.string(), text: z.string().default(''),
@@ -337,6 +340,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
       ...(b.payRetentionPct !== undefined && { payRetentionPct: b.payRetentionPct }),
       ...(b.payGstInclusive !== undefined && { payGstInclusive: b.payGstInclusive }),
       ...(b.customColumns !== undefined && { customColumns: JSON.stringify(b.customColumns) }),
+      ...(b.termPis !== undefined && { termPis: JSON.stringify(b.termPis) }),
       ...(b.payTriggers !== undefined && { payTriggers: JSON.stringify(b.payTriggers) }),
       ...(termsSections !== undefined && { termsSections: JSON.stringify(termsSections) }),
       ...(b.overrides !== undefined && { overrides: JSON.stringify(b.overrides) }),
@@ -573,6 +577,31 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, withApprovals ? 'Approved' : undefined)}"`);
   renderProcurementPdf({ ...doc, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res);
+}));
+
+// POST .../docs/:docId/term-pi/:termKey — upload the Proforma Invoice for ONE
+// payment term (advance | beforeDelivery | …). Stored on the PO under termPis so
+// the approver sees each term's PI and a GRN raised for that term auto-fetches it.
+const TERM_KEYS = ['advance', 'beforeDelivery', 'running', 'postDelivery', 'postCompletion', 'retention'];
+router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdit(...DOC_PAGES), upload.single('file'), asyncHandler(async (req, res) => {
+  const termKey = req.params.termKey;
+  if (!TERM_KEYS.includes(termKey)) throw badRequest('Unknown payment term.');
+  if (!req.file) throw badRequest('No file uploaded (field: file)');
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
+  if (!doc) throw notFound('Document not found');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  // Read the PI so number / date / value fill themselves (best-effort).
+  const extracted = await extractPiFields(req.file.path, req.file.mimetype).catch(() => null);
+  const termPis = parseJson(doc.termPis, {}) as Record<string, any>;
+  termPis[termKey] = {
+    piPdfUrl: fileUrl,
+    piNumber: extracted?.piNumber ?? termPis[termKey]?.piNumber ?? null,
+    piDate: extracted?.piDate ?? termPis[termKey]?.piDate ?? null,
+    piValue: extracted?.piValue ?? termPis[termKey]?.piValue ?? null,
+  };
+  await prisma.procurementDoc.update({ where: { id: doc.id }, data: { termPis: JSON.stringify(termPis) } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: doc.docNumber, vendorName: doc.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.json({ ok: true, termKey, pi: termPis[termKey], extracted });
 }));
 
 // ── Payment milestones ──────────────────────────────────────────────────────
@@ -815,10 +844,15 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
   // advance already paid, which auto-fills to compute the balance.
   const milestones = await milestonesForDoc(grn.docId);
   const advanceOnPo = await advancePaidOnDoc(grn.docId);
+  // Attach each term's PI (uploaded on the PO) so picking the term in the GRN
+  // form auto-fetches that term's PI (number / date / value / PDF).
+  const parentDoc = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { termPis: true } });
+  const termPis = parseJson(parentDoc?.termPis, {}) as Record<string, any>;
+  const milestonesWithPi = milestones.map((mm: any) => ({ ...mm, pi: termPis[mm.fieldKey] ?? null }));
   // The vendor's KYC already lives on the vendor master, so the payment section
   // shows it rather than asking for it again — read-only, never re-uploaded here.
   const kycDocs = await vendorKycDocs(grn.doc?.vendorId ?? null);
-  res.json({ grn: serializeGrn(grn, req.account), approval, milestones, advanceOnPo, kycDocs });
+  res.json({ grn: serializeGrn(grn, req.account), approval, milestones: milestonesWithPi, advanceOnPo, kycDocs });
 }));
 
 /** EVERY KYC document on file for a vendor (GST certificate, PAN, cancelled

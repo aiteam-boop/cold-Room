@@ -7,6 +7,7 @@ import ProjectsList from './pages/ProjectsList';
 import ProjectWorkspace from './pages/ProjectWorkspace';
 import VendorsPage from './pages/VendorsPage';
 import ApprovalsPage from './pages/ApprovalsPage';
+import MasterReports from './pages/MasterReports';
 import UsersAdmin from './pages/UsersAdmin';
 import ApiKeysAdmin from './pages/ApiKeysAdmin';
 import MachineModelsPage from './pages/MachineModelsPage';
@@ -63,6 +64,7 @@ export default function App() {
         <Route path="/projects/:projectId" element={<ProjectWorkspace />} />
         <Route path="/vendors" element={<RequirePage page="vendors"><VendorsPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
+        <Route path="/reports" element={<RequirePage page="reports"><MasterReports /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
         <Route path="/settings/api-keys" element={<RequireSuperAdmin><ApiKeysAdmin /></RequireSuperAdmin>} />
         <Route path="/settings/machine-models" element={<RequirePage page="machinemodels"><MachineModelsPage /></RequirePage>} />

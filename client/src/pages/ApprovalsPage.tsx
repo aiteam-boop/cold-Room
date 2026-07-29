@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -108,7 +109,7 @@ export default function ApprovalsPage() {
                   <Fragment key={`${d.kind}-${d.docId}`}>
                     <tr className={`hover:bg-slate-50 ${latest ? '' : 'border-b border-slate-100'}`}>
                       <td className="px-4 py-2">
-                        <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
+                        <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                         {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
                         {/* Who this document is currently waiting on (current pending approver). */}
                         {d.pendingWith && <div className="text-xs text-amber-600">⏳ Pending with: <span className="font-medium">{d.pendingWith}</span>{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
@@ -169,7 +170,7 @@ export default function ApprovalsPage() {
                 {(approvedQ.data ?? []).map((d) => (
                   <tr key={`${d.kind}-${d.docId}`} className="border-b border-slate-100 hover:bg-slate-50">
                     <td className="px-4 py-2">
-                      <span className="font-medium text-navy">{d.number}</span> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
+                      <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
                     </td>
                     <td className="text-slate-600">{d.projectName}</td>

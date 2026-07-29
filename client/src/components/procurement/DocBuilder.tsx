@@ -544,6 +544,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         <BudgetVsActual projectId={projectId} docId={docId} docType={d.type} lineItems={d.lineItems} boqItems={boqItems}
           persistedCompareIds={d.budgetCompareItemIds ?? []} poBasic={basic} />
       )}
+
+      {/* Per-payment-term Proforma Invoices — the approver sees these with the PO,
+          and a GRN raised for a term auto-fetches its PI. */}
+      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} />
     </div>
   );
 }
@@ -730,4 +734,58 @@ function F({ label, v, on, ed }: { label: string; v: any; on: (x: string) => voi
 }
 function FT({ label, v, on, ed }: { label: string; v: any; on: (x: string) => void; ed: boolean }) {
   return <div><label className="label">{label}</label><textarea className="input text-xs" rows={3} disabled={!ed} value={v || ''} onChange={(e) => on(e.target.value)} /></div>;
+}
+
+// Per-payment-term Proforma Invoice upload panel (below the PO, like Budget vs
+// Actual). Uploads to the PO's termPis; the approver sees these and a GRN raised
+// for a term auto-fetches its PI.
+const PI_TERMS = [
+  { key: 'advance', name: 'Advance', pct: 'payAdvancePct' },
+  { key: 'beforeDelivery', name: 'Before Delivery', pct: 'payBeforeDeliveryPct' },
+  { key: 'running', name: 'Running', pct: 'payRunningPct' },
+  { key: 'postDelivery', name: 'Post Delivery', pct: 'payPostDeliveryPct' },
+  { key: 'postCompletion', name: 'Post Completion', pct: 'payPostCompletionPct' },
+  { key: 'retention', name: 'Retention', pct: 'payRetentionPct' },
+] as const;
+function TermPIs({ projectId, docId, doc, editable }: { projectId: string; docId: string; doc: any; editable: boolean }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState<string | null>(null);
+  const termPis = doc.termPis || {};
+  const terms = PI_TERMS.filter((t) => (Number(doc[t.pct]) || 0) > 0);
+  const upload = async (key: string, file: File) => {
+    setBusy(key);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      await api.post(`/projects/${projectId}/procurement/docs/${docId}/term-pi/${key}`, fd);
+      qc.invalidateQueries({ queryKey: ['proc-doc', docId] });
+    } catch (e) { alert(errMsg(e)); } finally { setBusy(null); }
+  };
+  if (!terms.length) return null;
+  return (
+    <div className="card p-4">
+      <div className="text-sm font-semibold text-slate-600">Proforma Invoices (PI) — per payment term</div>
+      <p className="mb-2 mt-0.5 text-xs text-slate-400">Upload the PI for each payment term. The approver sees these with the PO, and a GRN raised for that term auto-fetches its PI.</p>
+      <div className="divide-y divide-slate-100">
+        {terms.map((t) => {
+          const pi = termPis[t.key];
+          return (
+            <div key={t.key} className="flex items-center justify-between gap-3 py-2 text-sm">
+              <div className="font-medium text-slate-700">{t.name} <span className="text-xs text-slate-400">{Number(doc[t.pct]) || 0}%</span></div>
+              <div className="flex items-center gap-3">
+                {pi?.piNumber && <span className="text-xs text-slate-500">PI {pi.piNumber}{pi.piValue != null ? ` · ₹${Number(pi.piValue).toLocaleString('en-IN')}` : ''}</span>}
+                {pi?.piPdfUrl && <a href={pi.piPdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View PI</a>}
+                {!pi?.piPdfUrl && <span className="text-xs text-slate-300">no PI yet</span>}
+                {editable && (
+                  <label className="cursor-pointer text-xs font-medium text-navy hover:underline">
+                    {busy === t.key ? 'Uploading…' : pi?.piPdfUrl ? 'Replace' : '⬆ Upload PI'}
+                    <input type="file" className="hidden" accept="application/pdf,image/*" disabled={busy === t.key} onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(t.key, f); e.currentTarget.value = ''; }} />
+                  </label>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }

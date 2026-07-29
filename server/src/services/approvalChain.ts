@@ -80,6 +80,9 @@ export interface ApprovalDocData {
   // budgeted at vs what this document spends on it, so the approver sees the
   // variance right in the approval. Empty when nothing is budgeted/compared.
   budget?: BudgetRow[];
+  // Per-payment-term Proforma Invoices uploaded on the PO, so the approver can
+  // see each term's PI (number / value / link) while approving.
+  termPis?: { term: string; piNumber: string | null; piValue: number | null; piPdfPath: string | null }[];
 }
 
 export interface BudgetRow {
@@ -185,7 +188,18 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
     pdfPath: `/api/projects/${d.projectId}/procurement/docs/${d.id}/pdf`, projectId: d.projectId,
     amendments: parseAmendments(d.amendments),
     budget,
+    termPis: parseTermPis(d.termPis),
   };
+}
+
+// Parse the PO's per-term Proforma Invoices into the approver-facing list.
+const TERM_NAMES: Record<string, string> = { advance: 'Advance', beforeDelivery: 'Before Delivery', running: 'Running', postDelivery: 'Post Delivery', postCompletion: 'Post Completion', retention: 'Retention' };
+function parseTermPis(json: string | null | undefined): { term: string; piNumber: string | null; piValue: number | null; piPdfPath: string | null }[] {
+  let raw: Record<string, any> = {};
+  try { raw = json ? JSON.parse(json) : {}; } catch { return []; }
+  return Object.entries(raw)
+    .filter(([, v]) => v && (v.piPdfUrl || v.piNumber || v.piValue != null))
+    .map(([k, v]: [string, any]) => ({ term: TERM_NAMES[k] || k, piNumber: v.piNumber ?? null, piValue: v.piValue ?? null, piPdfPath: v.piPdfUrl ?? null }));
 }
 
 // Render the document's PDF to a Buffer so it can be attached to the approval
@@ -262,6 +276,8 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
         amendments: data.amendments,
         // Budget vs Actual for the approver (PRD §5).
         budget: data.budget,
+        // Per-payment-term Proforma Invoices, linked so the approver can open them.
+        termPis: (data.termPis || []).map((t) => ({ term: t.term, piNumber: t.piNumber, piValue: t.piValue, piUrl: t.piPdfPath ? `${appBaseUrl()}${t.piPdfPath}` : null })),
       }),
     });
     return;

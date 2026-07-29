@@ -32,6 +32,7 @@ export default function AppShell() {
               {/* Approvals is a personal queue — always reachable so designated
                   approvers (who may lack the page grant) can act on their items. */}
               <NavLink to="/approvals" className={navCls}>Approvals</NavLink>
+              {canView('reports') && <NavLink to="/reports" className={navCls}>Reports</NavLink>}
               {canView('machinemodels') && <NavLink to="/settings/machine-models" className={navCls}>Machine Models</NavLink>}
               {isAdmin && <NavLink to="/settings/users" className={navCls}>Users</NavLink>}
               {isSuperAdmin && <NavLink to="/settings/api-keys" className={navCls}>API Keys</NavLink>}

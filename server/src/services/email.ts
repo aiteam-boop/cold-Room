@@ -169,6 +169,30 @@ export interface ApprovalDocEmail {
   amendments?: { remark: string; byName: string; at: string }[];
   // Budget vs Actual rows for a PO/WO (PRD §5) — budget, this-PO spend, variance.
   budget?: { description: string; budget: number | null; actual: number | null; variance: number | null; variancePct: number | null; wholePo?: boolean }[];
+  // Per-payment-term Proforma Invoices uploaded on the PO — so the approver can
+  // open each term's PI right from the approval email.
+  termPis?: { term: string; piNumber: string | null; piValue: number | null; piUrl: string | null }[];
+}
+
+// The "Proforma Invoices" block — one row per payment term that has a PI, with a
+// link to open it. Shown to the approver alongside the document.
+function piBlock(rows: ApprovalDocEmail['termPis']): string {
+  if (!rows?.length) return '';
+  const body = rows.map((r) => `<tr>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;font-size:12px;color:#0f172a">${escapeHtml(r.term)}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;font-size:12px">${r.piNumber ? escapeHtml(r.piNumber) : '—'}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px">${r.piValue != null ? money(r.piValue) : '—'}</td>
+      <td style="padding:6px 8px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px">${r.piUrl ? `<a href="${r.piUrl}" style="color:#1d4ed8;font-weight:600">View PI</a>` : '—'}</td>
+    </tr>`).join('');
+  return `<div style="margin-top:16px;font-size:12px;font-weight:700;color:#0f2942">Proforma Invoices (per payment term)</div>
+    <table style="width:100%;border-collapse:collapse;margin-top:6px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+      <tr style="background:#f1f5f9;color:#475569;font-size:11px;text-transform:uppercase">
+        <td style="padding:6px 8px">Payment Term</td>
+        <td style="padding:6px 8px">PI No.</td>
+        <td style="padding:6px 8px;text-align:right">PI Value</td>
+        <td style="padding:6px 8px;text-align:right">Document</td>
+      </tr>${body}
+    </table>`;
 }
 
 // The "Budget vs Actual" block — what each BOQ item was budgeted at vs what this
@@ -274,6 +298,7 @@ export function approvalDocEmailHtml(m: ApprovalDocEmail): string {
       </table>` : ''}
 
       ${budgetBlock(m.budget)}
+      ${piBlock(m.termPis)}
 
       <div style="margin-top:20px;text-align:center;color:#475569;font-size:13px">Click <b>View ${escapeHtml(m.label)}</b> to read the full document and record your decision there — <b>Approve</b>, or put it <b>On Hold</b> with a note on what needs correcting.</div>
       ${/* The decision buttons live on the review page, so say so on the button

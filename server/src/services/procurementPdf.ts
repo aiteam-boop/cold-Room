@@ -289,7 +289,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     const fmtDT = (v: Date | string) => {
       const d = v instanceof Date ? v : new Date(v);
       if (Number.isNaN(d.getTime())) return '';
-      return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+      return d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
     };
     // Measure exact heights (remarks can wrap to several lines) so nothing
     // overlaps and the box is sized to fit. Indent is done via x, NOT pad.
@@ -447,7 +447,7 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   if (gApprovals.length) {
     const fmtDT = (v: Date | string) => {
       const d = v instanceof Date ? v : new Date(v);
-      return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+      return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
     };
     const gRemarkH = (r: string) => { pdf.font('Helvetica').fontSize(8); return pdf.heightOfString(`Remark: ${r}`, { width: tableW - 20 }); };
     let need = 22;

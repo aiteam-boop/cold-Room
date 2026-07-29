@@ -50,6 +50,9 @@ export interface RegisterRow {
   docType: string;
   status: string;
   docDate: Date;
+  // Which project this document belongs to (used by the cross-project master register).
+  projectId: string;
+  projectName: string | null;
   vendorId: string | null;
   vendorName: string | null;
   basicAmount: number;
@@ -84,11 +87,12 @@ export interface ProcurementRegister {
   };
 }
 
-export async function buildProcurementRegister(projectId: string, now = new Date()): Promise<ProcurementRegister> {
+export async function buildProcurementRegister(projectId: string | string[], now = new Date()): Promise<ProcurementRegister> {
   const docs = await prisma.procurementDoc.findMany({
-    where: { projectId, status: { not: 'REJECTED' } },
+    where: { projectId: Array.isArray(projectId) ? { in: projectId } : projectId, status: { not: 'REJECTED' } },
     orderBy: { docDate: 'desc' },
     include: {
+      project: { select: { name: true } },
       milestones: { orderBy: { sortOrder: 'asc' } },
       grns: {
         orderBy: { grnDate: 'asc' },
@@ -125,6 +129,7 @@ export async function buildProcurementRegister(projectId: string, now = new Date
 
     return {
       docId: d.id, docNumber: d.docNumber, docType: d.type, status: d.status, docDate: d.docDate,
+      projectId: d.projectId, projectName: d.project?.name ?? null,
       vendorId: d.vendorId, vendorName: d.vendorName,
       basicAmount: d.basicAmount, finalAmount: d.finalAmount,
       delivery, grns, invoicedValue, milestones,
@@ -173,12 +178,12 @@ export interface VendorOutstandingRow {
   nextDue: { docNumber: string; name: string; inrAmount: number; expectedDate: Date | null } | null;
 }
 
-export async function buildVendorOutstanding(projectId: string, now = new Date()): Promise<VendorOutstandingRow[]> {
+export async function buildVendorOutstanding(projectId: string | string[], now = new Date()): Promise<VendorOutstandingRow[]> {
   const { rows } = await buildProcurementRegister(projectId, now);
   const live = rows.filter((r) => r.status === 'APPROVED');
 
   const docs = await prisma.procurementDoc.findMany({
-    where: { projectId, status: 'APPROVED' },
+    where: { projectId: Array.isArray(projectId) ? { in: projectId } : projectId, status: 'APPROVED' },
     select: {
       id: true, vendorId: true,
       payAdvancePct: true, payBeforeDeliveryPct: true, payRunningPct: true,
