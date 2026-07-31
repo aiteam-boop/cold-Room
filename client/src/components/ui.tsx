@@ -33,7 +33,7 @@ export function Gauge({ pct, size = 160 }: { pct: number; size?: number }) {
         strokeLinecap="round"
         style={{ transition: 'stroke-dashoffset .6s ease' }}
       />
-      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" className="rotate-90" style={{ transformOrigin: 'center', fontSize: 28, fontWeight: 700, fill: '#0f2942' }}>
+      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" className="rotate-90" style={{ transformOrigin: 'center', fontSize: 28, fontWeight: 800, fill: '#052379', fontFamily: 'Manrope, system-ui, sans-serif' }}>
         {pct}%
       </text>
     </svg>
@@ -55,11 +55,11 @@ export function Spinner({ label }: { label?: string }) {
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8" onClick={onClose}>
-      <div className={`card w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} my-auto`} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <h3 className="text-base font-semibold text-navy">{title}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">✕</button>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-8" style={{ background: 'var(--scrim, rgba(5,35,121,.34))', backdropFilter: 'blur(2px)' }} onClick={onClose}>
+      <div className={`w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} my-auto overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg`} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+          <h3 className="font-display text-[15px] font-extrabold text-navy">{title}</h3>
+          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700">✕</button>
         </div>
         <div className="p-5">{children}</div>
       </div>
@@ -70,9 +70,9 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
 export function KPI({ label, value, sub, accent }: { label: string; value: ReactNode; sub?: string; accent?: string }) {
   return (
     <div className="card p-4">
-      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-1 text-2xl font-bold" style={{ color: accent ?? '#0f2942' }}>{value}</div>
-      {sub && <div className="mt-0.5 text-xs text-slate-500">{sub}</div>}
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1.5 font-display text-[22px] font-extrabold leading-tight tracking-tight" style={{ color: accent ?? '#052379' }}>{value}</div>
+      {sub && <div className="mt-0.5 text-[11px] text-slate-400">{sub}</div>}
     </div>
   );
 }
@@ -80,7 +80,7 @@ export function KPI({ label, value, sub, accent }: { label: string; value: React
 export function EmptyState({ title, hint, action }: { title: string; hint?: string; action?: ReactNode }) {
   return (
     <div className="card flex flex-col items-center gap-2 p-10 text-center">
-      <div className="text-base font-semibold text-slate-700">{title}</div>
+      <div className="font-display text-base font-bold text-slate-700">{title}</div>
       {hint && <div className="max-w-md text-sm text-slate-500">{hint}</div>}
       {action}
     </div>

@@ -45,7 +45,7 @@ export default function DashboardExtras({ projectId, onOpenGantt }: { projectId:
           <div className="grid grid-cols-3 gap-2 text-center">
             <Stat n={orders.length} l="Total" />
             <Stat n={openCo} l="Open" c="#d97706" />
-            <Stat n={`₹${approvedImpact.toLocaleString('en-IN')}`} l="Approved impact" c="#0f2942" />
+            <Stat n={`₹${approvedImpact.toLocaleString('en-IN')}`} l="Approved impact" c="#052379" />
           </div>
         </div>
       </div>
@@ -79,7 +79,7 @@ export default function DashboardExtras({ projectId, onOpenGantt }: { projectId:
 }
 
 function Stat({ n, l, c, sub }: { n: any; l: string; c?: string; sub?: string }) {
-  return <div className="rounded-lg bg-slate-50 p-2"><div className="text-xl font-bold" style={{ color: c ?? '#0f2942' }}>{n}</div><div className="text-[11px] text-slate-400">{l}{sub ? ` · ${sub}` : ''}</div></div>;
+  return <div className="rounded-lg bg-slate-50 p-2"><div className="text-xl font-bold" style={{ color: c ?? '#052379' }}>{n}</div><div className="text-[11px] text-slate-400">{l}{sub ? ` · ${sub}` : ''}</div></div>;
 }
 
 // Compact Gantt summary (Sprint PRD §10.2) — real activity bars, not a static

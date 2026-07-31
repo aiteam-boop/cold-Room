@@ -38,8 +38,8 @@ export default function FloorPlan2D<Z extends FloorZone>({ zones, onSelect, sele
             <g key={z.id} className="cursor-pointer" onClick={() => onSelect(z)}
                onMouseMove={(e) => { const r = (e.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect(); setHover({ z, x: e.clientX - r.left, y: e.clientY - r.top }); }}
                onMouseLeave={() => setHover(null)}>
-              <polygon points={points} fill={color} fillOpacity={isSel ? 0.85 : 0.62} stroke={isSel ? '#0f2942' : '#ffffff'} strokeWidth={isSel ? 0.8 : 0.5} />
-              <text x={c.x} y={c.y - 1} textAnchor="middle" style={{ fontSize: 2.6, fontWeight: 600, fill: '#0f2942' }}>{z.zoneName}</text>
+              <polygon points={points} fill={color} fillOpacity={isSel ? 0.85 : 0.62} stroke={isSel ? '#052379' : '#ffffff'} strokeWidth={isSel ? 0.8 : 0.5} />
+              <text x={c.x} y={c.y - 1} textAnchor="middle" style={{ fontSize: 2.6, fontWeight: 600, fill: '#052379' }}>{z.zoneName}</text>
               <text x={c.x} y={c.y + 2.6} textAnchor="middle" style={{ fontSize: 2.4, fill: '#1e293b' }}>{z.completionPct}%</text>
             </g>
           );

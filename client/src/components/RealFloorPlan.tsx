@@ -69,7 +69,7 @@ export default function RealFloorPlan({ projectId, drawingId, onSelect, selected
               ) : (
                 <circle cx={sx} cy={sy} r={radius(r.areaSqFt)} fill={col} fillOpacity={sel ? 0.5 : 0.32} stroke={col} strokeWidth={stroke * (sel ? 4 : 2)} strokeDasharray={`${stroke * 6} ${stroke * 4}`} />
               )}
-              <text x={sx} y={sy - font * 0.5} textAnchor="middle" style={{ fontSize: font, fontWeight: 700, fill: '#0f2942', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.14 }}>{r.name}</text>
+              <text x={sx} y={sy - font * 0.5} textAnchor="middle" style={{ fontSize: font, fontWeight: 700, fill: '#052379', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.14 }}>{r.name}</text>
               {(r.details?.areaSqFt ?? r.areaSqFt) != null && (
                 <text x={sx} y={sy + font * 0.55} textAnchor="middle" style={{ fontSize: font * 0.78, fill: '#334155', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.12 }}>
                   {(r.details?.areaSqFt ?? r.areaSqFt).toLocaleString()} sq.ft{r.details?.temperature ? ` · ${r.details.temperature}°C` : ''}

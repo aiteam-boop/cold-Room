@@ -372,7 +372,7 @@ function RoomDetailPopup({ room, onClose }: { room: any; onClose: () => void }) 
   const d = room.details || {};
   const area = d.areaSqFt ?? room.areaSqFt;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(5,35,121,0.34)] p-4" onClick={onClose}>
       <div className="card max-h-[85vh] w-full max-w-md overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between">
           <div>

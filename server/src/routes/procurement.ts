@@ -618,8 +618,8 @@ router.post('/docs/:docId/milestones/:mid/trigger', requireProjectMember, requir
   if (!hasApprovedGrn) {
     throw badRequest(
       grns.length === 0
-        ? `No GRN has been raised for this payment (${m.name}) yet. Raise a GRN (Goods Receipt) for it and get it approved before triggering.`
-        : `The GRN for this payment (${m.name}) is still pending approval. Once the GRN is approved you can trigger this payment.`,
+        ? `No payment has been raised for this term (${m.name}) yet. Create a Payment for it and get it approved before triggering.`
+        : `The payment for this term (${m.name}) is still pending approval. Once it is approved you can trigger this payment.`,
     );
   }
   const updated = await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'TRIGGERED', actualTriggerDate: date ? new Date(date) : new Date(), accountsNotifiedAt: new Date() } });
@@ -818,7 +818,9 @@ router.post('/grns', requireProjectMember, requireEdit('grn'), asyncHandler(asyn
   const prior = await prisma.gRNLineItem.groupBy({ by: ['lineItemId'], where: { lineItem: { docId }, grn: { status: 'APPROVED' } }, _sum: { receiptQty: true } });
   const priorMap = new Map(prior.map((p) => [p.lineItemId, p._sum.receiptQty ?? 0]));
 
-  const grnNumber = await nextDocNumber('GRN');
+  // This record is the payment entry (surfaced as "Payment") — number it PAY-QAS-###.
+  // The real goods-receipt register owns the GRN-QAS-### series now.
+  const grnNumber = await nextDocNumber('PAY');
   const grn = await prisma.gRN.create({
     data: {
       projectId: req.params.projectId, docId, grnNumber, vendorName: doc.vendorName, siteAddress: doc.siteAddress || doc.shipTo, raisedById: req.user!.sub, status: 'DRAFT',
@@ -1135,6 +1137,126 @@ router.get('/grns/:grnId/pdf', requireProjectMember, requirePage('grn'), asyncHa
   renderGRNPdf({ ...grn, docNumber: grn.doc.docNumber, approvals } as any, res);
 }));
 
+// ── Goods Receipt (physical delivery at site) ────────────────────────────────
+// A literal GRN: material arriving on site against an approved PO/WO. Separate
+// from the payment record above (which is surfaced as "Payment"): it captures
+// only the delivery (vehicle/driver/challan) and what was received per line.
+// Shares the 'grn' page grant, so anyone who could open the old GRN sees it.
+// A goods receipt is about the physical delivery, not the money — so no PO
+// pricing is attached here (that lives on the Payment record). Just surface how
+// much of each line is still outstanding to receive.
+function serializeGoodsReceipt(gr: any) {
+  return {
+    ...gr,
+    ...(gr.lineItems && {
+      lineItems: gr.lineItems.map((l: any) => ({
+        ...l,
+        remainingToReceive: Math.max(l.poQty - l.previouslyReceivedQty, 0),
+      })),
+    }),
+  };
+}
+
+router.get('/goods-receipts', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
+  const grs = await prisma.goodsReceipt.findMany({ where: { projectId: req.params.projectId }, orderBy: { createdAt: 'desc' }, include: { doc: { select: { docNumber: true, type: true, finalAmount: true } } } });
+  const creators = await creatorsById(grs.map((g) => g.raisedById));
+  res.json({ goodsReceipts: grs.map((g) => ({ ...serializeGoodsReceipt(g), createdBy: (g.raisedById && creators.get(g.raisedById)) || null })) });
+}));
+
+// Approved PO/WOs a goods receipt can be raised against (mirrors grns/available-docs
+// but counts goods receipts, and carries no rupee value so a site engineer can pick one).
+router.get('/goods-receipts/available-docs', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
+  const docs = await prisma.procurementDoc.findMany({
+    where: { projectId: req.params.projectId, status: 'APPROVED' },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, type: true, docNumber: true, vendorName: true, docDate: true, _count: { select: { goodsReceipts: true } } },
+  });
+  res.json({ docs: docs.map((d) => ({ ...d, grnCount: d._count.goodsReceipts, _count: undefined })) });
+}));
+
+// Raise a goods receipt against an approved PO/WO — header + lines auto-fill.
+router.post('/goods-receipts', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const { docId } = z.object({ docId: z.string() }).parse(req.body);
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: docId, projectId: req.params.projectId }, include: { lineItems: { where: { isLeadTime: false }, orderBy: { sortOrder: 'asc' } } } });
+  if (!doc) throw notFound('PO/WO not found');
+  if (doc.status !== 'APPROVED') throw badRequest('A goods receipt can only be raised against an approved PO/WO');
+
+  // Previously received per line = sum of already-RECEIVED goods receipts for this PO.
+  const prior = await prisma.goodsReceiptLine.groupBy({ by: ['lineItemId'], where: { gr: { docId, status: 'RECEIVED' } }, _sum: { receiptQty: true } });
+  const priorMap = new Map(prior.map((p) => [p.lineItemId, p._sum.receiptQty ?? 0]));
+
+  const grnNumber = await nextDocNumber('GR');
+  const gr = await prisma.goodsReceipt.create({
+    data: {
+      projectId: req.params.projectId, docId, grnNumber, vendorName: doc.vendorName, siteAddress: doc.siteAddress || doc.shipTo, raisedById: req.user!.sub, status: 'DRAFT',
+      lineItems: { create: doc.lineItems.map((li, i) => ({ lineItemId: li.id, srNo: i + 1, description: li.description, uom: li.uom, poQty: li.qty, previouslyReceivedQty: priorMap.get(li.id) ?? 0, receiptQty: 0, defectQty: 0, acceptedQty: 0 })) },
+    },
+    include: { lineItems: { orderBy: { srNo: 'asc' } } },
+  });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_CREATE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber, against: doc.docNumber } });
+  res.status(201).json({ goodsReceipt: serializeGoodsReceipt(gr) });
+}));
+
+router.get('/goods-receipts/:grId', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({
+    where: { id: req.params.grId, projectId: req.params.projectId },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } } },
+  });
+  if (!gr) throw notFound();
+  res.json({ goodsReceipt: serializeGoodsReceipt(gr) });
+}));
+
+const goodsReceiptUpdate = z.object({
+  vehicleNumber: z.string().nullable().optional(), driverName: z.string().nullable().optional(), deliveryChallanNumber: z.string().nullable().optional(),
+  remarks: z.string().nullable().optional(),
+  lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
+});
+router.patch('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId }, include: { lineItems: true } });
+  if (!gr) throw notFound();
+  if (gr.status !== 'DRAFT') throw badRequest('Only a draft goods receipt can be edited');
+  const b = goodsReceiptUpdate.parse(req.body);
+  if (b.lineItems) {
+    for (const l of b.lineItems) {
+      const accepted = Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0);
+      await prisma.goodsReceiptLine.update({ where: { id: l.id }, data: { receiptQty: Number(l.receiptQty) || 0, defectQty: Number(l.defectQty) || 0, acceptedQty: accepted, remarks: l.remarks ?? undefined } });
+    }
+  }
+  const updated = await prisma.goodsReceipt.update({
+    where: { id: gr.id },
+    data: { vehicleNumber: b.vehicleNumber ?? undefined, driverName: b.driverName ?? undefined, deliveryChallanNumber: b.deliveryChallanNumber ?? undefined, remarks: b.remarks ?? undefined },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } } },
+  });
+  res.json({ goodsReceipt: serializeGoodsReceipt(updated) });
+}));
+
+// Confirm the delivery — locks the goods receipt as a RECEIVED record.
+router.post('/goods-receipts/:grId/receive', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
+  if (!gr) throw notFound();
+  if (gr.status !== 'DRAFT') throw badRequest('Already received');
+  const updated = await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { status: 'RECEIVED' } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_RECEIVE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber } });
+  res.json({ goodsReceipt: { ...updated, status: updated.status } });
+}));
+
+router.post('/goods-receipts/:grId/photo', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const gr = await prisma.goodsReceipt.update({ where: { id: req.params.grId }, data: { photoUrl: fileUrl } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PHOTO', fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.status(201).json({ ok: true, photoUrl: gr.photoUrl });
+}));
+
+router.delete('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
+  if (!gr) throw notFound();
+  if (gr.status !== 'DRAFT') throw badRequest('Only a draft goods receipt can be deleted');
+  await prisma.goodsReceipt.delete({ where: { id: gr.id } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_DELETE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber } });
+  res.json({ ok: true });
+}));
+
 // ── Document repository ──────────────────────────────────────────────────────
 router.get('/documents', requireProjectMember, requirePage('documents'), asyncHandler(async (req, res) => {
   const type = typeof req.query.type === 'string' ? req.query.type : undefined;
@@ -1210,7 +1332,13 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     where: { projectId: req.params.projectId, status: 'APPROVED' },
     // PI (proforma) fields ride alongside the tax invoice: payment is made on the
     // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
-    include: { milestones: true, grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } } },
+    include: {
+      milestones: true,
+      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
+      // Physical goods receipts raised against this PO/WO — shown in the pipeline
+      // regardless of status or milestone match (a PO can have several).
+      goodsReceipts: { orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, receivedDate: true, vehicleNumber: true, driverName: true, deliveryChallanNumber: true } },
+    },
   });
   const rows = docs.map((d) => {
     const invoiced = d.grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
@@ -1226,8 +1354,9 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       amountInvoiced: invoiced, amountAdvanced: advanced, amountPaid: paid, amountPending: Math.round((total - paid) * 100) / 100,
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,
       milestonesTriggered: triggered, milestonesTotal: d.milestones.length,
-      grnStatus: d.grns.length ? 'GRN Approved' : 'No GRN', delayed,
+      grnStatus: d.grns.length ? 'Payment Approved' : 'No Payment', delayed,
       grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, milestoneName: g.milestoneName, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
+      goodsReceipts: d.goodsReceipts.map((g) => ({ id: g.id, grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate, vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
         id: m.id, name: m.name, percentage: m.percentage, inrAmount: m.inrAmount, status: m.status,
         triggerCondition: m.triggerCondition, expectedDate: m.expectedDate, actualTriggerDate: m.actualTriggerDate,

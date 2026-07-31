@@ -113,15 +113,15 @@ export default function ZoneEditor({ projectId, zones, onDone }: { projectId: st
           return (
             <g key={z.id}>
               <polygon points={z.coordinates.map((p) => `${p.x},${p.y}`).join(' ')} fill={color} fillOpacity={0.5} stroke="#fff" strokeWidth={0.4} />
-              <text x={cx} y={cy} textAnchor="middle" style={{ fontSize: 2.6, fontWeight: 600, fill: '#0f2942' }}>{z.zoneName}</text>
+              <text x={cx} y={cy} textAnchor="middle" style={{ fontSize: 2.6, fontWeight: 600, fill: '#052379' }}>{z.zoneName}</text>
             </g>
           );
         })}
         {/* In-progress polygon */}
         {points.length > 0 && (
           <>
-            <polyline points={points.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgba(15,41,66,0.15)" stroke="#0f2942" strokeWidth={0.5} />
-            {points.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={0.9} fill="#0f2942" />)}
+            <polyline points={points.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgba(15,41,66,0.15)" stroke="#052379" strokeWidth={0.5} />
+            {points.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={0.9} fill="#052379" />)}
           </>
         )}
       </svg>

@@ -2,51 +2,140 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   Crystal brand kit — design tokens (crystal-design-system.html).
+   Light theme values; every shared component reads from these.
+   ============================================================ */
 :root {
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* brand */
+  --navy: #052379;
+  --amber: #FBC213;
+
+  /* type */
+  --f-display: 'Manrope', system-ui, sans-serif;
+  --f-body: 'Inter', system-ui, sans-serif;
+  --f-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* surfaces / text / lines */
+  --bg: #F7F8FB; --surface: #FFFFFF; --surface-2: #F2F4F8; --surface-3: #EAECF2;
+  --text: #010101; --text-2: #6B7280; --text-3: #9CA3AF;
+  --line: #E4E7EE; --line-strong: #C9CFDC;
+
+  /* accent (navy) */
+  --accent: #052379; --accent-hover: #031A5C; --accent-press: #02123F;
+  --accent-soft: #EAF0FB; --accent-soft-2: #DCE5F7; --on-accent: #FFFFFF;
+
+  /* amber accent */
+  --amber-c: #FBC213; --amber-soft: #FFF6DD; --on-amber: #010101;
+
+  /* status */
+  --success: #1E8E3E; --success-bg: #E8F5EA;
+  --error: #D93025;   --error-bg: #FDECEA;
+  --warn: #B8860B;    --warn-bg: #FFF6DD;
+  --info: #1A73E8;    --info-bg: #E8F0FE;
+
+  /* shadows (navy-tinted) */
+  --shadow-1: 0 1px 2px rgba(5,35,121,.06);
+  --shadow-2: 0 2px 8px rgba(5,35,121,.08);
+  --shadow-3: 0 6px 16px rgba(5,35,121,.12);
+  --shadow-4: 0 12px 28px rgba(5,35,121,.16);
+
+  /* motion */
+  --dur-instant: 80ms; --dur-fast: 140ms; --dur-base: 220ms;
+  --ease-out: cubic-bezier(.22,.75,.28,1);
+  --ease-spring: cubic-bezier(.34,1.4,.5,1);
+
+  font-family: var(--f-body);
 }
 
 body {
   margin: 0;
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--f-body);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
 
+/* Headings use the display face (Manrope). */
+h1, h2, h3, h4, h5, h6 { font-family: var(--f-display); letter-spacing: -0.2px; }
+
+/* Every button uses the brand display face (design system uses Manrope for all
+   buttons). The .btn-* classes set their own weight; this only sets the family,
+   so the many inline/bespoke buttons across the app inherit the brand font too. */
+button { font-family: var(--f-display); }
+
+/* Table column headers → brand display face + design-system tracking, so all
+   `<thead>` cells app-wide match without editing every table. */
+thead th { font-family: var(--f-display); letter-spacing: 0.3px; }
+
+/* Brand selection highlight. */
+::selection { background: var(--amber); color: var(--text); }
+
 @layer components {
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed;
+  /* ── Buttons ─────────────────────────────────────────────── */
+  .btn, .btn-primary, .btn-outline, .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 transition-colors disabled:cursor-not-allowed;
+    font-family: var(--f-display); font-weight: 700; font-size: 13px; line-height: 1;
+    min-height: 40px; padding: 10px 16px; border-radius: 10px; border: 1.5px solid transparent;
+    cursor: pointer; white-space: nowrap;
   }
-  .btn-primary {
-    @apply btn bg-navy text-white hover:bg-navy-700;
+  .btn:active:not(:disabled), .btn-primary:active:not(:disabled),
+  .btn-outline:active:not(:disabled), .btn-danger:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled, .btn-primary:disabled, .btn-outline:disabled, .btn-danger:disabled {
+    opacity: .55; box-shadow: none;
   }
-  .btn-outline {
-    @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-50;
-  }
-  .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700;
-  }
+
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); box-shadow: var(--shadow-2); }
+
+  .btn-outline { background: var(--surface); color: var(--text); border-color: var(--line-strong); }
+  .btn-outline:hover:not(:disabled) { background: var(--surface-2); border-color: var(--line-strong); }
+
+  .btn-danger { background: var(--error); color: #fff; }
+  .btn-danger:hover:not(:disabled) { filter: brightness(.93); box-shadow: var(--shadow-2); }
+
+  /* ── Card ────────────────────────────────────────────────── */
   .card {
-    @apply rounded-xl border border-slate-200 bg-white shadow-sm;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow-1);
   }
+
+  /* ── Inputs ──────────────────────────────────────────────── */
   .input {
-    @apply w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-navy focus:ring-1 focus:ring-navy;
+    width: 100%;
+    font-family: var(--f-body); font-size: 13px; color: var(--text);
+    background: var(--surface);
+    border: 1.5px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; outline: none;
+    transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
   }
+  .input::placeholder { color: var(--text-3); }
+  .input:hover:not(:disabled) { border-color: var(--line-strong); }
+  .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .input:disabled { background: var(--surface-2); color: var(--text-3); cursor: not-allowed; }
+
   .label {
-    @apply mb-1 block text-sm font-medium text-slate-600;
+    display: block; margin-bottom: 6px;
+    font-family: var(--f-display); font-weight: 700; font-size: 11.5px; color: var(--text);
   }
+
+  /* ── Badge / pill (shape + display font; color comes from utility classes) ── */
   .badge {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center gap-1.5;
+    font-family: var(--f-display); font-weight: 700; font-size: 11px;
+    padding: 4px 10px; border-radius: 999px; white-space: nowrap;
   }
-  /* Inline-editable field that blends into the document until hovered/focused */
+
+  /* Inline-editable field that blends into the document until hovered/focused. */
   .inp-inline {
     @apply w-full rounded bg-transparent px-1 outline-none transition;
   }
-  .inp-inline:not(:disabled):hover {
-    @apply bg-amber-50;
-  }
-  .inp-inline:not(:disabled):focus {
-    @apply bg-white ring-1 ring-navy;
-  }
+  .inp-inline:not(:disabled):hover { background: var(--amber-soft); }
+  .inp-inline:not(:disabled):focus { background: #fff; box-shadow: 0 0 0 2px var(--accent-soft); }
 }
 
 /* Handwriting signature font (bundled fallback) */

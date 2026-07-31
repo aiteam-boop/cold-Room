@@ -6,7 +6,7 @@ import ErrorBoundary from './ErrorBoundary';
 export default function AppShell() {
   const { user, logout, isAdmin, isSuperAdmin, canView } = useAuth();
   const { pathname } = useLocation();
-  const navCls = ({ isActive }: { isActive: boolean }) => `rounded-lg px-2.5 py-1.5 ${isActive ? 'bg-white/15 text-white' : 'text-slate-200 hover:bg-white/10'}`;
+  const navCls = ({ isActive }: { isActive: boolean }) => `rounded-lg px-2.5 py-1.5 font-display font-semibold transition-colors ${isActive ? 'bg-white/15 text-white' : 'text-slate-200 hover:bg-white/10'}`;
 
   // The project workspace pins a rail to the viewport's left edge (see
   // ProjectWorkspace), so it must run full-bleed: a centred, max-width column
@@ -22,8 +22,8 @@ export default function AppShell() {
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-navy text-white">
         <div className={`flex h-14 items-center justify-between gap-3 ${isWorkspace ? 'w-full px-5 lg:px-6' : container}`}>
           <div className="flex items-center gap-4">
-            <Link to="/" className="flex items-center gap-2 font-semibold">
-              <span className="grid h-8 w-8 place-items-center rounded-lg bg-white/10">❄</span>
+            <Link to="/" className="flex items-center gap-2 font-display text-[15px] font-extrabold tracking-tight">
+              <span className="grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-gold">❄</span>
               <span>CRMCTS</span>
             </Link>
             <nav className="hidden items-center gap-1 text-sm md:flex">

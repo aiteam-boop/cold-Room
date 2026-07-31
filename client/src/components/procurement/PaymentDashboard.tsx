@@ -102,7 +102,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                 {/* Approved GRNs on this PO/WO with their invoice files. */}
                 {r.grns?.length > 0 && (
                   <div className="mt-3 border-t border-slate-200 pt-2">
-                    <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Received (GRN invoices)</div>
+                    <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Payments (PI / invoices)</div>
                     {r.grns.map((g: any) => (
                       <div key={g.id} className="flex items-center justify-between gap-3 py-0.5 text-xs">
                         {/* PI (drives the payment, arrives first) then the tax invoice
@@ -117,9 +117,27 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                             : ' · tax invoice pending'}
                         </span>
                         <span className="flex items-center gap-3">
-                          <button className="font-medium text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`, `${g.grnNumber || 'GRN'}.pdf`)}>📄 GRN</button>
+                          <button className="font-medium text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`, `${g.grnNumber || 'Payment'}.pdf`)}>📄 Payment</button>
                           {g.piPdfUrl && <a className="font-medium text-navy hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">📄 PI</a>}
                           {g.invoicePdfUrl && <a className="font-medium text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 Invoice</a>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Physical goods receipts raised against this PO/WO — shown
+                    regardless of milestone match; a PO can carry several. */}
+                {r.goodsReceipts?.length > 0 && (
+                  <div className="mt-3 border-t border-slate-200 pt-2">
+                    <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Goods Receipts (GRN)</div>
+                    {r.goodsReceipts.map((g: any) => (
+                      <div key={g.id} className="flex items-center justify-between gap-3 py-0.5 text-xs">
+                        <span className="text-slate-600">
+                          {g.grnNumber}
+                          <span className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${g.status === 'RECEIVED' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{g.status === 'RECEIVED' ? 'Received' : 'Draft'}</span>
+                          {g.receivedDate ? ` · ${fmtDate(g.receivedDate)}` : ''}
+                          {g.vehicleNumber ? ` · 🚚 ${g.vehicleNumber}` : ''}
+                          {g.deliveryChallanNumber ? ` · DC ${g.deliveryChallanNumber}` : ''}
                         </span>
                       </div>
                     ))}

@@ -48,7 +48,7 @@ export default function Login() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-navy to-navy-700 p-4">
-      <div className="grid w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-2xl md:grid-cols-2">
+      <div className="grid w-full max-w-4xl overflow-hidden rounded-lg bg-white shadow-lg md:grid-cols-2">
         <div className="hidden flex-col justify-between bg-navy p-8 text-white md:flex">
           <div>
             <div className="flex items-center gap-2 text-xl font-bold">
@@ -65,7 +65,7 @@ export default function Login() {
           {/* Demo-account shortcuts: local development only — never rendered in
               the production build, so credentials are not exposed publicly. */}
           {import.meta.env.DEV && (
-            <div className="rounded-xl bg-white/5 p-4 text-xs text-slate-300">
+            <div className="rounded-lg bg-white/5 p-4 text-xs text-slate-300">
               <div className="mb-2 font-medium text-slate-200">Demo accounts (password: Password123)</div>
               {DEMO.map((d) => (
                 <button

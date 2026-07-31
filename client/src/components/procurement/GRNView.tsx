@@ -39,13 +39,13 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-slate-600">Good Receipt Notes ({grns.length})</h3>
-        {canRaise && <button className="btn-primary text-sm" onClick={() => setRaising(true)}>+ Raise GRN</button>}
+        <h3 className="text-sm font-medium text-slate-600">Payments ({grns.length})</h3>
+        {canRaise && <button className="btn-primary text-sm" onClick={() => setRaising(true)}>+ New Payment</button>}
       </div>
 
       {raising && (
         <div className="card p-4">
-          <div className="mb-2 text-sm font-medium text-slate-600">Raise GRN against an approved PO/WO</div>
+          <div className="mb-2 text-sm font-medium text-slate-600">New payment against an approved PO/WO</div>
           {posQ.data?.length ? (
             <div className="space-y-2">
               {/* No PO value here by design — the engineer sees items and quantities,
@@ -68,11 +68,11 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
       )}
 
       {grns.length === 0 ? (
-        <EmptyState title="No GRNs yet" hint="When material arrives on site, raise a GRN against the relevant PO/WO to confirm delivery and link the invoice." />
+        <EmptyState title="No payments yet" hint="Raise a payment against an approved PO/WO — pick the payment term, upload the PI, and send it for approval. Physical delivery is recorded separately on the Goods Receipt (GRN) page." />
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">GRN No.</th><th>Against</th><th>Vendor</th><th>Raised by</th><th>Date</th><th className="text-right">PI Value</th><th className="pr-8 text-right">Invoice Value</th><th className="pl-2">Status</th><th></th></tr></thead>
+            <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Raised by</th><th>Date</th><th className="text-right">PI Value</th><th className="pr-8 text-right">Invoice Value</th><th className="pl-2">Status</th><th></th></tr></thead>
             <tbody>
               {grns.map((g) => (
                 <tr key={g.id} className="border-b border-slate-100 hover:bg-slate-50">
@@ -314,7 +314,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
 
       {approved && !amending && (
         <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
-          This GRN is approved and locked.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}
+          This payment is approved and locked.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}
         </div>
       )}
       {/* Sent back by an approver: show exactly what they asked to be corrected. */}

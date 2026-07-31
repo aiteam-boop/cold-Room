@@ -16,6 +16,7 @@ import TeamTab from '../components/tabs/TeamTab';
 import PaymentDashboard from '../components/procurement/PaymentDashboard';
 import DocList from '../components/procurement/DocList';
 import GRNView from '../components/procurement/GRNView';
+import GoodsReceiptView from '../components/procurement/GoodsReceiptView';
 import VendorsView from '../components/procurement/VendorsView';
 import DocumentsView from '../components/procurement/DocumentsView';
 import ReportsTab from '../components/tabs/ReportsTab';
@@ -64,13 +65,17 @@ const MENU: { group: string; items: Item[] }[] = [
     { key: 'vendors', label: '1. Vendors', icon: 'users' },
     { key: 'po', label: '2. Purchase Orders', icon: 'doc' },
     { key: 'wo', label: '3. Work Orders', icon: 'wrench' },
-    { key: 'grn', label: '4. Goods Receipt (GRN)', icon: 'truck' },
-    { key: 'pay', label: '5. Payment Pipeline', icon: 'wallet' },
-    { key: 'fms', label: '6. FMS — Vendor Payments', icon: 'wallet' },
-    { key: 'documents', label: '7. Documents', icon: 'folder' },
+    // The old "GRN" record was really the payment engine (PI, milestone, UTR) —
+    // it is surfaced as Payment. The physical goods-receipt register is a separate
+    // page below, sharing the same 'grn' grant (told apart by view: 'receipt').
+    { key: 'grn', label: '4. Payment', icon: 'wallet' },
+    { key: 'grn', label: '5. Goods Receipt (GRN)', icon: 'truck', view: 'receipt' },
+    { key: 'pay', label: '6. Payment Pipeline', icon: 'wallet' },
+    { key: 'fms', label: '7. FMS — Vendor Payments', icon: 'wallet' },
+    { key: 'documents', label: '8. Documents', icon: 'folder' },
     // The registers above stay flat; the PO → GRN → invoice → payment drill-down
     // and vendor outstanding live here (transcript R14/R15).
-    { key: 'reports', label: '8. Reports & Registers', icon: 'chart' },
+    { key: 'reports', label: '9. Reports & Registers', icon: 'chart' },
   ] },
   { group: 'Team', items: [
     { key: 'team', label: 'Team', icon: 'people' },
@@ -245,7 +250,7 @@ export default function ProjectWorkspace() {
                 const on = current != null && navId(current) === navId(nav);
                 return (
                   <button key={navId(nav)} onClick={() => setActive(nav)}
-                    className={`mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${on ? 'bg-navy/10 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
+                    className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left font-display text-[12.5px] font-semibold transition-colors ${on ? 'bg-navy-50 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
                     <span className={`shrink-0 ${on ? 'text-navy' : 'text-slate-400'}`}>{ICONS[it.icon]}</span>
                     <span className="min-w-0 flex-1">{it.label}</span>
                   </button>
@@ -271,7 +276,8 @@ export default function ProjectWorkspace() {
         {current.key === 'fms' && <FMSView projectId={projectId!} focusId={focusFor('fms')} />}
         {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" focusId={focusFor('po')} />}
         {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" focusId={focusFor('wo')} />}
-        {current.key === 'grn' && <GRNView projectId={projectId!} role={role} focusId={focusFor('grn')} />}
+        {current.key === 'grn' && current.view === 'receipt' && <GoodsReceiptView projectId={projectId!} role={role} />}
+        {current.key === 'grn' && current.view !== 'receipt' && <GRNView projectId={projectId!} role={role} focusId={focusFor('grn')} />}
         {current.key === 'vendors' && <VendorsView projectId={projectId!} role={role} />}
         {current.key === 'documents' && <DocumentsView projectId={projectId!} role={role} />}
         {current.key === 'reports' && <ReportsTab projectId={projectId!} />}

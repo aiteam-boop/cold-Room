@@ -82,8 +82,8 @@ export default function QuotationModal({ projectId, boqItemId, onClose }: { proj
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6" onClick={onClose}>
-      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-6" onClick={onClose}>
+      <div className="w-full max-w-5xl rounded-lg bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-bold text-navy">Vendor Quotations</h3>

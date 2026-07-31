@@ -118,6 +118,7 @@ model Project {
   vendorSites   VendorSiteMapping[]
   procurementDocs ProcurementDoc[]
   grns          GRN[]
+  goodsReceipts GoodsReceipt[]
   procDocuments ProcurementDocument[]
   ganttActivities GanttActivity[]
   changeOrders  ChangeOrder[]
@@ -278,6 +279,7 @@ model ProcurementDoc {
   lineItems     ProcurementLineItem[]
   milestones    PaymentMilestone[]
   grns          GRN[]
+  goodsReceipts GoodsReceipt[]
   vendorPayments VendorPayment[]
 
   @@index([projectId])
@@ -530,6 +532,54 @@ model GRNLineItem {
   remarks       String?
 
   @@index([grnId])
+}
+
+// ── Goods Receipt (physical delivery at site) ──────────────────────────────
+// A GRN in the literal sense: material/spares/machines arriving on site against
+// an approved PO/WO. This is deliberately SEPARATE from the payment record (the
+// old "GRN", now surfaced as "Payment"): a goods receipt only captures the
+// delivery (vehicle/driver/challan) and what was actually received per line —
+// no PI, no milestone, no payment lifecycle. Numbered GRN-QAS-###.
+model GoodsReceipt {
+  id          String  @id @default(cuid()) @map("_id")
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  docId       String  // parent PO/WO the material is received against
+  doc         ProcurementDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  grnNumber   String  @unique
+  receivedDate DateTime @default(now())
+  vendorName  String?
+  siteAddress String?
+  raisedById  String?
+  vehicleNumber String?
+  driverName  String?
+  deliveryChallanNumber String?
+  photoUrl    String?
+  remarks     String?
+  status      String  @default("DRAFT")  // DRAFT | RECEIVED
+  createdAt   DateTime @default(now())
+  lineItems   GoodsReceiptLine[]
+
+  @@index([projectId])
+  @@index([docId])
+}
+
+model GoodsReceiptLine {
+  id            String  @id @default(cuid()) @map("_id")
+  grId          String
+  gr            GoodsReceipt @relation(fields: [grId], references: [id], onDelete: Cascade)
+  lineItemId    String?
+  srNo          Int
+  description   String
+  uom           String?
+  poQty         Float   @default(0)
+  previouslyReceivedQty Float @default(0)
+  receiptQty    Float   @default(0)
+  defectQty     Float   @default(0)
+  acceptedQty   Float   @default(0)
+  remarks       String?
+
+  @@index([grId])
 }
 
 // Central document repository entry.

@@ -48,8 +48,8 @@ export default function FloorPlan3D<Z extends FloorZone>({ zones, onSelect, sele
             {walls.map((w, i) => (
               <polygon key={i} points={w} fill={top} fillOpacity={0.45} stroke="#ffffff" strokeWidth={0.2} />
             ))}
-            <polygon points={roofPts} fill={top} fillOpacity={isSel ? 0.95 : 0.8} stroke={isSel ? '#0f2942' : '#ffffff'} strokeWidth={isSel ? 0.6 : 0.3} />
-            <text x={cx} y={cy} textAnchor="middle" style={{ fontSize: 2.4, fontWeight: 600, fill: '#0f2942' }}>{z.zoneName}</text>
+            <polygon points={roofPts} fill={top} fillOpacity={isSel ? 0.95 : 0.8} stroke={isSel ? '#052379' : '#ffffff'} strokeWidth={isSel ? 0.6 : 0.3} />
+            <text x={cx} y={cy} textAnchor="middle" style={{ fontSize: 2.4, fontWeight: 600, fill: '#052379' }}>{z.zoneName}</text>
             <text x={cx} y={cy + 2.6} textAnchor="middle" style={{ fontSize: 2.2, fill: '#0f172a' }}>{z.completionPct}%</text>
           </g>
         );

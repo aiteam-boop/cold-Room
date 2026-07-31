@@ -30,7 +30,7 @@ export default function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white text-slate-800 shadow-xl">
+          <div className="absolute right-0 z-50 mt-2 w-80 overflow-hidden rounded-lg border border-slate-200 bg-white text-slate-800 shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
               <span className="text-sm font-semibold text-navy">Notifications</span>
               {unread > 0 && <button className="text-xs text-navy hover:underline" onClick={() => markAll.mutate()}>Mark all read</button>}
@@ -40,9 +40,9 @@ export default function NotificationBell() {
                 <div className="p-6 text-center text-sm text-slate-400">No notifications yet.</div>
               ) : items.map((n) => (
                 <button key={n.id} onClick={() => { if (!n.isRead) markRead.mutate(n.id); setOpen(false); const dest = n.type === 'APPROVAL_PENDING' ? '/approvals' : n.link; if (dest) nav(dest); }}
-                  className={`block w-full border-b border-slate-50 px-3 py-2 text-left hover:bg-slate-50 ${n.isRead ? '' : 'bg-blue-50/40'}`}>
+                  className={`block w-full border-b border-slate-50 px-3 py-2 text-left hover:bg-slate-50 ${n.isRead ? '' : 'bg-navy-50/60'}`}>
                   <div className="flex items-start gap-2">
-                    {!n.isRead && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500" />}
+                    {!n.isRead && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-navy" />}
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-slate-700">{n.title}</div>
                       <div className="text-xs text-slate-500">{n.message}</div>

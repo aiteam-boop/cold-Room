@@ -281,7 +281,7 @@ function FieldTable({ title, fields }: { title: string; fields: Field[] }) {
 }
 function EndpointCard({ e, origin }: { e: Endpoint; origin: string }) {
   return (
-    <div className="scroll-mt-24 space-y-3 rounded-xl border border-slate-200 bg-white p-4" id={`op-${e.id}`}>
+    <div className="scroll-mt-24 space-y-3 rounded-lg border border-slate-200 bg-white p-4" id={`op-${e.id}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-block rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700">{e.method}</span>
         <code className="font-mono text-sm font-semibold text-navy">{e.path}</code>
@@ -326,7 +326,7 @@ function TryConsole({ origin }: { origin: string }) {
   }
 
   return (
-    <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+    <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <label className="mb-1 block text-xs font-semibold text-slate-500">API key</label>
@@ -474,16 +474,16 @@ export default function IntegrationKit() {
             <h2 className="text-lg font-bold text-navy">Realms &amp; scopes</h2>
             <p className="text-sm leading-relaxed text-slate-600">Realms decide <em>which endpoints</em>; scopes decide <em>which fields</em>. Check your grants with <Mono>GET /api/v1/ping</Mono>.</p>
             <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Realms</div>
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
               <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-400"><tr><th className="px-4 py-2 font-semibold">Realm</th><th className="px-4 py-2 font-semibold">Reaches</th><th className="px-4 py-2 font-semibold">Requires scope</th></tr></thead>
                 <tbody>{REALM_DOCS.map((r) => <tr key={r.key} className="border-t border-slate-100"><td className="px-4 py-2"><Mono>{r.key}</Mono></td><td className="px-4 py-2 text-slate-600">{r.reach}</td><td className="px-4 py-2">{r.needs ? <Mono>{r.needs}</Mono> : <span className="text-slate-300">—</span>}</td></tr>)}</tbody></table>
             </div>
             <div className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Scopes</div>
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
               <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-400"><tr><th className="px-4 py-2 font-semibold">Scope</th><th className="px-4 py-2 font-semibold">Unlocks</th><th className="px-4 py-2 font-semibold" /></tr></thead>
                 <tbody>{SCOPE_DOCS.map((s) => <tr key={s.key} className="border-t border-slate-100"><td className="px-4 py-2"><Mono>{s.key}</Mono></td><td className="px-4 py-2 text-slate-600">{s.gives}</td><td className="px-4 py-2 text-xs text-slate-400">{s.note}</td></tr>)}</tbody></table>
             </div>
-            <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
               <div><strong>Field gating is silent.</strong> A field your key lacks the scope for is omitted, not an error. The response’s <Mono>_meta.withheld</Mono> lists every dropped field name.</div>
               <div><strong>Finance &amp; Vendors are stricter.</strong> Those realms are entirely sensitive, so their scope (<Mono>read:money</Mono> / <Mono>read:parties</Mono>) is required to call the endpoint at all — else <Mono>forbidden_scope (403)</Mono>.</div>
             </div>
@@ -536,7 +536,7 @@ export default function IntegrationKit() {
               gets <Mono>forbidden_scope (403)</Mono>. Pass an <Mono>Idempotency-Key</Mono> header so a retried request never acts twice.
             </p>
             {WRITE_OPS.map((w) => (
-              <div key={w.id} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <div key={w.id} className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="inline-block rounded bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">{w.method}</span>
                   <code className="font-mono text-sm font-semibold text-navy">{w.path}</code>
@@ -552,7 +552,7 @@ export default function IntegrationKit() {
           <section id="deep-links" className="scroll-mt-24 space-y-3">
             <h2 className="text-xl font-bold text-navy">Deep links</h2>
             <p className="text-sm leading-relaxed text-slate-600">Every object includes a <Mono>deepLink</Mono>. Point a user at it and CRMCTS opens that exact item — right project, right tab, item expanded. Not signed in? They’re prompted, then returned to the item. Format: {' '}<Mono>{`${origin}/go/{entity}/{id}?project={projectId}`}</Mono>.</p>
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
               <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-400"><tr><th className="px-4 py-2 font-semibold">Entity</th><th className="px-4 py-2 font-semibold">Link pattern</th><th className="px-4 py-2 font-semibold">Opens</th></tr></thead>
                 <tbody>{DEEP_ENTITIES.map((d) => <tr key={d.entity} className="border-t border-slate-100"><td className="px-4 py-2"><Mono>{d.entity}</Mono></td><td className="px-4 py-2 font-mono text-xs text-slate-600">{d.link}</td><td className="px-4 py-2 text-xs text-slate-500">{d.dest}</td></tr>)}</tbody></table>
             </div>
@@ -561,7 +561,7 @@ export default function IntegrationKit() {
           <section id="errors" className="scroll-mt-24 space-y-3">
             <h2 className="text-xl font-bold text-navy">Errors</h2>
             <p className="text-sm text-slate-600">Failures return <Mono>{'{ error: { code, message } }'}</Mono>. Branch on the stable <Mono>code</Mono>:</p>
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
               <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-400"><tr><th className="px-4 py-2 font-semibold">HTTP</th><th className="px-4 py-2 font-semibold">code</th><th className="px-4 py-2 font-semibold">When</th></tr></thead>
                 <tbody>{ERRORS.map((e, i) => <tr key={e.code + e.err} className={i ? 'border-t border-slate-100' : ''}><td className="w-16 px-4 py-2 align-top font-mono font-semibold text-navy">{e.code}</td><td className="w-40 px-4 py-2 align-top font-mono text-xs text-slate-500">{e.err}</td><td className="px-4 py-2 text-slate-600">{e.when}</td></tr>)}</tbody></table>
             </div>

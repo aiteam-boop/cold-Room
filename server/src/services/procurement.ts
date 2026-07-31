@@ -32,12 +32,23 @@ export const PAY_FIELDS = [
 ] as const;
 
 // ── Document numbering (company-wide sequential) ────────────────────────────
-// PO-IN###, WO-QAS-###, GRN-QAS-###. Continues from the highest existing.
-async function nextSeq(kind: 'PO' | 'WO' | 'GRN'): Promise<string> {
-  if (kind === 'GRN') {
+// PO-IN###, WO-QAS-###, GRN-QAS-###, PAY-QAS-###. Continues from the highest existing.
+async function nextSeq(kind: 'PO' | 'WO' | 'GRN' | 'PAY' | 'GR'): Promise<string> {
+  // Payment register (the old "GRN" record, now surfaced as Payment) and its
+  // legacy GRN-numbered rows share the gRN table. Each series counts only its own
+  // prefix, so PAY-QAS-### starts fresh while old GRN-QAS-### rows keep their id.
+  if (kind === 'GRN' || kind === 'PAY') {
+    const prefix = kind === 'PAY' ? 'PAY-QAS-' : 'GRN-QAS-';
     const all = await prisma.gRN.findMany({ select: { grnNumber: true } });
+    const max = all.reduce((m, g) => (g.grnNumber.startsWith(prefix) ? Math.max(m, parseInt((g.grnNumber.match(/(\d+)$/) || [])[1] || '0', 10) || 0) : m), 0);
+    return `${prefix}${String(max + 1).padStart(3, '0')}`;
+  }
+  // Physical goods-receipt register (separate GoodsReceipt table) — owns the real
+  // GRN-QAS-### series going forward.
+  if (kind === 'GR') {
+    const all = await prisma.goodsReceipt.findMany({ select: { grnNumber: true } });
     const max = all.reduce((m, g) => Math.max(m, parseInt((g.grnNumber.match(/(\d+)$/) || [])[1] || '0', 10) || 0), 0);
-    return `GRN-QAS-${String(Math.max(max, 0) + 1).padStart(3, '0')}`;
+    return `GRN-QAS-${String(max + 1).padStart(3, '0')}`;
   }
   const docs = await prisma.procurementDoc.findMany({ where: { type: kind }, select: { docNumber: true } });
   const max = docs.reduce((m, d) => Math.max(m, parseInt((d.docNumber.match(/(\d+)$/) || [])[1] || '0', 10) || 0), 0);

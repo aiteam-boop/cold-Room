@@ -37,7 +37,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   pay: 'Payment Pipeline',
   po: 'Purchase Orders',
   wo: 'Work Orders',
-  grn: 'GRNs',
+  grn: 'Payment & Goods Receipt (GRN)',
   vendors: 'Vendors',
   documents: 'Documents',
   machinemodels: 'Machine Models',

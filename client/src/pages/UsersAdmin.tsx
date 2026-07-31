@@ -305,8 +305,8 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="h-full w-full max-w-xl overflow-y-auto bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-[rgba(5,35,121,0.34)]" onClick={onClose}>
+      <div className="h-full w-full max-w-xl overflow-y-auto bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
           <h2 className="text-lg font-bold text-navy">{isNew ? 'New user' : 'Edit user'}</h2>
           <button className="text-slate-400 hover:text-slate-700" onClick={onClose}>✕</button>
@@ -487,8 +487,8 @@ function ActivityModal({ user, onClose }: { user: UserRow; onClose: () => void }
     Object.entries(m).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' · ') || '—';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6" onClick={onClose}>
-      <div className="w-full max-w-4xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-6" onClick={onClose}>
+      <div className="w-full max-w-4xl rounded-lg bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-bold text-navy">Activity — {user.name}</h3>
@@ -665,8 +665,8 @@ function AttendanceModal({ user, onClose }: { user: UserRow; onClose: () => void
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-6" onClick={onClose}>
-      <div className="w-full max-w-5xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-6" onClick={onClose}>
+      <div className="w-full max-w-5xl rounded-lg bg-white shadow-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-bold text-navy">Attendance — {user.name}</h3>

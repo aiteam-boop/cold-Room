@@ -339,9 +339,13 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   if (logo) { try { pdf.image(logo, R - 70, 28, { fit: [60, 36] }); } catch { /* ignore */ } }
   pdf.fillColor(HEAD_BG).font('Helvetica-Bold').fontSize(14).text(COMPANY.name, L, 30, { width: W - 130 });
   pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(COMPANY.address, { width: W - 130 });
+  // This document carries a payment when it has a PI / milestone / amount — the
+  // old "GRN" record is surfaced as Payment, so title and number label follow suit.
+  // A pure goods receipt (no payment) keeps the classic GRN heading.
+  const isPayment = !!(grn.piNumber || grn.piValue != null || grn.milestoneName || grn.amountToPay != null);
   pdf.moveDown(0.6);
-  pdf.font('Helvetica-Bold').fontSize(13).fillColor(HEAD_BG).text('Good Receipt Note (GRN)', { width: tableW, align: 'center' });
-  pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(`GRN No.: ${grn.grnNumber}    Date: ${grn.grnDate.toLocaleDateString('en-GB')}    Against: ${grn.docNumber}`, { width: tableW, align: 'center' });
+  pdf.font('Helvetica-Bold').fontSize(13).fillColor(HEAD_BG).text(isPayment ? 'Payment Advice' : 'Good Receipt Note (GRN)', { width: tableW, align: 'center' });
+  pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(`${isPayment ? 'Payment No.' : 'GRN No.'}: ${grn.grnNumber}    Date: ${grn.grnDate.toLocaleDateString('en-GB')}    Against: ${grn.docNumber}`, { width: tableW, align: 'center' });
   pdf.moveDown(0.8);
   pdf.fontSize(8).fillColor('#111');
   pdf.text(`Vendor / Contractor: ${grn.vendorName || '-'}`);
@@ -377,7 +381,7 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   // invoice, so the two sit next to each other: what we paid on (left) and what
   // finally closes the GRN (right). The PI box only appears when the GRN actually
   // carries a payment — a pure goods receipt keeps the plain invoice line.
-  const hasPi = !!(grn.piNumber || grn.piValue != null || grn.milestoneName || grn.amountToPay != null);
+  const hasPi = isPayment;
   const hasTaxInvoice = !!(grn.invoiceNumber || grn.invoiceValue != null);
 
   const PAD_X = 8, PAD_Y = 6, LINE_H = 12, TITLE_H = 14, KEY_W = 78;
@@ -419,7 +423,7 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
     }
     // The tax invoice arrives only after payment, so say so rather than printing
     // a row of dashes the approver has to interpret.
-    const taxNote = hasTaxInvoice ? undefined : 'Awaited — arrives after payment and closes this GRN.';
+    const taxNote = hasTaxInvoice ? undefined : 'Awaited — arrives after payment and closes this entry.';
 
     const gap = 10, bw = (tableW - gap) / 2;
     // Both boxes share the taller box's height so they line up.

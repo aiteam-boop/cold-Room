@@ -104,8 +104,8 @@ export default function RealFloorPlan3D({ projectId, drawingId, onSelect, select
               {walls.map((w, i) => (
                 <polygon key={i} points={w.pts} fill={darken(col, w.shade)} stroke={darken(col, 0.4)} strokeWidth={0.15} />
               ))}
-              <polygon points={roofPts} fill={col} fillOpacity={sel ? 0.95 : 0.82} stroke={sel ? '#0f2942' : '#ffffff'} strokeWidth={sel ? 0.5 : 0.28} />
-              <text x={ctr.sx} y={ctr.sy - font * 0.5} textAnchor="middle" style={{ fontSize: font, fontWeight: 700, fill: '#0f2942', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.14 }}>{s.r.name}</text>
+              <polygon points={roofPts} fill={col} fillOpacity={sel ? 0.95 : 0.82} stroke={sel ? '#052379' : '#ffffff'} strokeWidth={sel ? 0.5 : 0.28} />
+              <text x={ctr.sx} y={ctr.sy - font * 0.5} textAnchor="middle" style={{ fontSize: font, fontWeight: 700, fill: '#052379', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.14 }}>{s.r.name}</text>
               {(s.r.details?.areaSqFt ?? s.r.areaSqFt) != null && (
                 <text x={ctr.sx} y={ctr.sy + font * 0.5} textAnchor="middle" style={{ fontSize: font * 0.72, fill: '#334155', paintOrder: 'stroke', stroke: '#fff', strokeWidth: font * 0.12 }}>{(s.r.details?.areaSqFt ?? s.r.areaSqFt).toLocaleString()} sq.ft{s.r.details?.temperature ? ` · ${s.r.details.temperature}°C` : ''}</text>
               )}

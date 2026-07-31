@@ -51,7 +51,7 @@ function Reveal({ created, onClose }: { created: { name: string; key: string; ro
 // ── Stat card ─────────────────────────────────────────────────────────────────
 function Stat({ label, value, sub, tone }: { label: string; value: number; sub: string; tone: string }) {
   return (
-    <div className={`rounded-xl border p-4 ${tone}`}>
+    <div className={`rounded-lg border p-4 ${tone}`}>
       <div className="text-xs font-semibold uppercase tracking-wide opacity-70">{label}</div>
       <div className="mt-1 text-3xl font-bold">{value}</div>
       <div className="mt-0.5 text-xs opacity-60">{sub}</div>
@@ -317,8 +317,8 @@ function CreateModal({ meta, onClose, onCreated }: { meta: Meta; onClose: () => 
   const canSubmit = name.trim() && realms.length > 0 && !create.isPending;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-      <div className="my-8 w-full max-w-2xl rounded-2xl bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-4">
+      <div className="my-8 w-full max-w-2xl rounded-lg bg-white shadow-lg">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
           <h2 className="text-base font-bold text-navy">Create an API key</h2>
           <button className="text-slate-400 hover:text-slate-700" onClick={onClose}>✕</button>
@@ -450,8 +450,8 @@ function UsageModal({ keyRow, onClose }: { keyRow: KeyRow; onClose: () => void }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-      <div className="my-6 flex max-h-[88vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-4">
+      <div className="my-6 flex max-h-[88vh] w-full max-w-4xl flex-col rounded-lg bg-white shadow-lg">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
           <h2 className="text-base font-bold text-navy">Usage — {keyRow.name}</h2>
           <button className="text-slate-400 hover:text-slate-700" onClick={onClose}>✕</button>
@@ -460,12 +460,12 @@ function UsageModal({ keyRow, onClose }: { keyRow: KeyRow; onClose: () => void }
         {/* Stat cards */}
         <div className="grid gap-3 px-5 py-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat label="Lifetime calls" value={usageQ.data?.totalCalls ?? keyRow.callCount} sub="Counted on the key itself" tone="border-blue-200 bg-blue-50 text-blue-800" />
-          <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 text-violet-800">
+          <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 text-violet-800">
             <div className="text-xs font-semibold uppercase tracking-wide opacity-70">Last used</div>
             <div className="mt-1 text-lg font-bold">{keyRow.lastUsedAt ? fmtDay(keyRow.lastUsedAt) : 'Never'}</div>
             <div className="mt-0.5 text-xs opacity-60">Most recent authenticated call</div>
           </div>
-          <div className="rounded-xl border border-teal-200 bg-teal-50 p-4 text-teal-800">
+          <div className="rounded-lg border border-teal-200 bg-teal-50 p-4 text-teal-800">
             <div className="text-xs font-semibold uppercase tracking-wide opacity-70">Rate limit</div>
             <div className="mt-1 text-lg font-bold">{usageQ.data?.rateLimitPerMin ?? keyRow.rateLimitPerMin}/min</div>
             <div className="mt-0.5 text-xs opacity-60">Per key, per minute</div>

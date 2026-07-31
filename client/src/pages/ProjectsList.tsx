@@ -66,7 +66,7 @@ export default function ProjectsList() {
   return (
     <div>
       {pendingCount > 0 && (
-        <Link to="/approvals" className="mb-4 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 hover:bg-amber-100">
+        <Link to="/approvals" className="mb-4 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 hover:bg-amber-100">
           <span className="text-sm font-medium text-amber-800">
             🔔 You have {pendingCount} document{pendingCount > 1 ? 's' : ''} awaiting your approval.
           </span>

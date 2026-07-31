@@ -112,7 +112,7 @@ export default function DashboardTab({ projectId, onOpenGantt }: { projectId: st
               <Tooltip />
               <Legend />
               <Bar dataKey="plannedQty" name="Planned" fill="#cbd5e1" radius={[0, 4, 4, 0]} />
-              <Bar dataKey="installedQty" name="Installed" fill="#0f2942" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="installedQty" name="Installed" fill="#052379" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
