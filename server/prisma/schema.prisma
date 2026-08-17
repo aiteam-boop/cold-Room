@@ -402,6 +402,11 @@ model ProcurementLineItem {
   qty         Float   @default(0)
   unitPrice   Float   @default(0)
   totalPrice  Float   @default(0)
+  // Some lines are not taxable (e.g. a refundable security deposit). When true,
+  // this line's value is EXCLUDED from the GST base but still counts in the
+  // Basic/Final amount. Default false → GST applies, preserving old behaviour.
+  gstExempt   Boolean @default(false)
+  gstExemptRemark String? // why this line is GST-exempt, e.g. "refundable deposit"
   isLeadTime  Boolean @default(false) // special "Lead Time: 7 Days" row
   leadTimeText String?
   customValues String? // JSON { [colKey]: value } for the doc's user-added columns

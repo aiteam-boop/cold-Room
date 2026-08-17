@@ -76,7 +76,9 @@ export function vendorBlock(v: {
 export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[] }) {
   const isWO = d.type === 'WO';
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
-  const gst = d.gstEnabled ? Math.round(basic * (Number(d.gstPct) / 100)) : 0;
+  // GST only on non-exempt lines (a refundable deposit is in Basic/Final, no GST).
+  const taxable = d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
+  const gst = d.gstEnabled ? Math.round(taxable * (Number(d.gstPct) / 100)) : 0;
   const final = basic + gst;
   // The base each payment-term % is taken from — final (incl. GST) or basic.
   const payBase = d.payGstInclusive ? final : basic;
@@ -249,7 +251,17 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
               <td className={`border ${B} p-1`}><U value={l.uom} onChange={(x: string) => setLine(i, { uom: x })} className="text-center" /></td>
               <td className={`border ${B} p-1`}><T value={l.qty} onChange={(x: string) => setLine(i, { qty: x })} className="text-right" /></td>
               <td className={`border ${B} p-1`}><T value={l.unitPrice} onChange={(x: string) => setLine(i, { unitPrice: x })} className="text-right" /></td>
-              <td className={`border ${B} p-1 text-right font-medium`}>{(Number(l.qty) * Number(l.unitPrice) || 0).toLocaleString('en-IN')}</td>
+              <td className={`border ${B} p-1 text-right font-medium`}>
+                {(Number(l.qty) * Number(l.unitPrice) || 0).toLocaleString('en-IN')}
+                {/* Untick to make this line GST-exempt (e.g. a refundable deposit),
+                    then type WHY it is exempt. */}
+                {d.gstEnabled && (editable
+                  ? <div className="mt-0.5 flex flex-col items-end gap-0.5">
+                      <label className="flex items-center gap-1 text-[8px] font-normal text-slate-400"><input type="checkbox" checked={!l.gstExempt} onChange={(e) => setLine(i, { gstExempt: !e.target.checked, ...(e.target.checked ? { gstExemptRemark: null } : {}) })} />GST</label>
+                      {l.gstExempt && <input className={`w-28 rounded border ${B} px-1 py-0.5 text-[8px] font-normal`} placeholder="why? e.g. refundable" value={l.gstExemptRemark || ''} onChange={(e) => setLine(i, { gstExemptRemark: e.target.value })} />}
+                    </div>
+                  : l.gstExempt ? <div className="text-[8px] font-normal text-slate-400">No GST{l.gstExemptRemark ? ` — ${l.gstExemptRemark}` : ''}</div> : null)}
+              </td>
               {editable && <td><button className="text-slate-300 hover:text-red-500" onClick={() => delLine(i)}>✕</button></td>}
             </tr>
           ))}

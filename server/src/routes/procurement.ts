@@ -221,6 +221,8 @@ const lineSchema = z.object({
   uom: z.string().optional().nullable(), qty: z.coerce.number().catch(0).default(0),
   unitPrice: z.coerce.number().catch(0).default(0), totalPrice: z.coerce.number().optional(),
   isLeadTime: z.boolean().optional(), leadTimeText: z.string().optional().nullable(),
+  gstExempt: z.boolean().optional(), // this line bears no GST (e.g. refundable deposit)
+  gstExemptRemark: z.string().nullable().optional(), // why it is GST-exempt
   customValues: z.any().optional(), // { [colKey]: value } for user-added columns
   // Links this PO line back to the BOQ item it fulfils — the join that powers
   // the BOQ Cost view (Sprint PRD §6.3). Optional but strongly recommended.
@@ -305,9 +307,9 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
     }
-    totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
+    totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
     const lines = await prisma.procurementLineItem.findMany({ where: { docId: existing.id } });
     totals = computeTotals(lines, b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });

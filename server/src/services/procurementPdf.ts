@@ -37,7 +37,7 @@ interface DocForPdf {
   promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
-  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
   customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
   // Approval trail printed under the signature once the document is e-signed:
@@ -171,7 +171,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     cols.forEach((c, i) => {
       let v = '';
       if (c.k === 'sr') v = String(it.srNo);
-      else if (c.k === 'desc') v = it.description;
+      else if (c.k === 'desc') v = it.gstExempt ? `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})` : it.description;
       else if (c.k === 'uom') v = it.uom || '';
       else if (c.k === 'qty') v = it.qty ? it.qty.toLocaleString('en-IN') : '';
       else if (c.k === 'rate') v = it.unitPrice ? INR(it.unitPrice) : '';

@@ -59,18 +59,21 @@ export const nextDocNumber = nextSeq;
 
 // ── Totals ──────────────────────────────────────────────────────────────────
 export function computeTotals(
-  lines: { qty: number; unitPrice: number; totalPrice?: number; isLeadTime?: boolean }[],
+  lines: { qty: number; unitPrice: number; totalPrice?: number; isLeadTime?: boolean; gstExempt?: boolean }[],
   gstEnabled: boolean,
   gstPct: number,
   overrides?: { basicAmount?: number; gstAmount?: number; finalAmount?: number }
 ) {
-  const basic = overrides?.basicAmount ??
-    lines.filter((l) => !l.isLeadTime).reduce((s, l) => s + (l.totalPrice ?? l.qty * l.unitPrice), 0);
-  // GST and the grand total are rounded to whole rupees so the PO shows a clean
-  // "Rs. 14,028" rather than "Rs. 14,027.84". Basic (the taxable value) keeps 2
-  // decimals for accuracy; GST is rounded, then the final is rounded so the
-  // three rows always add up on the document. This matches the on-screen paper.
-  const gst = !gstEnabled ? 0 : Math.round(overrides?.gstAmount ?? basic * (gstPct / 100));
+  const lineTotal = (l: { qty: number; unitPrice: number; totalPrice?: number }) => (l.totalPrice ?? l.qty * l.unitPrice);
+  const active = lines.filter((l) => !l.isLeadTime);
+  // Basic = every priced line (exempt or not). The GST base is only the lines
+  // that are NOT gst-exempt — a refundable deposit is in Basic/Final but bears no
+  // GST. GST and the grand total are rounded to whole rupees so the PO shows a
+  // clean "Rs. 14,028"; Basic keeps 2 decimals for accuracy, then the three rows
+  // always add up on the document.
+  const basic = overrides?.basicAmount ?? active.reduce((s, l) => s + lineTotal(l), 0);
+  const taxable = active.filter((l) => !l.gstExempt).reduce((s, l) => s + lineTotal(l), 0);
+  const gst = !gstEnabled ? 0 : Math.round(overrides?.gstAmount ?? taxable * (gstPct / 100));
   const final = Math.round(overrides?.finalAmount ?? basic + gst);
   return { basicAmount: Math.round(basic * 100) / 100, gstAmount: gst, finalAmount: final };
 }
@@ -79,14 +82,16 @@ export function computeTotals(
 export interface PayTriggerMeta { [key: string]: { note?: string; inr?: number; expectedDate?: string } }
 export function buildMilestones(doc: {
   basicAmount: number;
-  gstEnabled?: boolean; gstPct?: number; payGstInclusive?: boolean;
+  gstEnabled?: boolean; gstPct?: number; gstAmount?: number; payGstInclusive?: boolean;
   payAdvancePct: number; payBeforeDeliveryPct: number; payRunningPct: number;
   payPostDeliveryPct: number; payPostCompletionPct: number; payRetentionPct: number;
   payTriggers?: string | null;
 }) {
   // The base a milestone % is taken from: the FINAL amount (incl. GST) when the PO
-  // says payment is GST-inclusive, else the BASIC amount.
-  const gst = doc.gstEnabled ? Math.round(doc.basicAmount * ((doc.gstPct || 0) / 100) * 100) / 100 : 0;
+  // says payment is GST-inclusive, else the BASIC amount. Use the doc's STORED
+  // gstAmount (which already excludes gst-exempt lines) so per-line exemptions
+  // flow into the payment split; fall back to the flat calc for legacy docs.
+  const gst = !doc.gstEnabled ? 0 : (doc.gstAmount ?? Math.round(doc.basicAmount * ((doc.gstPct || 0) / 100) * 100) / 100);
   const final = Math.round((doc.basicAmount + gst) * 100) / 100;
   const payBase = doc.payGstInclusive ? final : doc.basicAmount;
   const meta: PayTriggerMeta = doc.payTriggers ? safeJson(doc.payTriggers) : {};
