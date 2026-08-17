@@ -94,9 +94,11 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
                   {/* A payment GRN is paid on the PI; the tax invoice arrives later and
                       closes it — so flag the ones still waiting for it (§6). */}
                   <td className="pl-2">
-                    <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>
-                    {/* Who this GRN is currently waiting on to approve. */}
-                    {g.pendingWith && <div className="mt-0.5 text-[11px] text-amber-600">⏳ {g.pendingWith}{g.pendingWithRole ? ` · ${g.pendingWithRole}` : ''}</div>}
+                    {/* No approval step for payments — a submitted payment shows its
+                        lifecycle (Triggered → Paid → Closed), never "Approved". */}
+                    {g.paymentStatus
+                      ? <span className={`badge ${g.paymentStatus === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{g.paymentStatus === 'TRIGGERED' ? 'Triggered' : g.paymentStatus === 'PAID' ? 'Paid' : 'Closed'}</span>
+                      : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
                     {(g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl) && (
                       <div className="mt-0.5 text-[10px] leading-tight text-orange-600">tax invoice pending</div>
                     )}
@@ -167,7 +169,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
       setG(structuredClone(grn));
       setMsg(wasAmending ? 'Amendment saved and logged.' : 'Saved.');
       setAmending(false); setAmendRemark('');
-      if (wasAmending) setAskResubmit(true);
+      // Approval removed for payments — amending just saves; no resubmit prompt.
       qc.invalidateQueries({ queryKey: ['grns', projectId] });
     },
     onError: (e) => setMsg(errMsg(e)),
@@ -231,6 +233,17 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
     onError: (e) => setMsg(errMsg(e)),
   });
 
+  // Approval flow removed for payments (user request): Submit saves the form and
+  // finalises the payment directly — no approval chain popup, no approval emails.
+  // The server marks it approved, triggers the term, and pushes it to the sheet.
+  const submitDirect = async () => {
+    try {
+      await save.mutateAsync();
+      await act.mutateAsync({ verb: 'submit' });
+      setMsg('Payment submitted — the term is triggered and it has gone to the payment sheet.');
+    } catch (e) { setMsg(errMsg(e)); }
+  };
+
   if (isLoading || !g) return <Spinner label="Loading GRN…" />;
   const approved = g.status === 'APPROVED';
   const canEditGrn = canEdit('grn');
@@ -287,7 +300,10 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2"><button className="btn-outline text-sm" onClick={onClose}>← Back</button><h2 className="text-lg font-bold text-navy">{g.grnNumber}</h2><span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>
+        <div className="flex items-center gap-2"><button className="btn-outline text-sm" onClick={onClose}>← Back</button><h2 className="text-lg font-bold text-navy">{g.grnNumber}</h2>
+          {/* Hide the internal "Approved" pill for a payment that has a lifecycle
+              status — the payment badge (Triggered → Paid → Closed) says it all. */}
+          {!payStatus && <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
           {payStatus && <span className={`badge ${paymentClosed ? 'bg-slate-100 text-slate-600' : paidButOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{paymentClosed ? 'Payment Closed' : paidButOpen ? 'Paid · tax invoice pending' : 'Payment Triggered'}</span>}
         </div>
         <div className="flex gap-2">
@@ -302,7 +318,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
               {amending ? 'Save amendment' : 'Save'}
             </button>
           )}
-          {(g.status === 'DRAFT' || g.status === 'ON_HOLD') && <button className="btn-primary text-sm" onClick={() => setShowChain(true)}>{g.status === 'ON_HOLD' ? 'Resubmit' : 'Submit'}</button>}
+          {(g.status === 'DRAFT' || g.status === 'ON_HOLD') && <button className="btn-primary text-sm" disabled={save.isPending || act.isPending} onClick={submitDirect}>{g.status === 'ON_HOLD' ? 'Resubmit' : 'Submit'}</button>}
           {g.status === 'OPEN' && hasChain && <button className="btn-outline text-sm" disabled={act.isPending} onClick={() => act.mutate({ verb: 'remind' })}>Send Reminder</button>}
           {/* Approvers see the document itself before deciding. */}
           {canAct && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`, `${g?.grnNumber || 'GRN'}.pdf`)}>📄 Download GRN</button>}

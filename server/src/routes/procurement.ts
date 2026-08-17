@@ -483,7 +483,20 @@ router.post('/docs/:docId/recall', requireProjectMember, requireAnyEdit(...DOC_P
 router.delete('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHandler(async (req, res) => {
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound();
-  if (doc.status !== 'DRAFT') throw forbidden('Only a draft can be deleted. Submitted or approved documents cannot be removed.');
+  // A draft was never submitted; an on-hold doc was held during approval and sent
+  // back to be corrected — both are safe to discard. A pending or approved
+  // document is a record and must be recalled/amended, never deleted.
+  if (doc.status !== 'DRAFT' && doc.status !== 'ON_HOLD') throw forbidden('Only a draft or on-hold document can be deleted. Submitted or approved documents cannot be removed.');
+  // An on-hold doc is held before approval, so it should carry nothing downstream —
+  // but guard anyway: never cascade-delete a doc that already has payments or goods
+  // receipts against it (would silently remove real records).
+  if (doc.status === 'ON_HOLD') {
+    const [payCount, grCount] = await Promise.all([
+      prisma.gRN.count({ where: { docId: doc.id } }),
+      prisma.goodsReceipt.count({ where: { docId: doc.id } }),
+    ]);
+    if (payCount > 0 || grCount > 0) throw forbidden('This document has payments or goods receipts against it and cannot be deleted — amend it instead.');
+  }
   // Line items cascade on delete; clear the loose bits that don't.
   await prisma.approvalStep.deleteMany({ where: { docType: doc.type, docId: doc.id } });
   await prisma.paymentMilestone.deleteMany({ where: { docId: doc.id } });
@@ -601,6 +614,16 @@ router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdi
   };
   await prisma.procurementDoc.update({ where: { id: doc.id }, data: { termPis: JSON.stringify(termPis) } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: doc.docNumber, vendorName: doc.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  // The approval email carries the per-term PIs, but it is sent when the approver
+  // is notified. If the PI is uploaded AFTER the PO/WO was submitted, the current
+  // approver's email already went out without it — so re-notify them now with the
+  // updated PI. Best-effort: never fail the upload if the email hiccups.
+  if (doc.status === 'PENDING_APPROVAL') {
+    try {
+      const actor = await resolveActor(req.account!.id);
+      await remindCurrent(doc.type as DocType, doc.id, actor);
+    } catch { /* email is best-effort; the PI is saved regardless */ }
+  }
   res.json({ ok: true, termKey, pi: termPis[termKey], extracted });
 }));
 
@@ -640,6 +663,17 @@ router.post('/docs/:docId/milestones/:mid/pay', requireProjectMember, requireSec
   }).parse(req.body ?? {});
   const m = await prisma.paymentMilestone.findFirst({ where: { id: req.params.mid, docId: req.params.docId } });
   if (!m) throw notFound();
+
+  // A term is TRIGGERED as soon as its payment is submitted (so it appears in the
+  // pipeline), but it can only be PAID once that term's OWN payment is approved —
+  // re-check here so an early-triggered term can't be paid on another term's
+  // approved-invoice headroom.
+  if (m.status !== 'PAID') {
+    const ownGrns = await prisma.gRN.findMany({ where: { docId: req.params.docId, milestoneId: m.id }, select: { status: true } });
+    if (!ownGrns.some((g) => g.status === 'APPROVED')) {
+      throw badRequest(`The payment for this term (${m.name}) is not approved yet — it can be paid only after its approval is complete.`);
+    }
+  }
 
   // Cap payments at the actual invoiced amount: you cannot pay a vendor more than
   // the total value of their APPROVED GRN invoices for this PO/WO.
@@ -1002,38 +1036,18 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   } else if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) {
     throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
   }
-  const isResubmit = grn.status === 'APPROVED';
-  let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
-
-  // The value that drives the approval matrix (G6): the amount being paid for a
-  // payment GRN, else the tax-invoice value it certifies.
-  const chainAmount = grn.milestoneId ? (grn.amountToPay ?? grn.piValue ?? 0) : (grn.invoiceValue ?? 0);
-  // Fixed admin chain wins (auto-routed, no popup); otherwise legacy matrix flow.
-  const autoGrn = await resolveAutoChain('GRN', req.params.projectId, chainAmount);
-  if (autoGrn.source === 'fixed') {
-    chain = autoGrn.approverIds;
-  } else {
-    const matrix = await chainForAmount('GRN', req.params.projectId, chainAmount);
-    if (matrix.configured && matrix.steps.length) {
-      if (chain.length === 0) chain = matrix.steps.map((s) => s.approverId);
-      else {
-        const check = await validateChain('GRN', req.params.projectId, chainAmount, chain);
-        if (!check.ok) throw badRequest(check.message, { missing: check.missing, amount: chainAmount });
-      }
-    }
-  }
-
+  // Approval flow removed for payments (user request): submitting finalises the
+  // payment directly — NO approval chain, NO approval emails. It goes straight to
+  // APPROVED, its payment term triggers (PENDING → TRIGGERED), the payment ladder
+  // advances, and it flows onto the FMS sheet. Approval can be re-added later.
   const updated = await prisma.gRN.update({
     where: { id: grn.id },
-    data: { status: 'OPEN', ...(isResubmit && { approvedById: null, approvedAt: null }) },
+    data: { status: 'APPROVED', approvedById: req.user!.sub, approvedAt: new Date() },
   });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: isResubmit ? 'GRN_RESUBMIT' : 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id, details: { chainLength: chain.length, resubmit: isResubmit } });
-  if (chain.length) {
-    const actor = await resolveActor(req.account!.id);
-    await buildChain('GRN', grn.id, req.params.projectId, chain, actor);
-  } else {
-    await notifyProjectRoles(req.params.projectId, ['ADMIN', 'SUPERVISOR'], { type: 'GRN_SUBMITTED', title: 'GRN awaiting approval', message: `${grn.grnNumber} (${grn.vendorName || 'vendor'}), ${rs(chainAmount)} — review needed.`, relatedDocType: 'GRN', relatedDocId: grn.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
-  }
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_SUBMIT', entity: 'GRN', entityId: grn.id, details: { directApprove: true } });
+  // Trigger the linked term and advance the payment ladder, then push to the sheet.
+  await onGrnApproved(updated);
+  scheduleSheetSync();
   res.json({ grn: updated });
 }));
 
@@ -1334,7 +1348,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
     include: {
       milestones: true,
-      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
+      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneId: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
       // Physical goods receipts raised against this PO/WO — shown in the pipeline
       // regardless of status or milestone match (a PO can have several).
       goodsReceipts: { orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, receivedDate: true, vehicleNumber: true, driverName: true, deliveryChallanNumber: true } },
@@ -1348,13 +1362,19 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     const total = d.finalAmount;
     const now = Date.now();
     const delayed = d.milestones.some((m) => m.status === 'PENDING' && m.expectedDate && m.expectedDate.getTime() < now);
+    // PO-level payment status — no approval step any more, so it follows the money:
+    // TRIGGERED (a term is submitted/awaiting payment) → PAID (all triggered terms
+    // are settled). Never "Approved".
+    const anyTriggeredUnpaid = d.milestones.some((m) => m.status === 'TRIGGERED');
+    const anyPaid = d.milestones.some((m) => m.status === 'PAID');
+    const payStatusLabel = !d.grns.length ? 'No Payment' : anyTriggeredUnpaid ? 'Payment Triggered' : anyPaid ? 'Payment Paid' : 'Payment Triggered';
     return {
       docId: d.id, type: d.type, docNumber: d.docNumber, vendorName: d.vendorName,
       totalValue: d.basicAmount, gstAmount: d.gstAmount, totalWithGst: total,
       amountInvoiced: invoiced, amountAdvanced: advanced, amountPaid: paid, amountPending: Math.round((total - paid) * 100) / 100,
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,
       milestonesTriggered: triggered, milestonesTotal: d.milestones.length,
-      grnStatus: d.grns.length ? 'Payment Approved' : 'No Payment', delayed,
+      grnStatus: payStatusLabel, delayed,
       grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, milestoneName: g.milestoneName, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
       goodsReceipts: d.goodsReceipts.map((g) => ({ id: g.id, grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate, vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
@@ -1362,6 +1382,9 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
         triggerCondition: m.triggerCondition, expectedDate: m.expectedDate, actualTriggerDate: m.actualTriggerDate,
         paymentDate: m.paymentDate, paymentReference: m.paymentReference,
         utrNumber: m.utrNumber, paymentProofUrl: m.paymentProofUrl,
+        // A term triggers on submit (so it shows in the pipeline), but Accounts can
+        // only pay it once its OWN payment is approved — used to gate "Mark Paid".
+        paymentApproved: d.grns.some((g) => g.milestoneId === m.id),
       })),
     };
   });

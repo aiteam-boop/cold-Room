@@ -63,7 +63,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                   </div>
                 )}
               </div>
-              <span className="badge bg-slate-100 text-slate-600">{r.grnStatus}</span>
+              <span className={`badge ${r.grnStatus === 'Payment Paid' ? 'bg-green-100 text-green-700' : r.grnStatus === 'Payment Triggered' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{r.grnStatus}</span>
             </button>
 
             {open === r.docId && (
@@ -91,8 +91,12 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                           {m.status === 'PENDING' && isProc && (
                             <button className="text-xs font-medium text-navy hover:underline" onClick={() => trigger.mutate({ docId: r.docId, mid: m.id, date: new Date().toISOString().slice(0, 10) })}>Mark Triggered</button>
                           )}
+                          {/* Term triggers on submit, but is only payable once its
+                              own payment is approved. */}
                           {m.status === 'TRIGGERED' && isAccounts && (
-                            <button className="text-xs font-medium text-green-700 hover:underline" onClick={() => setPaying({ docId: r.docId, milestone: m })}>Mark Paid</button>
+                            m.paymentApproved
+                              ? <button className="text-xs font-medium text-green-700 hover:underline" onClick={() => setPaying({ docId: r.docId, milestone: m })}>Mark Paid</button>
+                              : <span className="text-[11px] text-slate-400">Awaiting approval</span>
                           )}
                         </td>
                       </tr>

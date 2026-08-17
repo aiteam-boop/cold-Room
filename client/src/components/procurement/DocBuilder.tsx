@@ -547,7 +547,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
       {/* Per-payment-term Proforma Invoices — the approver sees these with the PO,
           and a GRN raised for a term auto-fetches its PI. */}
-      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} />
+      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} onUploaded={(key, pi) => setD((prev: any) => ({ ...prev, termPis: { ...(prev?.termPis || {}), [key]: pi } }))} />
     </div>
   );
 }
@@ -747,8 +747,7 @@ const PI_TERMS = [
   { key: 'postCompletion', name: 'Post Completion', pct: 'payPostCompletionPct' },
   { key: 'retention', name: 'Retention', pct: 'payRetentionPct' },
 ] as const;
-function TermPIs({ projectId, docId, doc, editable }: { projectId: string; docId: string; doc: any; editable: boolean }) {
-  const qc = useQueryClient();
+function TermPIs({ projectId, docId, doc, editable, onUploaded }: { projectId: string; docId: string; doc: any; editable: boolean; onUploaded: (key: string, pi: any) => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const termPis = doc.termPis || {};
   const terms = PI_TERMS.filter((t) => (Number(doc[t.pct]) || 0) > 0);
@@ -756,8 +755,11 @@ function TermPIs({ projectId, docId, doc, editable }: { projectId: string; docId
     setBusy(key);
     try {
       const fd = new FormData(); fd.append('file', file);
-      await api.post(`/projects/${projectId}/procurement/docs/${docId}/term-pi/${key}`, fd);
-      qc.invalidateQueries({ queryKey: ['proc-doc', docId] });
+      const res = await api.post(`/projects/${projectId}/procurement/docs/${docId}/term-pi/${key}`, fd);
+      // Merge ONLY this term's PI into the parent form state — never refetch the
+      // whole document, which would reset the user's unsaved edits (bug fix). The
+      // PI is already persisted server-side by the endpoint above.
+      onUploaded(key, res.data?.pi ?? null);
     } catch (e) { alert(errMsg(e)); } finally { setBusy(null); }
   };
   if (!terms.length) return null;

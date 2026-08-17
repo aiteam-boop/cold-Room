@@ -26,7 +26,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
     onSuccess: (doc) => { qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }); setOpenId(doc.id); },
     onError: (e) => alert(errMsg(e)),
   });
-  // Only DRAFTs can be deleted — a submitted/approved doc is a record.
+  // Drafts and on-hold docs can be deleted — a pending/approved doc is a record.
   const del = useMutation({
     mutationFn: (id: string) => api.delete(`/projects/${projectId}/procurement/docs/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }),
@@ -72,7 +72,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
                   </td>
                   <td><DeliveryPill delivery={d.delivery} /></td>
                   <td className="px-2 text-right">
-                    {isAdmin && d.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${d.docNumber}? This can't be undone.`) && del.mutate(d.id)}>Delete</button>}
+                    {isAdmin && (d.status === 'DRAFT' || d.status === 'ON_HOLD') && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete ${d.status === 'ON_HOLD' ? 'on-hold' : 'draft'} ${d.docNumber}? This can't be undone.`) && del.mutate(d.id)}>Delete</button>}
                     <button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(d.id)}>Open →</button>
                   </td>
                 </tr>
