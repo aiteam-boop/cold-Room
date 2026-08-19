@@ -44,4 +44,16 @@ export const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
+// PDF-only upload — the signed packing list is a HARD PDF-only requirement
+// (Amisha rec 64: JPG/PNG/other rejected). Non-PDFs are filtered out before they
+// touch disk/GridFS; the route then sees no `req.file` and returns a clear 400.
+export const uploadPdf = multer({
+  storage: dualStorage,
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname);
+    cb(null, ok);
+  },
+});
+
 export const UPLOADS_PATH = UPLOAD_DIR;

@@ -59,21 +59,25 @@ export const nextDocNumber = nextSeq;
 
 // ── Totals ──────────────────────────────────────────────────────────────────
 export function computeTotals(
-  lines: { qty: number; unitPrice: number; totalPrice?: number; isLeadTime?: boolean; gstExempt?: boolean }[],
+  lines: { qty: number; unitPrice: number; totalPrice?: number; isLeadTime?: boolean; gstExempt?: boolean; gstPct?: number | null }[],
   gstEnabled: boolean,
   gstPct: number,
   overrides?: { basicAmount?: number; gstAmount?: number; finalAmount?: number }
 ) {
   const lineTotal = (l: { qty: number; unitPrice: number; totalPrice?: number }) => (l.totalPrice ?? l.qty * l.unitPrice);
   const active = lines.filter((l) => !l.isLeadTime);
-  // Basic = every priced line (exempt or not). The GST base is only the lines
-  // that are NOT gst-exempt — a refundable deposit is in Basic/Final but bears no
-  // GST. GST and the grand total are rounded to whole rupees so the PO shows a
-  // clean "Rs. 14,028"; Basic keeps 2 decimals for accuracy, then the three rows
-  // always add up on the document.
+  // Basic = every priced line (exempt or not). GST is charged PER LINE at that
+  // line's own rate (its gstPct, else the document default) — so a 5% line and an
+  // 18% line are taxed correctly; a gst-exempt line (refundable deposit) bears
+  // none but still sits in Basic/Final. GST and the grand total are rounded to
+  // whole rupees so the PO shows a clean "Rs. 14,028"; Basic keeps 2 decimals.
   const basic = overrides?.basicAmount ?? active.reduce((s, l) => s + lineTotal(l), 0);
-  const taxable = active.filter((l) => !l.gstExempt).reduce((s, l) => s + lineTotal(l), 0);
-  const gst = !gstEnabled ? 0 : Math.round(overrides?.gstAmount ?? taxable * (gstPct / 100));
+  const gstOf = active.reduce((s, l) => {
+    if (l.gstExempt) return s;
+    const rate = l.gstPct != null ? l.gstPct : gstPct;
+    return s + lineTotal(l) * (rate / 100);
+  }, 0);
+  const gst = !gstEnabled ? 0 : Math.round(overrides?.gstAmount ?? gstOf);
   const final = Math.round(overrides?.finalAmount ?? basic + gst);
   return { basicAmount: Math.round(basic * 100) / 100, gstAmount: gst, finalAmount: final };
 }
@@ -133,6 +137,19 @@ export function buildMilestones(doc: {
 
 export function paymentTotalPct(d: { payAdvancePct: number; payBeforeDeliveryPct: number; payRunningPct: number; payPostDeliveryPct: number; payPostCompletionPct: number; payRetentionPct: number }) {
   return Math.round((d.payAdvancePct + d.payBeforeDeliveryPct + d.payRunningPct + d.payPostDeliveryPct + d.payPostCompletionPct + d.payRetentionPct) * 100) / 100;
+}
+
+// The actual rupees paid against a milestone (Amisha PRD A1/A3 partial payments).
+// `amountPaid` is the source of truth for part-payments; legacy PAID rows created
+// before that field carry 0, so we fall back to the full `inrAmount` for them.
+// This keeps every cost rollup correct without a data backfill.
+export function milestonePaidAmount(m: { amountPaid?: number | null; inrAmount: number; status?: string | null }): number {
+  if (m.amountPaid && m.amountPaid > 0) return m.amountPaid;
+  return m.status === 'PAID' ? m.inrAmount : 0;
+}
+// Rupees still pending against a milestone (never negative).
+export function milestoneRemaining(m: { amountPaid?: number | null; inrAmount: number; status?: string | null }): number {
+  return Math.round((m.inrAmount - milestonePaidAmount(m)) * 100) / 100;
 }
 
 function safeJson(s: string): any { try { return JSON.parse(s); } catch { return {}; } }

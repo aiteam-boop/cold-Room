@@ -75,15 +75,29 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                       <tr key={m.id} className="border-t border-slate-100">
                         <td className="py-2 font-medium text-slate-700">{m.name} <span className="text-xs font-normal text-slate-400">{m.percentage}%</span></td>
                         <td className="text-xs text-slate-500">{m.triggerCondition || '—'}</td>
-                        <td className="text-right">{money(m.inrAmount)}</td>
+                        <td className="text-right">
+                          {money(m.inrAmount)}
+                          {/* Part-payment (A1/A3): show what's paid vs still pending. */}
+                          {m.status === 'PARTIALLY_PAID' && (
+                            <div className="text-[11px] text-slate-400">Paid {money(m.amountPaid)} · <span className="font-medium text-rose-600">Pending {money(m.remaining)}</span></div>
+                          )}
+                          {/* Term split across several payment entries but not fully
+                              covered yet — flag the still-open balance in red. */}
+                          {m.status !== 'PARTIALLY_PAID' && m.pending > 0 && (
+                            <div className="text-[11px] font-medium text-rose-600">{money(m.pending)} pending</div>
+                          )}
+                        </td>
                         <td>
-                          <span className={`badge ${m.status === 'PAID' ? 'bg-green-100 text-green-700' : m.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{m.status}</span>
-                          {m.actualTriggerDate && m.status !== 'PAID' && <div className="text-[11px] text-slate-400">Triggered {fmtDate(m.actualTriggerDate)}</div>}
-                          {m.status === 'PAID' && (
+                          <span className={`badge ${m.status === 'PAID' ? 'bg-green-100 text-green-700' : m.status === 'PARTIALLY_PAID' ? 'bg-orange-100 text-orange-700' : m.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{m.status === 'PARTIALLY_PAID' ? 'PARTLY PAID' : m.status}</span>
+                          {m.actualTriggerDate && m.status !== 'PAID' && m.status !== 'PARTIALLY_PAID' && <div className="text-[11px] text-slate-400">Triggered {fmtDate(m.actualTriggerDate)}</div>}
+                          {(m.status === 'PAID' || m.status === 'PARTIALLY_PAID') && (
                             <div className="text-[11px] text-slate-400">
                               {m.utrNumber ? <>UTR: <span className="font-medium text-slate-600">{m.utrNumber}</span></> : m.paymentReference ? `Ref: ${m.paymentReference}` : ''}
                               {m.paymentDate && ` · ${fmtDate(m.paymentDate)}`}
                               {m.paymentProofUrl && <> · <a className="text-navy hover:underline" href={m.paymentProofUrl} target="_blank" rel="noreferrer">proof</a></>}
+                              {m.installments?.length > 1 && (
+                                <div className="mt-0.5">{m.installments.map((i: any, idx: number) => (<span key={i.id}>{idx > 0 ? ' · ' : ''}{money(i.amount)}{i.utrNumber ? ` (${i.utrNumber})` : ''}</span>))}</div>
+                              )}
                             </div>
                           )}
                         </td>
@@ -91,11 +105,12 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                           {m.status === 'PENDING' && isProc && (
                             <button className="text-xs font-medium text-navy hover:underline" onClick={() => trigger.mutate({ docId: r.docId, mid: m.id, date: new Date().toISOString().slice(0, 10) })}>Mark Triggered</button>
                           )}
-                          {/* Term triggers on submit, but is only payable once its
-                              own payment is approved. */}
-                          {m.status === 'TRIGGERED' && isAccounts && (
+                          {/* Term triggers on submit, but is only payable once its own
+                              payment is approved. A partly-paid term can be re-paid for
+                              the balance (A1/A3). */}
+                          {(m.status === 'TRIGGERED' || m.status === 'PARTIALLY_PAID') && isAccounts && (
                             m.paymentApproved
-                              ? <button className="text-xs font-medium text-green-700 hover:underline" onClick={() => setPaying({ docId: r.docId, milestone: m })}>Mark Paid</button>
+                              ? <button className="text-xs font-medium text-green-700 hover:underline" onClick={() => setPaying({ docId: r.docId, milestone: m })}>{m.status === 'PARTIALLY_PAID' ? 'Pay balance' : 'Mark Paid'}</button>
                               : <span className="text-[11px] text-slate-400">Awaiting approval</span>
                           )}
                         </td>
@@ -119,6 +134,8 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                           {(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl)
                             ? `${g.invoiceNumber ? ` · Invoice ${g.invoiceNumber}` : ' · Invoice'}${g.invoiceValue != null ? ` · ${money(g.invoiceValue)}` : ''}`
                             : ' · tax invoice pending'}
+                          {/* If this term still has an open balance across part-payments, flag it in red. */}
+                          {g.termPending > 0 && <span className="ml-1 font-semibold text-rose-600">({money(g.termPending)} pending)</span>}
                         </span>
                         <span className="flex items-center gap-3">
                           <button className="font-medium text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${g.id}/pdf`, `${g.grnNumber || 'Payment'}.pdf`)}>📄 Payment</button>
@@ -191,16 +208,23 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
 // optional NEFT receipt can be attached (Sprint PRD §9.1). FMS auto-fetch of the
 // UTR is a Phase-2 item — for now this is manual entry.
 function MarkPaidModal({ projectId, docId, milestone, onClose, onDone }: { projectId: string; docId: string; milestone: any; onClose: () => void; onDone: () => void }) {
+  // Pending balance for this term — the payment defaults to clearing it, but a
+  // smaller amount records a part-payment (Amisha PRD A1/A3).
+  const remaining = milestone.remaining != null ? milestone.remaining : milestone.inrAmount;
+  const paidSoFar = milestone.amountPaid || 0;
+  const [amount, setAmount] = useState(String(remaining));
   const [utrNumber, setUtr] = useState('');
   const [paymentDate, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [remarks, setRemarks] = useState('');
   const [proof, setProof] = useState<File | null>(null);
   const [err, setErr] = useState('');
 
+  const amt = Number(amount) || 0;
+  const partial = amt > 0 && amt < remaining - 0.01;
   const base = `/projects/${projectId}/procurement/docs/${docId}/milestones/${milestone.id}`;
   const m = useMutation({
     mutationFn: async () => {
-      await api.post(`${base}/pay`, { utrNumber: utrNumber.trim(), paymentDate, remarks });
+      await api.post(`${base}/pay`, { amount: amt, utrNumber: utrNumber.trim(), paymentDate, remarks });
       // Attach the proof only after the payment itself lands, so a failed upload
       // never leaves the milestone stuck in TRIGGERED.
       if (proof) { const fd = new FormData(); fd.append('file', proof); await api.post(`${base}/proof`, fd); }
@@ -214,7 +238,19 @@ function MarkPaidModal({ projectId, docId, milestone, onClose, onDone }: { proje
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); m.mutate(); }} className="space-y-3">
         <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm">
           <div className="font-medium text-slate-700">{milestone.name} · {milestone.percentage}%</div>
-          <div className="text-xs text-slate-500">{inr(milestone.inrAmount)}{milestone.triggerCondition ? ` · ${milestone.triggerCondition}` : ''}</div>
+          <div className="text-xs text-slate-500">Term {inr(milestone.inrAmount)}{milestone.triggerCondition ? ` · ${milestone.triggerCondition}` : ''}</div>
+          {paidSoFar > 0 && <div className="mt-0.5 text-xs text-slate-500">Already paid {inr(paidSoFar)} · <span className="font-medium text-rose-600">Pending {inr(remaining)}</span></div>}
+          {/* GST (A2): milestone amounts already follow the PO's GST rule — advance
+              is charged WITHOUT GST until delivery; GST falls due on delivery. */}
+          <div className="mt-1 text-[11px] text-slate-400">Amount follows the PO’s GST rule (advance is without GST until delivery).</div>
+        </div>
+        <div>
+          <label className="label">Amount to pay *</label>
+          <input className="input" type="number" step="0.01" min="0" max={remaining} required value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
+            <span>Pending balance: {inr(remaining)}. Pay less for a part-payment.</span>
+            {partial ? <span className="font-medium text-orange-600">Part-payment · {inr(Math.max(remaining - amt, 0))} will stay pending</span> : <button type="button" className="text-navy hover:underline" onClick={() => setAmount(String(remaining))}>Full</button>}
+          </div>
         </div>
         <div><label className="label">UTR Number *</label><input className="input" required value={utrNumber} onChange={(e) => setUtr(e.target.value)} placeholder="NEFT / RTGS / IMPS reference" /></div>
         <div><label className="label">Payment Date *</label><input className="input" type="date" required value={paymentDate} onChange={(e) => setDate(e.target.value)} /></div>
@@ -223,7 +259,7 @@ function MarkPaidModal({ projectId, docId, milestone, onClose, onDone }: { proje
         {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-outline" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Mark Paid'}</button>
+          <button className="btn-primary" disabled={m.isPending || amt <= 0}>{m.isPending ? 'Saving…' : partial ? 'Record Part-Payment' : 'Mark Paid'}</button>
         </div>
       </form>
     </Modal>

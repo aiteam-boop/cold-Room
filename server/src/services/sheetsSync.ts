@@ -279,8 +279,6 @@ const dmyTime = (d: unknown): string => {
   if (!dt || Number.isNaN(dt.getTime())) return '';
   return `${dmy(dt)} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`;
 };
-/** Stack one value per GRN, one under the other, inside a single cell. */
-const stack = (vals: unknown[]): string => vals.map((v) => (v == null || v === '' ? '—' : String(v))).join('\n');
 /** Absolute, click-from-the-sheet URL. /api/* PDFs are signed; /uploads/* are public. */
 function fileUrl(raw: unknown, base: string): string {
   if (typeof raw !== 'string' || !raw.startsWith('/')) return '';
@@ -331,10 +329,22 @@ export async function importPaidFromSheet(): Promise<number> {
     if (m.status !== 'TRIGGERED') continue;
     if (m.utrNumber === utr) continue; // already recorded — idempotent
     const remark = iRemark >= 0 ? (row[iRemark] || '').trim() : '';
+    const paidAt = new Date();
+    // A sheet UTR settles the whole term. Keep amountPaid in step (source of truth
+    // for the cost rollups) and log the balance as a part-payment installment.
+    const already = typeof m.amountPaid === 'number' && m.amountPaid > 0 ? m.amountPaid : 0;
+    const delta = Math.round(((m.inrAmount || 0) - already) * 100) / 100;
     await milestones.updateOne(
       { _id: m._id } as never,
-      { $set: { status: 'PAID', utrNumber: utr, paymentReference: utr, remarks: remark || m.remarks || null, paymentDate: new Date() } },
+      { $set: { status: 'PAID', amountPaid: m.inrAmount || 0, utrNumber: utr, paymentReference: utr, remarks: remark || m.remarks || null, paymentDate: paidAt } },
     );
+    if (delta > 0) {
+      await db.collection('PaymentInstallment').insertOne({
+        _id: randomUUID(), milestoneId: String(m._id), docId: m.docId, amount: delta,
+        utrNumber: utr, paymentReference: utr, paymentDate: paidAt, remarks: remark || null,
+        paidById: null, createdAt: paidAt,
+      } as never);
+    }
     const doc = await docsCol.findOne({ _id: m.docId } as never, { projection: { projectId: 1 } });
     await audit.insertOne({
       _id: randomUUID(), projectId: (doc?.projectId as string) ?? null, userId: null,
@@ -382,7 +392,10 @@ export async function exportPaymentAccountFms(): Promise<number> {
   }
   const kycCellFor = (vendorId: unknown): string => {
     const list = vendorId ? kycByVendor.get(String(vendorId)) ?? [] : [];
-    return stack(list.map((k) => `${k.kycKind || 'KYC'}: ${fileUrl(k.fileUrl, base)}`));
+    // Single clickable link to a page listing every KYC doc. Google Sheets makes a
+    // lone URL clickable; the old multi-line "LABEL: url" text was not (had to be
+    // copy-pasted). The page opens without login via the path's signature.
+    return list.length ? fileUrl(`/api/vendors/${vendorId}/kyc-view`, base) : '';
   };
 
   const rows: (string | number)[][] = [];

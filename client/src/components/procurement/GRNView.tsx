@@ -269,7 +269,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   // Live balance, same formula as the vendor-payment (FMS) form:
   // PI value − (advance already on the PO + what this entry pays).
   const balanceToPay = Math.round((piValueNum - advanceOnPo - (Number(g.amountToPay) || 0)) * 100) / 100;
-  const isMilestoneLocked = (m: any) => m.status === 'PAID' || m.status === 'TRIGGERED';
+  // A term is locked only once it is fully paid/committed. A partly-paid term
+  // (remaining > 0) stays selectable so its balance can be paid (Amisha A1/A3).
+  const isMilestoneLocked = (m: any) => m.status === 'PAID' || (m.remaining != null ? m.remaining <= 0.01 : m.status === 'TRIGGERED');
   // Payment lifecycle (§6): TRIGGERED → PAID → CLOSED, running alongside the
   // goods/approval status. A GRN can be PAID but still OPEN (tax invoice pending).
   const payStatus: string | null = g.paymentStatus ?? null;
@@ -510,7 +512,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
                   // and auto-fetches the PO's PI for that term.
                   setG({
                     ...g, milestoneId: m?.id ?? null, milestoneKey: m?.fieldKey ?? null, milestoneName: m?.name ?? null,
-                    amountToPay: m?.inrAmount != null ? m.inrAmount : g.amountToPay,
+                    // Default to this term's REMAINING balance (part-payments), not
+                    // the full term value — still editable for a smaller amount.
+                    amountToPay: m ? (m.remaining != null ? m.remaining : m.inrAmount) : g.amountToPay,
                     ...(pi ? {
                       piNumber: pi.piNumber ?? g.piNumber,
                       piDate: pi.piDate ?? g.piDate,
@@ -521,13 +525,32 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
                 }}
               >
                 <option value="">Select a payment term…</option>
-                {milestones.map((m) => (
-                  <option key={m.id} value={m.id} disabled={isMilestoneLocked(m) && m.id !== g.milestoneId}>
-                    {m.name}{m.percentage ? ` (${m.percentage}%)` : ''}{m.inrAmount != null ? ` — ${inr(m.inrAmount)}` : ''}{isMilestoneLocked(m) ? ` · ${titleize(m.status)}` : ''}
-                  </option>
-                ))}
+                {milestones.map((m) => {
+                  const partlyPaid = m.remaining != null && m.remaining > 0.01 && m.remaining < m.inrAmount - 0.01;
+                  return (
+                    <option key={m.id} value={m.id} disabled={isMilestoneLocked(m) && m.id !== g.milestoneId}>
+                      {m.name}{m.percentage ? ` (${m.percentage}%)` : ''}{m.inrAmount != null ? ` — ${inr(m.inrAmount)}` : ''}
+                      {isMilestoneLocked(m) ? ` · ${titleize(m.status)}` : partlyPaid ? ` · ${inr(m.remaining)} pending` : ''}
+                    </option>
+                  );
+                })}
               </select>
               {milestones.length === 0 && <div className="mt-1 text-[11px] text-slate-400">This PO has no payment terms defined.</div>}
+              {/* Selected term's remaining balance — how much of e.g. the Advance is
+                  still open to pay across part-payments (Amisha A1/A3). */}
+              {(() => {
+                const sel = milestones.find((x) => x.id === g.milestoneId);
+                if (!sel || sel.remaining == null || sel.inrAmount == null) return null;
+                const committed = Math.round((sel.inrAmount - sel.remaining) * 100) / 100;
+                if (committed <= 0.01) return null;
+                const pctLeft = sel.inrAmount > 0 ? Math.round((sel.remaining / sel.inrAmount) * 1000) / 10 : 0;
+                return (
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    {sel.name}: already paid <span className="font-medium">{inr(committed)}</span> ·{' '}
+                    <span className="font-medium text-rose-600">{inr(sel.remaining)} remaining ({pctLeft}% of this term left)</span>
+                  </div>
+                );
+              })()}
             </F>
           </div>
 

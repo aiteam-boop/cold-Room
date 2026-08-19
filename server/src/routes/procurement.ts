@@ -2,15 +2,18 @@ import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
+import { sendEmail, appClientUrl, isEmailEnabled } from '../services/email';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../lib/errors';
 import {
   requireAuth, requireProjectMember,
   requirePage, requireEdit, requireAnyPage, requireAnyEdit, requireSection, requireFinancialView,
 } from '../middleware/authMiddleware';
 import { maskFinancials } from '../lib/financial';
-import { upload } from '../middleware/upload';
+import { upload, uploadPdf } from '../middleware/upload';
+import { SIGNED_TYPE } from '../services/grnReminders';
 import { audit } from '../lib/audit';
 import { extractPiFields } from '../services/piExtract';
 import { scheduleSheetSync } from '../services/sheetsSync';
@@ -18,8 +21,9 @@ import {
   COMPANY, nextDocNumber, computeTotals, paymentTotalPct,
   defaultPOSections, defaultWOSections,
   normalizeTermsSections, assertTermsMutationsAllowed,
+  milestonePaidAmount, milestoneRemaining,
 } from '../services/procurement';
-import { renderProcurementPdf, renderGRNPdf } from '../services/procurementPdf';
+import { renderProcurementPdf, renderGRNPdf, renderPackingListPdf } from '../services/procurementPdf';
 import { notifyUser, notifyProjectRoles } from '../services/notify';
 import { hasSection, shouldHideFinancials } from '../lib/permissions';
 import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
@@ -223,6 +227,7 @@ const lineSchema = z.object({
   isLeadTime: z.boolean().optional(), leadTimeText: z.string().optional().nullable(),
   gstExempt: z.boolean().optional(), // this line bears no GST (e.g. refundable deposit)
   gstExemptRemark: z.string().nullable().optional(), // why it is GST-exempt
+  gstPct: z.coerce.number().nullable().optional(), // per-line GST rate; null = doc default
   customValues: z.any().optional(), // { [colKey]: value } for user-added columns
   // Links this PO line back to the BOQ item it fulfils — the join that powers
   // the BOQ Cost view (Sprint PRD §6.3). Optional but strongly recommended.
@@ -307,9 +312,9 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
     }
-    totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
+    totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt, gstPct: l.gstPct })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
     const lines = await prisma.procurementLineItem.findMany({ where: { docId: existing.id } });
     totals = computeTotals(lines, b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
@@ -658,6 +663,9 @@ router.post('/docs/:docId/milestones/:mid/trigger', requireProjectMember, requir
 // date are entered manually today; FMS auto-fetch is Phase 2 (Sprint PRD §9).
 router.post('/docs/:docId/milestones/:mid/pay', requireProjectMember, requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
   const b = z.object({
+    // Optional part-payment amount (Amisha PRD A1/A3). Omitted → clear the whole
+    // remaining balance (the common full-payment case).
+    amount: z.coerce.number().positive().optional(),
     paymentDate: z.string().optional(),
     paymentReference: z.string().optional(),
     utrNumber: z.string().trim().min(1, 'UTR number is required.'),
@@ -666,45 +674,51 @@ router.post('/docs/:docId/milestones/:mid/pay', requireProjectMember, requireSec
   const m = await prisma.paymentMilestone.findFirst({ where: { id: req.params.mid, docId: req.params.docId } });
   if (!m) throw notFound();
 
-  // A term is TRIGGERED as soon as its payment is submitted (so it appears in the
-  // pipeline), but it can only be PAID once that term's OWN payment is approved —
-  // re-check here so an early-triggered term can't be paid on another term's
-  // approved-invoice headroom.
-  if (m.status !== 'PAID') {
-    const ownGrns = await prisma.gRN.findMany({ where: { docId: req.params.docId, milestoneId: m.id }, select: { status: true } });
-    if (!ownGrns.some((g) => g.status === 'APPROVED')) {
-      throw badRequest(`The payment for this term (${m.name}) is not approved yet — it can be paid only after its approval is complete.`);
-    }
+  const remaining = milestoneRemaining(m);
+  if (remaining <= 0) throw badRequest('This term is already fully paid.');
+  const amount = b.amount != null ? Math.round(b.amount * 100) / 100 : remaining;
+  if (amount <= 0) throw badRequest('Enter a payment amount greater than zero.');
+  if (amount > remaining + 0.01) throw badRequest(`Amount exceeds the remaining balance for this term (${rs(remaining)} pending).`);
+
+  // The term's OWN payment must be approved before any (part-)payment is released —
+  // an early-triggered term can't be paid on another term's approved headroom.
+  const ownGrns = await prisma.gRN.findMany({ where: { docId: req.params.docId, milestoneId: m.id }, select: { status: true } });
+  if (!ownGrns.some((g) => g.status === 'APPROVED')) {
+    throw badRequest(`The payment for this term (${m.name}) is not approved yet — it can be paid only after its approval is complete.`);
   }
 
-  // Cap payments at the actual invoiced amount: you cannot pay a vendor more than
-  // the total value of their APPROVED GRN invoices for this PO/WO.
-  if (m.status !== 'PAID') {
-    const [grns, alreadyPaid] = await Promise.all([
-      prisma.gRN.findMany({ where: { docId: req.params.docId, status: 'APPROVED' }, select: { invoiceValue: true } }),
-      prisma.paymentMilestone.findMany({ where: { docId: req.params.docId, status: 'PAID' }, select: { inrAmount: true } }),
-    ]);
-    const invoiced = grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
-    const paidSoFar = alreadyPaid.reduce((s, x) => s + x.inrAmount, 0);
-    if (invoiced <= 0) throw badRequest('No approved GRN invoice yet — approve a GRN before marking payments paid.');
-    if (Math.round((paidSoFar + m.inrAmount) * 100) / 100 > Math.round(invoiced * 100) / 100) {
-      throw badRequest(`This payment (${rs(m.inrAmount)}) would exceed the invoiced amount. Invoiced ${rs(invoiced)}, already paid ${rs(paidSoFar)}, remaining payable ${rs(Math.max(invoiced - paidSoFar, 0))}.`);
-    }
+  // Cap total payments at the actual invoiced amount: you cannot pay a vendor more
+  // than the total value of their APPROVED GRN invoices for this PO/WO.
+  const [grns, allMs] = await Promise.all([
+    prisma.gRN.findMany({ where: { docId: req.params.docId, status: 'APPROVED' }, select: { invoiceValue: true } }),
+    prisma.paymentMilestone.findMany({ where: { docId: req.params.docId }, select: { amountPaid: true, inrAmount: true, status: true } }),
+  ]);
+  const invoiced = grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
+  const paidSoFar = allMs.reduce((s, x) => s + milestonePaidAmount(x), 0);
+  if (invoiced <= 0) throw badRequest('No approved GRN invoice yet — approve a GRN before marking payments paid.');
+  if (Math.round((paidSoFar + amount) * 100) / 100 > Math.round(invoiced * 100) / 100) {
+    throw badRequest(`This payment (${rs(amount)}) would exceed the invoiced amount. Invoiced ${rs(invoiced)}, already paid ${rs(paidSoFar)}, remaining payable ${rs(Math.max(invoiced - paidSoFar, 0))}.`);
   }
 
+  const paymentDate = b.paymentDate ? new Date(b.paymentDate) : new Date();
+  const newPaid = Math.round((milestonePaidAmount(m) + amount) * 100) / 100;
+  const fullyPaid = newPaid >= m.inrAmount - 0.01;
+  // Log this transfer as its own installment (auditable part-payment history).
+  await prisma.paymentInstallment.create({ data: { milestoneId: m.id, docId: req.params.docId, amount, utrNumber: b.utrNumber, paymentReference: b.paymentReference || b.utrNumber, paymentDate, remarks: b.remarks, paidById: req.user!.sub } });
   const updated = await prisma.paymentMilestone.update({
     where: { id: m.id },
     data: {
-      status: 'PAID',
-      paymentDate: b.paymentDate ? new Date(b.paymentDate) : new Date(),
+      amountPaid: newPaid,
+      status: fullyPaid ? 'PAID' : 'PARTIALLY_PAID',
+      paymentDate,
       utrNumber: b.utrNumber,
       // Keep the legacy free-text reference populated (older rows and the sheets
       // export read it); default it to the UTR when nothing else was given.
       paymentReference: b.paymentReference || b.utrNumber,
-      remarks: b.remarks,
+      remarks: b.remarks ?? m.remarks,
     },
   });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'MILESTONE_PAY', entity: 'PaymentMilestone', entityId: m.id, details: { utrNumber: b.utrNumber, paymentDate: updated.paymentDate } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'MILESTONE_PAY', entity: 'PaymentMilestone', entityId: m.id, details: { amount, utrNumber: b.utrNumber, paymentDate, partial: !fullyPaid, amountPaid: newPaid } });
   res.json({ milestone: maskFinancials(updated, req.account) });
 }));
 
@@ -740,7 +754,7 @@ async function milestonesForDoc(docId: string | null | undefined) {
   return prisma.paymentMilestone.findMany({
     where: { docId },
     orderBy: { sortOrder: 'asc' },
-    select: { id: true, name: true, fieldKey: true, percentage: true, inrAmount: true, status: true },
+    select: { id: true, name: true, fieldKey: true, percentage: true, inrAmount: true, amountPaid: true, status: true },
   });
 }
 
@@ -773,12 +787,16 @@ async function onGrnApproved(grn: { id: string; milestoneId: string | null; paym
   }
 }
 
-// Accounts recorded the UTR: mark the linked milestone PAID with the reference.
+// Accounts recorded the UTR on the GRN: settle the whole term. Keeps amountPaid
+// in step (source of truth for the cost rollups) and logs the balance as an
+// installment so the payment history stays complete.
 async function payGrnMilestone(grn: { milestoneId: string | null }, utr: string | null, paidAt: Date) {
   if (!grn.milestoneId) return;
   const m = await prisma.paymentMilestone.findUnique({ where: { id: grn.milestoneId } });
   if (m && m.status !== 'PAID') {
-    await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'PAID', paymentDate: paidAt, utrNumber: utr, paymentReference: utr } });
+    const delta = Math.round((m.inrAmount - milestonePaidAmount(m)) * 100) / 100;
+    if (delta > 0) await prisma.paymentInstallment.create({ data: { milestoneId: m.id, docId: m.docId, amount: delta, utrNumber: utr, paymentReference: utr, paymentDate: paidAt } });
+    await prisma.paymentMilestone.update({ where: { id: m.id }, data: { status: 'PAID', amountPaid: m.inrAmount, paymentDate: paidAt, utrNumber: utr, paymentReference: utr } });
   }
 }
 
@@ -886,7 +904,29 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
   // form auto-fetches that term's PI (number / date / value / PDF).
   const parentDoc = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { termPis: true } });
   const termPis = parseJson(parentDoc?.termPis, {}) as Record<string, any>;
-  const milestonesWithPi = milestones.map((mm: any) => ({ ...mm, pi: termPis[mm.fieldKey] ?? null }));
+  // Partial payments (Amisha A1/A3): a term can be paid across several Payment
+  // entries. `committed` is what OTHER active entries already claim against each
+  // term; `remaining` is what is still open to pay — so the dropdown shows how
+  // much of e.g. the Advance is left, and the term stays selectable until full.
+  const termGrns = await prisma.gRN.findMany({
+    where: { docId: grn.docId, id: { not: grn.id }, milestoneId: { not: null }, status: { in: ['OPEN', 'APPROVED'] } },
+    select: { milestoneId: true, amountToPay: true },
+  });
+  const claimsByTerm = new Map<string, (number | null)[]>();
+  for (const tg of termGrns) {
+    if (!tg.milestoneId) continue;
+    const arr = claimsByTerm.get(tg.milestoneId) ?? [];
+    arr.push(tg.amountToPay);
+    claimsByTerm.set(tg.milestoneId, arr);
+  }
+  const milestonesWithPi = milestones.map((mm: any) => {
+    // A claim with no explicit amount pays the whole term.
+    let committedRaw = 0;
+    for (const a of claimsByTerm.get(mm.id) ?? []) committedRaw += a != null ? a : (mm.inrAmount as number);
+    const committed = Math.round(committedRaw * 100) / 100;
+    const remaining = Math.round(Math.max(mm.inrAmount - committed, 0) * 100) / 100;
+    return { ...mm, pi: termPis[mm.fieldKey] ?? null, committed, remaining };
+  });
   // The vendor's KYC already lives on the vendor master, so the payment section
   // shows it rather than asking for it again — read-only, never re-uploaded here.
   const kycDocs = await vendorKycDocs(grn.doc?.vendorId ?? null);
@@ -1161,12 +1201,56 @@ router.get('/grns/:grnId/pdf', requireProjectMember, requirePage('grn'), asyncHa
 // A goods receipt is about the physical delivery, not the money — so no PO
 // pricing is attached here (that lives on the Payment record). Just surface how
 // much of each line is still outstanding to receive.
+// Default columns a CUSTOM packing list starts with (from Amisha's Manifest cum
+// Final Packing List — panels). Editable: she can rename / add / remove.
+const DEFAULT_PACKING_COLUMNS = [
+  { key: 'panelType', label: 'Panel Type' },
+  { key: 'width', label: 'Width' },
+  { key: 'length', label: 'Length' },
+  { key: 'sqmtr', label: 'Sqmtr' },
+  { key: 'bundleNo', label: 'Bundle No.' },
+];
+// The signed packing-list PDFs uploaded against a goods receipt (Phase 4). Stored
+// as ProcurementDocument rows (type PACKING_LIST_SIGNED) so they inherit the
+// durable GridFS storage + the /uploads read-fallback. Multiple are allowed.
+export async function signedDocsFor(grnNumber: string) {
+  const docs = await prisma.procurementDocument.findMany({
+    where: { type: SIGNED_TYPE, linkedDocNumber: grnNumber, archived: false },
+    orderBy: { uploadedAt: 'desc' },
+    select: { id: true, fileName: true, fileUrl: true, uploadedAt: true },
+  });
+  return docs;
+}
+
+// Map a GoodsReceipt (+ project + lineItems) to the packing-list PDF shape. Used
+// by both the authenticated download and the public site-engineer link.
+export function packingListShape(gr: any) {
+  return {
+    grnNumber: gr.grnNumber,
+    packingListNo: gr.packingListNo,
+    status: gr.status,
+    customerName: gr.project?.clientName ?? null,
+    customerAddress: gr.siteAddress || gr.project?.siteLocation || null,
+    clientPoNumber: gr.project?.clientPoNumber ?? null,
+    invoiceNumber: gr.invoiceNumber,
+    dispatchDate: gr.dispatchDate,
+    deliveryDate: gr.deliveryDate,
+    vehicleNumber: gr.vehicleNumber,
+    vehicleSize: gr.vehicleSize,
+    ewayBillNumber: gr.ewayBillNumber,
+    customColumns: parseJson(gr.customColumns, []),
+    lineItems: (gr.lineItems || []).map((l: any) => ({ srNo: l.srNo, description: l.description, receiptQty: l.receiptQty, customValues: parseJson(l.customValues, {}) })),
+  };
+}
+
 function serializeGoodsReceipt(gr: any) {
   return {
     ...gr,
+    customColumns: parseJson(gr.customColumns, []),
     ...(gr.lineItems && {
       lineItems: gr.lineItems.map((l: any) => ({
         ...l,
+        customValues: parseJson(l.customValues, {}),
         remainingToReceive: Math.max(l.poQty - l.previouslyReceivedQty, 0),
       })),
     }),
@@ -1190,60 +1274,133 @@ router.get('/goods-receipts/available-docs', requireProjectMember, requirePage('
   res.json({ docs: docs.map((d) => ({ ...d, grnCount: d._count.goodsReceipts, _count: undefined })) });
 }));
 
-// Raise a goods receipt against an approved PO/WO — header + lines auto-fill.
+// Raise a goods receipt against an approved PO/WO. Mode DIRECT (default) mirrors
+// the PO lines (received qty per PO item). Mode CUSTOM starts a blank packing list
+// that Amisha builds herself — her own rows and configurable columns (panel sizes
+// etc. that the PO doesn't carry) — then the site engineer fills received qty.
 router.post('/goods-receipts', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
-  const { docId } = z.object({ docId: z.string() }).parse(req.body);
+  const { docId, mode } = z.object({ docId: z.string(), mode: z.enum(['DIRECT', 'CUSTOM']).optional() }).parse(req.body);
   const doc = await prisma.procurementDoc.findFirst({ where: { id: docId, projectId: req.params.projectId }, include: { lineItems: { where: { isLeadTime: false }, orderBy: { sortOrder: 'asc' } } } });
   if (!doc) throw notFound('PO/WO not found');
   if (doc.status !== 'APPROVED') throw badRequest('A goods receipt can only be raised against an approved PO/WO');
 
-  // Previously received per line = sum of already-RECEIVED goods receipts for this PO.
-  const prior = await prisma.goodsReceiptLine.groupBy({ by: ['lineItemId'], where: { gr: { docId, status: 'RECEIVED' } }, _sum: { receiptQty: true } });
-  const priorMap = new Map(prior.map((p) => [p.lineItemId, p._sum.receiptQty ?? 0]));
-
   const grnNumber = await nextDocNumber('GR');
-  const gr = await prisma.goodsReceipt.create({
-    data: {
-      projectId: req.params.projectId, docId, grnNumber, vendorName: doc.vendorName, siteAddress: doc.siteAddress || doc.shipTo, raisedById: req.user!.sub, status: 'DRAFT',
-      lineItems: { create: doc.lineItems.map((li, i) => ({ lineItemId: li.id, srNo: i + 1, description: li.description, uom: li.uom, poQty: li.qty, previouslyReceivedQty: priorMap.get(li.id) ?? 0, receiptQty: 0, defectQty: 0, acceptedQty: 0 })) },
-    },
-    include: { lineItems: { orderBy: { srNo: 'asc' } } },
-  });
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_CREATE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber, against: doc.docNumber } });
+  const base = { projectId: req.params.projectId, docId, grnNumber, vendorName: doc.vendorName, siteAddress: doc.siteAddress || doc.shipTo, raisedById: req.user!.sub, status: 'DRAFT' as const };
+  let gr;
+  if (mode === 'CUSTOM') {
+    gr = await prisma.goodsReceipt.create({
+      data: { ...base, mode: 'CUSTOM', customColumns: JSON.stringify(DEFAULT_PACKING_COLUMNS) },
+      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+    });
+  } else {
+    // Previously received per line = sum of already-RECEIVED goods receipts for this PO.
+    const prior = await prisma.goodsReceiptLine.groupBy({ by: ['lineItemId'], where: { gr: { docId, status: 'RECEIVED' } }, _sum: { receiptQty: true } });
+    const priorMap = new Map(prior.map((p) => [p.lineItemId, p._sum.receiptQty ?? 0]));
+    gr = await prisma.goodsReceipt.create({
+      data: {
+        ...base, mode: 'DIRECT',
+        lineItems: { create: doc.lineItems.map((li, i) => ({ lineItemId: li.id, srNo: i + 1, description: li.description, uom: li.uom, poQty: li.qty, previouslyReceivedQty: priorMap.get(li.id) ?? 0, receiptQty: 0, defectQty: 0, acceptedQty: 0 })) },
+      },
+      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+    });
+  }
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_CREATE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber, against: doc.docNumber, mode: mode || 'DIRECT' } });
   res.status(201).json({ goodsReceipt: serializeGoodsReceipt(gr) });
 }));
 
 router.get('/goods-receipts/:grId', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const gr = await prisma.goodsReceipt.findFirst({
     where: { id: req.params.grId, projectId: req.params.projectId },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } } },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
   });
   if (!gr) throw notFound();
-  res.json({ goodsReceipt: serializeGoodsReceipt(gr) });
+  const signedDocs = await signedDocsFor(gr.grnNumber);
+  res.json({ goodsReceipt: { ...serializeGoodsReceipt(gr), signedDocs } });
 }));
 
 const goodsReceiptUpdate = z.object({
-  vehicleNumber: z.string().nullable().optional(), driverName: z.string().nullable().optional(), deliveryChallanNumber: z.string().nullable().optional(),
+  vehicleNumber: z.string().nullable().optional(), vehicleSize: z.string().nullable().optional(), driverName: z.string().nullable().optional(), deliveryChallanNumber: z.string().nullable().optional(),
+  // Packing-list / delivery fields (Amisha interview 63/64).
+  invoiceNumber: z.string().nullable().optional(), dispatchDate: z.string().nullable().optional(), deliveryDate: z.string().nullable().optional(), ewayBillNumber: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
-  lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
+  // Mode 2 (custom packing list) — configurable columns Amisha builds.
+  customColumns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
+  packingListNo: z.coerce.number().int().nullable().optional(),
+  // For DIRECT, `id` is always present (PO-derived lines). For CUSTOM the client
+  // may add new lines (no id) or drop lines, so id is optional and lines carry a
+  // description + customValues.
+  lineItems: z.array(z.object({ id: z.string().optional(), description: z.string().optional(), customValues: z.any().optional(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
 });
 router.patch('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
   const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId }, include: { lineItems: true } });
   if (!gr) throw notFound();
   if (gr.status !== 'DRAFT') throw badRequest('Only a draft goods receipt can be edited');
   const b = goodsReceiptUpdate.parse(req.body);
-  if (b.lineItems) {
+  if (b.lineItems && gr.mode === 'CUSTOM') {
+    // Full sync: keep the sent lines, drop the removed ones, create the new ones.
+    const keepIds = b.lineItems.filter((l) => l.id).map((l) => l.id!);
+    if (keepIds.length) await prisma.goodsReceiptLine.deleteMany({ where: { grId: gr.id, id: { notIn: keepIds } } });
+    else await prisma.goodsReceiptLine.deleteMany({ where: { grId: gr.id } });
+    let sr = 0;
     for (const l of b.lineItems) {
+      const accepted = Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0);
+      const data = { srNo: ++sr, description: l.description ?? '', customValues: l.customValues != null ? JSON.stringify(l.customValues) : null, receiptQty: Number(l.receiptQty) || 0, defectQty: Number(l.defectQty) || 0, acceptedQty: accepted, remarks: l.remarks ?? undefined };
+      if (l.id) await prisma.goodsReceiptLine.update({ where: { id: l.id }, data });
+      else await prisma.goodsReceiptLine.create({ data: { ...data, grId: gr.id } });
+    }
+  } else if (b.lineItems) {
+    // DIRECT — the PO lines are fixed; only received/defect/remarks are edited.
+    for (const l of b.lineItems) {
+      if (!l.id) continue;
       const accepted = Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0);
       await prisma.goodsReceiptLine.update({ where: { id: l.id }, data: { receiptQty: Number(l.receiptQty) || 0, defectQty: Number(l.defectQty) || 0, acceptedQty: accepted, remarks: l.remarks ?? undefined } });
     }
   }
   const updated = await prisma.goodsReceipt.update({
     where: { id: gr.id },
-    data: { vehicleNumber: b.vehicleNumber ?? undefined, driverName: b.driverName ?? undefined, deliveryChallanNumber: b.deliveryChallanNumber ?? undefined, remarks: b.remarks ?? undefined },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } } },
+    data: {
+      vehicleNumber: b.vehicleNumber ?? undefined, vehicleSize: b.vehicleSize ?? undefined, driverName: b.driverName ?? undefined, deliveryChallanNumber: b.deliveryChallanNumber ?? undefined, remarks: b.remarks ?? undefined,
+      invoiceNumber: b.invoiceNumber ?? undefined, ewayBillNumber: b.ewayBillNumber ?? undefined,
+      dispatchDate: b.dispatchDate ? new Date(b.dispatchDate) : (b.dispatchDate === null ? null : undefined),
+      deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : (b.deliveryDate === null ? null : undefined),
+      ...(b.customColumns && { customColumns: JSON.stringify(b.customColumns) }),
+      ...(b.packingListNo !== undefined && { packingListNo: b.packingListNo }),
+    },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
   });
   res.json({ goodsReceipt: serializeGoodsReceipt(updated) });
+}));
+
+// Assign a goods receipt to a site engineer + generate a no-login shareable link.
+// The link opens the public GRN form (Phase 2) where the engineer records what
+// actually arrived. Emails the link to the engineer (best-effort) and returns it
+// so the raiser can also copy-and-share it manually.
+router.post('/goods-receipts/:grId/assign', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const { siteEngineerEmail } = z.object({ siteEngineerEmail: z.string().email('Enter a valid email.') }).parse(req.body);
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId }, include: { doc: { select: { docNumber: true } } } });
+  if (!gr) throw notFound();
+  if (gr.status !== 'DRAFT') throw badRequest('Only a draft goods receipt can be assigned.');
+  // Reuse the existing token if already generated, so the link stays stable.
+  const token = gr.linkToken || crypto.randomBytes(24).toString('hex');
+  await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { siteEngineerEmail, linkToken: token } });
+  const link = `${appClientUrl()}/grn/${token}`;
+  // Best-effort email — the link is returned regardless so the raiser can copy it.
+  if (isEmailEnabled()) {
+    try {
+      await sendEmail({
+        to: siteEngineerEmail,
+        subject: `Goods Receipt to fill — ${gr.grnNumber} (against ${gr.doc?.docNumber || 'PO'})`,
+        html: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
+          <p>Hi,</p>
+          <p>Material has been dispatched against <strong>${gr.doc?.docNumber || 'a PO'}</strong>. Please open the Goods Receipt <strong>${gr.grnNumber}</strong> and record what actually arrived (vehicle, dates, e-way bill, and received quantity per item), then mark it completed.</p>
+          <p style="margin:22px 0"><a href="${link}" style="background:#052379;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600">Open Goods Receipt</a></p>
+          <p style="font-size:12px;color:#64748b">Or paste this link in your browser:<br>${link}</p>
+        </div>`,
+      });
+    } catch { /* email is best-effort; the link is still returned */ }
+  }
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_ASSIGN', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, siteEngineerEmail } });
+  res.json({ ok: true, link, siteEngineerEmail, emailed: isEmailEnabled() });
 }));
 
 // Confirm the delivery — locks the goods receipt as a RECEIVED record.
@@ -1251,9 +1408,49 @@ router.post('/goods-receipts/:grId/receive', requireProjectMember, requireEdit('
   const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
   if (!gr) throw notFound();
   if (gr.status !== 'DRAFT') throw badRequest('Already received');
-  const updated = await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { status: 'RECEIVED' } });
+  const updated = await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { status: 'RECEIVED', submittedAt: new Date() } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_RECEIVE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber } });
   res.json({ goodsReceipt: { ...updated, status: updated.status } });
+}));
+
+// POST .../goods-receipts/:grId/signed — upload a signed (& stamped) packing-list
+// PDF. HARD requirement: PDF only (uploadPdf filters non-PDFs out). Multiple are
+// allowed — each call adds one more signed copy.
+router.post('/goods-receipts/:grId/signed', requireProjectMember, requireEdit('grn'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Please attach a PDF. Only PDF files are accepted for the signed packing list.');
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
+  if (!gr) throw notFound();
+  const fileUrl = `/uploads/${req.file.filename}`;
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: SIGNED_TYPE, fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_SIGNED_UPLOAD', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, fileName: req.file.originalname } });
+  res.status(201).json({ ok: true, signedDocs: await signedDocsFor(gr.grnNumber) });
+}));
+
+// POST .../goods-receipts/:grId/confirm-billing — Crystal's billing confirms the
+// material is received (signed copy in hand). Closes the GRN and stops reminders.
+router.post('/goods-receipts/:grId/confirm-billing', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
+  if (!gr) throw notFound();
+  if (gr.status !== 'RECEIVED') throw badRequest('Only a submitted goods receipt can be confirmed.');
+  if (gr.billingConfirmedAt) throw badRequest('This goods receipt is already confirmed.');
+  const signedCount = await prisma.procurementDocument.count({ where: { type: SIGNED_TYPE, linkedDocNumber: gr.grnNumber, archived: false } });
+  if (signedCount === 0) throw badRequest('Upload the signed packing list before confirming.');
+  const updated = await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { billingConfirmedAt: new Date(), billingConfirmedById: req.user!.sub } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_BILLING_CONFIRM', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber } });
+  res.json({ goodsReceipt: { ...serializeGoodsReceipt(updated), signedDocs: await signedDocsFor(gr.grnNumber) } });
+}));
+
+// GET .../goods-receipts/:grId/pdf — the "Manifest cum Final Packing List" PDF.
+// Ends in /pdf so the signed-link gate in requireAuth also serves it to Sheets.
+router.get('/goods-receipts/:grId/pdf', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
+  const gr = await prisma.goodsReceipt.findFirst({
+    where: { id: req.params.grId, projectId: req.params.projectId },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+  });
+  if (!gr) throw notFound();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="PackingList-${gr.grnNumber}.pdf"`);
+  renderPackingListPdf(packingListShape(gr), res);
 }));
 
 router.post('/goods-receipts/:grId/photo', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
@@ -1349,8 +1546,8 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     // PI (proforma) fields ride alongside the tax invoice: payment is made on the
     // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
     include: {
-      milestones: true,
-      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneId: true, milestoneName: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
+      milestones: { include: { installments: { orderBy: { createdAt: 'asc' } } } },
+      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneId: true, milestoneName: true, amountToPay: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
       // Physical goods receipts raised against this PO/WO — shown in the pipeline
       // regardless of status or milestone match (a PO can have several).
       goodsReceipts: { orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, receivedDate: true, vehicleNumber: true, driverName: true, deliveryChallanNumber: true } },
@@ -1358,18 +1555,35 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
   });
   const rows = docs.map((d) => {
     const invoiced = d.grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
-    const paid = d.milestones.filter((m) => m.status === 'PAID').reduce((s, m) => s + m.inrAmount, 0);
-    const advanced = d.milestones.filter((m) => m.fieldKey === 'advance' && m.status === 'PAID').reduce((s, m) => s + m.inrAmount, 0);
+    // Actual rupees paid — cumulative amountPaid (part-payments), legacy PAID rows
+    // fall back to inrAmount via the helper.
+    const paid = d.milestones.reduce((s, m) => s + milestonePaidAmount(m), 0);
+    const advanced = d.milestones.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + milestonePaidAmount(m), 0);
     const triggered = d.milestones.filter((m) => m.status !== 'PENDING').length;
     const total = d.finalAmount;
     const now = Date.now();
     const delayed = d.milestones.some((m) => m.status === 'PENDING' && m.expectedDate && m.expectedDate.getTime() < now);
     // PO-level payment status — no approval step any more, so it follows the money:
-    // TRIGGERED (a term is submitted/awaiting payment) → PAID (all triggered terms
-    // are settled). Never "Approved".
-    const anyTriggeredUnpaid = d.milestones.some((m) => m.status === 'TRIGGERED');
-    const anyPaid = d.milestones.some((m) => m.status === 'PAID');
-    const payStatusLabel = !d.grns.length ? 'No Payment' : anyTriggeredUnpaid ? 'Payment Triggered' : anyPaid ? 'Payment Paid' : 'Payment Triggered';
+    // TRIGGERED (a term is submitted/awaiting payment, or only partly paid) → PAID
+    // (all triggered terms fully settled). Never "Approved".
+    const anyOutstanding = d.milestones.some((m) => m.status === 'TRIGGERED' || m.status === 'PARTIALLY_PAID');
+    const anyPaid = d.milestones.some((m) => m.status === 'PAID' || m.status === 'PARTIALLY_PAID');
+    const payStatusLabel = !d.grns.length ? 'No Payment' : anyOutstanding ? 'Payment Triggered' : anyPaid ? 'Payment Paid' : 'Payment Triggered';
+    // How much of each term is already claimed by its payment entries (part-payments
+    // A1/A3), so the pipeline can flag what is still pending in red. A claim with no
+    // explicit amount pays the whole term.
+    const committedByTerm = new Map<string, number>();
+    for (const g of d.grns) {
+      if (!g.milestoneId) continue;
+      const term = d.milestones.find((m) => m.id === g.milestoneId);
+      const amt = g.amountToPay != null ? g.amountToPay : (term?.inrAmount ?? 0);
+      committedByTerm.set(g.milestoneId, Math.round(((committedByTerm.get(g.milestoneId) ?? 0) + amt) * 100) / 100);
+    }
+    const termPending = (mid: string | null | undefined, inr: number) => {
+      if (!mid) return 0;
+      const committed = committedByTerm.get(mid) ?? 0;
+      return committed > 0 ? Math.round(Math.max(inr - committed, 0) * 100) / 100 : 0;
+    };
     return {
       docId: d.id, type: d.type, docNumber: d.docNumber, vendorName: d.vendorName,
       totalValue: d.basicAmount, gstAmount: d.gstAmount, totalWithGst: total,
@@ -1377,13 +1591,21 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,
       milestonesTriggered: triggered, milestonesTotal: d.milestones.length,
       grnStatus: payStatusLabel, delayed,
-      grns: d.grns.map((g) => ({ id: g.id, grnNumber: g.grnNumber, milestoneName: g.milestoneName, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl })),
+      grns: d.grns.map((g) => {
+        const term = d.milestones.find((m) => m.id === g.milestoneId);
+        return { id: g.id, grnNumber: g.grnNumber, milestoneId: g.milestoneId, milestoneName: g.milestoneName, amountToPay: g.amountToPay, termPending: term ? termPending(g.milestoneId, term.inrAmount) : 0, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl };
+      }),
       goodsReceipts: d.goodsReceipts.map((g) => ({ id: g.id, grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate, vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
         id: m.id, name: m.name, percentage: m.percentage, inrAmount: m.inrAmount, status: m.status,
+        // Part-payment tracking (Amisha PRD A1/A3): how much is paid vs still pending.
+        amountPaid: milestonePaidAmount(m), remaining: milestoneRemaining(m),
+        // Committed by payment entries vs still-open balance (shown in red).
+        committed: committedByTerm.get(m.id) ?? 0, pending: termPending(m.id, m.inrAmount),
         triggerCondition: m.triggerCondition, expectedDate: m.expectedDate, actualTriggerDate: m.actualTriggerDate,
         paymentDate: m.paymentDate, paymentReference: m.paymentReference,
         utrNumber: m.utrNumber, paymentProofUrl: m.paymentProofUrl,
+        installments: m.installments.map((i) => ({ id: i.id, amount: i.amount, utrNumber: i.utrNumber, paymentReference: i.paymentReference, paymentDate: i.paymentDate, remarks: i.remarks })),
         // A term triggers on submit (so it shows in the pipeline), but Accounts can
         // only pay it once its OWN payment is approved — used to gate "Mark Paid".
         paymentApproved: d.grns.some((g) => g.milestoneId === m.id),
@@ -1406,8 +1628,9 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     const key = d.vendorName || '—';
     const v = byVendor.get(key) ?? { vendorName: key, amountPaid: 0, lastPaymentDate: null, lastUtr: null };
     for (const m of d.milestones) {
-      if (m.status !== 'PAID') continue;
-      v.amountPaid += m.inrAmount;
+      const mp = milestonePaidAmount(m);
+      if (mp <= 0) continue;
+      v.amountPaid += mp;
       if (m.paymentDate && (!v.lastPaymentDate || m.paymentDate > v.lastPaymentDate)) {
         v.lastPaymentDate = m.paymentDate;
         v.lastUtr = m.utrNumber ?? m.paymentReference ?? null;

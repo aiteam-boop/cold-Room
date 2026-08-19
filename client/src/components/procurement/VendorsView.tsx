@@ -4,6 +4,7 @@ import { api, errMsg } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Modal, Spinner } from '../ui';
 import { fmtDate, inr } from '../../lib/format';
+import VendorDetail from './VendorDetail';
 
 // Full vendor master (Sprint PRD §5): multiple contacts, multiple plant
 // addresses, several bank accounts, KYC documents and a dated rate chart.
@@ -26,6 +27,7 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   const { canEdit } = useAuth();
   const canManage = canEdit('vendors');
   const [editing, setEditing] = useState<any | null>(null);
+  const [viewing, setViewing] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [q, setQ] = useState('');
   const [showInactive, setShowInactive] = useState(false);
@@ -47,7 +49,15 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['proc-vendors', projectId, 'all'] });
     qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] });
+    qc.invalidateQueries({ queryKey: ['all-vendors'] });
   };
+  // Delete a duplicate/unused vendor. The server refuses if it has POs/WOs or
+  // payments, so a vendor with real transactions can never be orphaned.
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/vendors/${id}`),
+    onSuccess: () => invalidate(),
+    onError: (e) => alert(errMsg(e)),
+  });
 
   return (
     <div className="space-y-3">
@@ -64,15 +74,17 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
         <EmptyState title={needle ? 'No vendors match that search' : 'No vendors yet'} hint={canManage ? "Add a vendor/contractor — they'll be selectable when creating POs/WOs." : 'No vendors yet.'} action={canManage && !needle ? <button className="btn-primary mt-2" onClick={() => setCreating(true)}>+ Add Vendor</button> : undefined} />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {/* Click a card to view details (read-only); Edit/Delete stop propagation. */}
           {vendors.map((v) => (
-            <div key={v.id} className={`card p-4 ${v.isActive === false ? 'opacity-60' : ''}`}>
+            <div key={v.id} role="button" onClick={() => setViewing(v.id)} className={`card cursor-pointer p-4 transition-shadow hover:shadow-md ${v.isActive === false ? 'opacity-60' : ''}`}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate font-semibold text-navy">{v.name}</div>
                   {v.legalName && v.legalName !== v.name && <div className="truncate text-[11px] text-slate-400">{v.legalName}</div>}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {canManage && <button className="text-xs font-medium text-navy hover:underline" onClick={() => setEditing(v)}>Edit</button>}
+                  {canManage && <button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button>}
+                  {canManage && <button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button>}
                   <span className="badge bg-slate-100 text-slate-600">{v.vendorType ? VENDOR_TYPE_LABEL[v.vendorType] : v.type}</span>
                 </div>
               </div>
@@ -99,6 +111,15 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
             </div>
           ))}
         </div>
+      )}
+
+      {viewing && (
+        <VendorDetail
+          vendorId={viewing}
+          canEdit={canManage}
+          onEdit={() => { const vv = all.find((x) => x.id === viewing); setViewing(null); if (vv) setEditing(vv); }}
+          onClose={() => setViewing(null)}
+        />
       )}
 
       {(creating || editing) && metaQ.data && (

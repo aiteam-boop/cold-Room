@@ -37,7 +37,7 @@ interface DocForPdf {
   promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
-  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; gstPct?: number | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
   customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
   // Approval trail printed under the signature once the document is e-signed:
@@ -154,6 +154,13 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   };
   drawHead();
 
+  // Per-line GST: if every taxable line is at the same rate, the GST row shows
+  // that single "GST 18%" (as before). If rates differ, the row just says "GST"
+  // and each line prints its own "(GST 5%)" so the mix is legible.
+  const taxLines = doc.lineItems.filter((l) => !l.isLeadTime && !l.gstExempt);
+  const rateSet = new Set(taxLines.map((l) => (l.gstPct != null ? l.gstPct : doc.gstPct)));
+  const uniformRate = rateSet.size === 1 ? [...rateSet][0] : null;
+
   for (const it of doc.lineItems) {
     if (it.isLeadTime) {
       const h = 14;
@@ -171,7 +178,11 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     cols.forEach((c, i) => {
       let v = '';
       if (c.k === 'sr') v = String(it.srNo);
-      else if (c.k === 'desc') v = it.gstExempt ? `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})` : it.description;
+      else if (c.k === 'desc') {
+        if (it.gstExempt) v = `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})`;
+        else if (uniformRate == null && doc.gstEnabled) v = `${it.description}  (GST ${it.gstPct != null ? it.gstPct : doc.gstPct}%)`;
+        else v = it.description;
+      }
       else if (c.k === 'uom') v = it.uom || '';
       else if (c.k === 'qty') v = it.qty ? it.qty.toLocaleString('en-IN') : '';
       else if (c.k === 'rate') v = it.unitPrice ? INR(it.unitPrice) : '';
@@ -198,7 +209,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   // this rule still print clean totals — no re-save required. Basic (taxable
   // value) keeps its precision.
   totRow('Basic Amount', INR(doc.basicAmount));
-  if (doc.gstEnabled) totRow(`GST ${doc.gstPct}%`, INR(Math.round(doc.gstAmount)));
+  if (doc.gstEnabled) totRow(uniformRate != null ? `GST ${uniformRate}%` : 'GST', INR(Math.round(doc.gstAmount)));
   totRow('Final Amount', INR(Math.round(doc.finalAmount)));
   y += 6;
 
@@ -468,5 +479,123 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
       if (a.remarks) { pdf.font('Helvetica').fontSize(8).fillColor('#334155').text(`Remark: ${a.remarks}`, L + 14, ry, { width: tableW - 20 }); ry += gRemarkH(a.remarks as string) + 4; }
     });
   }
+  pdf.end();
+}
+
+// ── Packing List PDF — "MANIFEST CUM FINAL PACKING LIST" (Amisha 63/64, Phase 3) ─
+// Mirrors the on-screen PackingListPaper and the Rinac sample: a bordered info
+// grid (customer / PO / vehicle / dates / e-way) over a configurable-column item
+// table (S.No + Description + Amisha's custom columns + Qty), with a RECEIVED BY
+// footer. Works for a CUSTOM packing list; a DIRECT GRN simply has no custom cols.
+interface PackingListForPdf {
+  grnNumber: string;
+  packingListNo?: number | null;
+  status?: string | null;
+  customerName?: string | null;
+  customerAddress?: string | null;
+  clientPoNumber?: string | null;
+  invoiceNumber?: string | null;
+  dispatchDate?: Date | null;
+  deliveryDate?: Date | null;
+  vehicleNumber?: string | null;
+  vehicleSize?: string | null;
+  ewayBillNumber?: string | null;
+  customColumns?: { key: string; label: string }[] | null;
+  lineItems: { srNo: number; description: string; receiptQty: number; customValues?: Record<string, string> | null }[];
+}
+export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.WritableStream) {
+  const pdf = new PDFDocument({ size: 'A4', margin: 28 });
+  pdf.pipe(stream);
+  const W = pdf.page.width, L = 28, R = W - 28, TW = R - L;
+  const dt = (v?: Date | null) => (v ? new Date(v).toLocaleDateString('en-GB') : '');
+  const cols = pl.customColumns || [];
+
+  const line = (x1: number, y1: number, x2: number, y2: number) => pdf.lineWidth(0.7).moveTo(x1, y1).lineTo(x2, y2).stroke(BORDER);
+  const box = (x: number, y: number, w: number, h: number, fill?: string) => { if (fill) pdf.lineWidth(0.7).rect(x, y, w, h).fillAndStroke(fill, BORDER); else pdf.lineWidth(0.7).rect(x, y, w, h).stroke(BORDER); };
+  const put = (x: number, y: number, w: number, text: string, o: { font?: string; size?: number; align?: 'left' | 'center' | 'right'; color?: string } = {}) => {
+    pdf.font(o.font || 'Helvetica').fontSize(o.size || 8).fillColor(o.color || '#111');
+    pdf.text(text || '', x + 4, y + 3, { width: w - 8, align: o.align || 'left' });
+  };
+  const measure = (text: string, w: number, size = 8) => { pdf.fontSize(size); return pdf.heightOfString(text || ' ', { width: w - 8 }); };
+
+  // ── Header: logo + company ──
+  const logo = logoPath();
+  if (logo) { try { pdf.image(logo, R - 66, 26, { fit: [58, 34] }); } catch { /* ignore */ } }
+  pdf.fillColor(HEAD_BG).font('Helvetica-Bold').fontSize(13).text(COMPANY.name, L, 28, { width: TW - 80 });
+  pdf.font('Helvetica').fontSize(7.5).fillColor('#334155').text(COMPANY.address, { width: TW - 80 });
+  let y = Math.max(pdf.y, 66) + 6;
+
+  // ── Title bar ──
+  box(L, y, TW, 20, HEAD_BG);
+  put(L, y + 5, TW, 'MANIFEST CUM FINAL PACKING LIST', { font: 'Helvetica-Bold', size: 11, align: 'center', color: '#ffffff' });
+  y += 20;
+
+  // ── Info grid — two label/value pairs per row, height auto-sized to content ──
+  const labelW = 96;
+  const half = TW / 2;
+  const valW = half - labelW;
+  const customerBlock = [pl.customerName, pl.customerAddress].filter(Boolean).join('\n') || '—';
+  const drawRow = (cells: { label: string; value: string; span?: boolean; center?: boolean }[]) => {
+    let rowH = 16;
+    for (const c of cells) { const w = c.span ? TW - labelW : valW; rowH = Math.max(rowH, measure(c.value, w) + 6, measure(c.label, labelW) + 6); }
+    let x = L;
+    cells.forEach((c) => {
+      const vW = c.span ? TW - labelW : valW;
+      box(x, y, labelW, rowH, '#eef2f7'); put(x, y + 2, labelW, c.label, { font: 'Helvetica-Bold', size: 7.5, color: HEAD_BG });
+      box(x + labelW, y, vW, rowH); put(x + labelW, y + 2, vW, c.value, { size: 8.5, align: c.center ? 'center' : 'left' });
+      x += labelW + vW;
+    });
+    y += rowH;
+  };
+  drawRow([{ label: 'Customer Name & Address', value: customerBlock, span: true }]);
+  drawRow([{ label: 'PO No.', value: pl.clientPoNumber || '—' }, { label: 'Packing List No.', value: pl.packingListNo != null ? String(pl.packingListNo) : '—' }]);
+  drawRow([{ label: 'Vehicle No.', value: pl.vehicleNumber || '—' }, { label: 'Vehicle Size', value: pl.vehicleSize || '—' }]);
+  drawRow([{ label: 'Date of Invoice / Dispatch', value: dt(pl.dispatchDate) || '—' }, { label: 'Date of Delivery', value: dt(pl.deliveryDate) || '—' }]);
+
+  // ── Item table — S.No | Description | [custom cols…] | Qty (Nos) ──
+  const snoW = 34, qtyW = 58;
+  const restW = TW - snoW - qtyW;
+  const descW = cols.length ? Math.max(restW * 0.34, 120) : restW;
+  const colW = cols.length ? (restW - descW) / cols.length : 0;
+  const heads = ['S.No.', 'Description', ...cols.map((c) => c.label), 'Qty (Nos)'];
+  const widths = [snoW, descW, ...cols.map(() => colW), qtyW];
+  const aligns: ('left' | 'center')[] = ['center', 'left', ...cols.map(() => 'center' as const), 'center'];
+
+  const headH = 18;
+  box(L, y, TW, headH, HEAD_BG);
+  { let x = L; heads.forEach((h, i) => { put(x, y + 4, widths[i], h, { font: 'Helvetica-Bold', size: 7.5, align: aligns[i] === 'center' ? 'center' : 'left', color: '#ffffff' }); x += widths[i]; }); }
+  { let x = L; for (let i = 0; i < widths.length - 1; i++) { x += widths[i]; line(x, y, x, y + headH); } }
+  y += headH;
+
+  let total = 0;
+  for (const it of pl.lineItems) {
+    const vals = [String(it.srNo), it.description || '', ...cols.map((c) => it.customValues?.[c.key] ?? ''), String(it.receiptQty ?? '')];
+    const rowH = Math.max(16, ...widths.map((w, i) => measure(vals[i], w) + 6));
+    if (y + rowH > pdf.page.height - 70) { pdf.addPage(); y = 40; }
+    box(L, y, TW, rowH);
+    let x = L;
+    vals.forEach((v, i) => { put(x, y + 2, widths[i], v, { size: 8, align: aligns[i] === 'center' ? 'center' : 'left' }); x += widths[i]; });
+    x = L; for (let i = 0; i < widths.length - 1; i++) { x += widths[i]; line(x, y, x, y + rowH); }
+    total += Number(it.receiptQty) || 0;
+    y += rowH;
+  }
+  if (!pl.lineItems.length) { const rh = 20; box(L, y, TW, rh); put(L, y + 4, TW, 'No items.', { size: 8, align: 'center', color: '#94a3b8' }); y += rh; }
+
+  // Total row
+  const totH = 18;
+  box(L, y, TW, totH);
+  put(L, y + 4, TW - qtyW, 'TOTAL', { font: 'Helvetica-Bold', size: 8, align: 'right' });
+  put(L + TW - qtyW, y + 4, qtyW, String(total), { font: 'Helvetica-Bold', size: 8, align: 'center' });
+  line(L + TW - qtyW, y, L + TW - qtyW, y + totH);
+  y += totH;
+
+  // ── Received-by footer ──
+  y += 26;
+  if (y > pdf.page.height - 80) { pdf.addPage(); y = 60; }
+  const sigW = 200;
+  line(R - sigW, y, R, y);
+  put(R - sigW, y + 3, sigW, 'RECEIVED BY (Name / Sign / Date)', { size: 7.5, align: 'center', color: '#475569' });
+  put(L, y + 3, sigW, `Packing List: ${pl.grnNumber}`, { size: 7.5, color: '#94a3b8' });
+
   pdf.end();
 }

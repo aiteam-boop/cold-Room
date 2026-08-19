@@ -5,6 +5,8 @@ import path from 'path';
 import fs from 'fs';
 import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
 import { startFmsReverseSyncPoll } from './services/sheetsSync';
+import { startApprovalReminderPoll } from './services/approvalChain';
+import { startPackingListReminderPoll } from './services/grnReminders';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
@@ -38,6 +40,7 @@ import approvalRuleRoutes from './routes/approvalRules';
 import fmsRoutes from './routes/fms';
 import apiKeyRoutes from './routes/apiKeys';
 import publicApiRoutes from './routes/publicApi';
+import publicGrnRoutes from './routes/publicGrn';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -73,6 +76,8 @@ app.use('/api/sync-sheets', syncRoutes);
 app.use('/api/approval-rules', approvalRuleRoutes);
 app.use('/api/api-keys', apiKeyRoutes);
 app.use('/api/v1', publicApiRoutes);
+// Public no-login site-engineer GRN form (token is the credential; no requireAuth).
+app.use('/api/public/grn', publicGrnRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
@@ -132,6 +137,10 @@ app.listen(PORT, () => {
   // Poll the accounts FMS sheet so UTRs Accounts enter there flow back into the
   // Payment Pipeline (milestone → PAID). No-op when Sheets sync is disabled.
   startFmsReverseSyncPoll();
+  // Nudge approvers whose documents have waited 24h+. Off when APPROVAL_REMINDERS=off.
+  startApprovalReminderPoll();
+  // Nudge site engineers whose signed packing list is still pending. Off when GRN_REMINDERS=off.
+  startPackingListReminderPoll();
 });
 
 async function ensureCappedApiLog() {

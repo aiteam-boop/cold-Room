@@ -88,6 +88,7 @@ router.get(
           name: p.name,
           clientName: p.clientName,
           siteLocation: p.siteLocation,
+          clientPoNumber: p.clientPoNumber,
           status: p.status,
           startDate: p.startDate,
           officialStartDate: p.officialStartDate,
@@ -121,6 +122,7 @@ const createSchema = z.object({
   name: z.string().min(1),
   clientName: z.string().optional(),
   siteLocation: z.string().optional(),
+  clientPoNumber: z.string().optional(),
   startDate: z.string().datetime().optional().or(z.string().date().optional()),
   targetCompletionDate: z.string().datetime().optional().or(z.string().date().optional()),
 });
@@ -136,6 +138,7 @@ router.post(
         name: body.name,
         clientName: body.clientName,
         siteLocation: body.siteLocation,
+        clientPoNumber: body.clientPoNumber,
         startDate: body.startDate ? new Date(body.startDate) : null,
         targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
         createdById: req.user!.sub,
@@ -173,6 +176,7 @@ const updateSchema = createSchema.partial().extend({
   // that was set at creation — the create schema only allowed a string.
   clientName: z.string().nullable().optional(),
   siteLocation: z.string().nullable().optional(),
+  clientPoNumber: z.string().nullable().optional(),
   startDate: z.string().min(1).nullable().optional(),
   targetCompletionDate: z.string().min(1).nullable().optional(),
   // Two of the three start-date parameters (the third — drawing approval — is
@@ -199,6 +203,7 @@ router.patch(
         ...(body.name !== undefined && { name: body.name }),
         ...(body.clientName !== undefined && { clientName: body.clientName }),
         ...(body.siteLocation !== undefined && { siteLocation: body.siteLocation }),
+        ...(body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
         ...(body.startDate !== undefined && { startDate: body.startDate ? new Date(body.startDate) : null }),
         ...(body.targetCompletionDate !== undefined && {
           targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,

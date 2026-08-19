@@ -76,10 +76,14 @@ export function vendorBlock(v: {
 export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[] }) {
   const isWO = d.type === 'WO';
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
-  // GST only on non-exempt lines (a refundable deposit is in Basic/Final, no GST).
-  const taxable = d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
-  const gst = d.gstEnabled ? Math.round(taxable * (Number(d.gstPct) / 100)) : 0;
+  // GST charged PER LINE at that line's own rate (l.gstPct, else doc default);
+  // exempt lines bear none but still sit in Basic/Final.
+  const gst = d.gstEnabled ? Math.round(d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => {
+    const rate = l.gstPct != null ? Number(l.gstPct) : Number(d.gstPct);
+    return s + (Number(l.qty) * Number(l.unitPrice) || 0) * (rate / 100);
+  }, 0)) : 0;
   const final = basic + gst;
+  const gstRateOptions = [...new Set([5, 12, 18, 28, Number(d.gstPct) > 0 ? Number(d.gstPct) : 18])].sort((a: number, b: number) => a - b);
   // The base each payment-term % is taken from — final (incl. GST) or basic.
   const payBase = d.payGstInclusive ? final : basic;
   // GST-inclusive advance-on-basic split (advance carries no GST unless it's 100%);
@@ -253,14 +257,17 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
               <td className={`border ${B} p-1`}><T value={l.unitPrice} onChange={(x: string) => setLine(i, { unitPrice: x })} className="text-right" /></td>
               <td className={`border ${B} p-1 text-right font-medium`}>
                 {(Number(l.qty) * Number(l.unitPrice) || 0).toLocaleString('en-IN')}
-                {/* Untick to make this line GST-exempt (e.g. a refundable deposit),
-                    then type WHY it is exempt. */}
+                {/* Per-line GST rate. "No GST" = exempt (type why); else this line's rate. */}
                 {d.gstEnabled && (editable
                   ? <div className="mt-0.5 flex flex-col items-end gap-0.5">
-                      <label className="flex items-center gap-1 text-[8px] font-normal text-slate-400"><input type="checkbox" checked={!l.gstExempt} onChange={(e) => setLine(i, { gstExempt: !e.target.checked, ...(e.target.checked ? { gstExemptRemark: null } : {}) })} />GST</label>
+                      <select className={`rounded border ${B} px-1 py-0.5 text-[8px] font-normal`} value={l.gstExempt ? 'none' : String(l.gstPct != null ? l.gstPct : d.gstPct)} onChange={(e) => { const v = e.target.value; if (v === 'none') setLine(i, { gstExempt: true, gstPct: null }); else setLine(i, { gstExempt: false, gstPct: Number(v), gstExemptRemark: null }); }}>
+                        <option value="none">No GST</option>
+                        {gstRateOptions.map((r: number) => <option key={r} value={r}>GST {r}%</option>)}
+                      </select>
                       {l.gstExempt && <input className={`w-28 rounded border ${B} px-1 py-0.5 text-[8px] font-normal`} placeholder="why? e.g. refundable" value={l.gstExemptRemark || ''} onChange={(e) => setLine(i, { gstExemptRemark: e.target.value })} />}
                     </div>
-                  : l.gstExempt ? <div className="text-[8px] font-normal text-slate-400">No GST{l.gstExemptRemark ? ` — ${l.gstExemptRemark}` : ''}</div> : null)}
+                  : l.gstExempt ? <div className="text-[8px] font-normal text-slate-400">No GST{l.gstExemptRemark ? ` — ${l.gstExemptRemark}` : ''}</div>
+                    : <div className="text-[8px] font-normal text-slate-400">GST {l.gstPct != null ? l.gstPct : d.gstPct}%</div>)}
               </td>
               {editable && <td><button className="text-slate-300 hover:text-red-500" onClick={() => delLine(i)}>✕</button></td>}
             </tr>

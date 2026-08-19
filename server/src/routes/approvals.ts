@@ -5,10 +5,21 @@ import { requireAuth, requirePage } from '../middleware/authMiddleware';
 import { maskFinancials } from '../lib/financial';
 import { parseApprover } from '../lib/permissions';
 import { isAdmin } from '../lib/enums';
-import { verifyApprovalToken, recordDecision, finalizeApproval, markDocOnHold, resolveActor, approvalDocData, parseAmendments } from '../services/approvalChain';
+import { verifyApprovalToken, recordDecision, finalizeApproval, markDocOnHold, resolveActor, approvalDocData, parseAmendments, nextReminderAt, remindersEnabled } from '../services/approvalChain';
 import { signApiPath } from '../lib/signedUrl';
 
 const router = Router();
+
+// Per-term Proforma Invoices uploaded on a PO/WO, flattened to links the approver
+// can open straight from the queue (same shape the approval email uses).
+const TERM_NAMES: Record<string, string> = { advance: 'Advance', beforeDelivery: 'Before Delivery', running: 'Running', postDelivery: 'Post Delivery', postCompletion: 'Post Completion', retention: 'Retention' };
+function piLinks(json: string | null | undefined): { term: string; piNumber: string | null; piUrl: string }[] {
+  let raw: Record<string, any> = {};
+  try { raw = json ? JSON.parse(json) : {}; } catch { return []; }
+  return Object.entries(raw)
+    .filter(([, v]) => v && v.piPdfUrl)
+    .map(([k, v]: [string, any]) => ({ term: TERM_NAMES[k] || k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl }));
+}
 
 // ── Public, token-authenticated one-click approval (from email links) ────────
 // These MUST be declared before `requireAuth` — the approver may not have an app
@@ -210,12 +221,14 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
   const items = steps.map((s) => {
     // `pendingWith` = the person this document is currently waiting on (the
     // current pending approver), so the queue shows who must act next.
+    // When this pending step would next be auto-reminded — drives the countdown.
+    const remindAt = nextReminderAt(s).toISOString();
     if (s.docType === 'GRN') {
       const g = grnById.get(s.docId);
-      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) };
+      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments), nextReminderAt: remindAt };
     }
     const d = docById.get(s.docId);
-    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, amendments: parseAmendments(d.amendments) };
+    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis), nextReminderAt: remindAt };
   }).filter(Boolean) as any[];
 
   // Admins also see legacy items that were submitted without an approval chain.
@@ -225,11 +238,11 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
       prisma.procurementDoc.findMany({ where: { status: 'PENDING_APPROVAL', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
       prisma.gRN.findMany({ where: { status: 'OPEN', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
     ]);
-    for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true, amendments: parseAmendments(d.amendments) });
+    for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis) });
     for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) });
   }
 
-  res.json({ items: maskFinancials(items, req.account) });
+  res.json({ items: maskFinancials(items, req.account), remindersOn: remindersEnabled() });
 }));
 
 // GET /api/approvals/approved — documents (PO/WO/GRN) already fully approved.
@@ -257,7 +270,7 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const nameById = new Map(approvers.map((a) => [a.id, a.name]));
 
   const items = [
-    ...docs.map((d) => ({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null })),
+    ...docs.map((d) => ({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis) })),
     ...grns.map((g) => ({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 

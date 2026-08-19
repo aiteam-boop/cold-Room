@@ -191,11 +191,11 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', startDate: '', targetCompletionDate: '' });
+  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', clientPoNumber: '', startDate: '', targetCompletionDate: '' });
   const [err, setErr] = useState('');
   const m = useMutation({
     mutationFn: async () => {
-      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation };
+      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, clientPoNumber: form.clientPoNumber };
       if (form.startDate) payload.startDate = form.startDate;
       if (form.targetCompletionDate) payload.targetCompletionDate = form.targetCompletionDate;
       return (await api.post('/projects', payload)).data;
@@ -212,6 +212,7 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={(e) => setForm({ ...form, clientName: e.target.value })} /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} /></div>
         </div>
+        <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">Start date</label><input className="input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></div>
           <div><label className="label">Target completion</label><input className="input" type="date" value={form.targetCompletionDate} onChange={(e) => setForm({ ...form, targetCompletionDate: e.target.value })} /></div>

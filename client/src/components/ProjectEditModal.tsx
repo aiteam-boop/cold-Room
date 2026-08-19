@@ -15,6 +15,7 @@ export interface EditableProject {
   name: string;
   clientName?: string | null;
   siteLocation?: string | null;
+  clientPoNumber?: string | null;
   startDate?: string | null;
   targetCompletionDate?: string | null;
   status?: string;
@@ -33,6 +34,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
     name: project.name ?? '',
     clientName: project.clientName ?? '',
     siteLocation: project.siteLocation ?? '',
+    clientPoNumber: project.clientPoNumber ?? '',
     startDate: day(project.startDate),
     targetCompletionDate: day(project.targetCompletionDate),
     status: project.status ?? 'ACTIVE',
@@ -46,6 +48,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         name: form.name.trim(),
         clientName: form.clientName.trim() || null,
         siteLocation: form.siteLocation.trim() || null,
+        clientPoNumber: form.clientPoNumber.trim() || null,
         startDate: form.startDate || null,
         targetCompletionDate: form.targetCompletionDate || null,
         status: form.status,
@@ -78,6 +81,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         <div className="grid gap-3 sm:grid-cols-2">
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={set('clientName')} placeholder="Not set" /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={set('siteLocation')} placeholder="Not set" /></div>
+          <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={set('clientPoNumber')} placeholder="Client's PO (shown on packing list)" /></div>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">

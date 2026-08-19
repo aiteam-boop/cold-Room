@@ -372,6 +372,59 @@ export async function remindCurrent(docType: DocType, docId: string, actor: Acto
   await logAction(docType, docId, current.id, actor, 'REMINDED');
 }
 
+// ── Automatic 24-hour reminders ──────────────────────────────────────────────
+// A document that sits with an approver for REMINDER_HOURS (default 24) since it
+// was submitted — or since the last reminder — nudges that approver again. Only
+// the CURRENT pending step is reminded (that's whose turn it is). `lastRemindedAt`
+// makes it idempotent, so the same person is never emailed twice inside a window
+// even if the poll runs more frequently.
+const REMINDER_HOURS = Number(process.env.APPROVAL_REMINDER_HOURS || 24);
+
+// When the current approver would next be auto-reminded — for the countdown shown
+// in the approvals queue. Same reference the reminder job uses (last reminder, or
+// submission if never reminded).
+export function nextReminderAt(step: { lastRemindedAt?: Date | null; createdAt: Date }): Date {
+  return new Date((step.lastRemindedAt ?? step.createdAt).getTime() + REMINDER_HOURS * 3600_000);
+}
+// Whether auto-reminders actually run (off in local dev via APPROVAL_REMINDERS=off).
+export const remindersEnabled = () => process.env.APPROVAL_REMINDERS !== 'off' && isEmailEnabled();
+
+export async function sendDueApprovalReminders(opts: { now?: Date; dryRun?: boolean } = {}): Promise<{ due: number; sent: number }> {
+  const now = opts.now ?? new Date();
+  const cutoffMs = REMINDER_HOURS * 3600_000;
+  // Without a mailer configured there is nothing to send; skip the whole scan.
+  if (!opts.dryRun && !isEmailEnabled()) return { due: 0, sent: 0 };
+  const pending = await prisma.approvalStep.findMany({ where: { status: 'PENDING' } });
+  let due = 0;
+  let sent = 0;
+  for (const s of pending) {
+    const ref = s.lastRemindedAt ?? s.createdAt;
+    if (now.getTime() - new Date(ref).getTime() < cutoffMs) continue;
+    due++;
+    if (opts.dryRun) continue;
+    const doc = await docSummary(s.docType as DocType, s.docId);
+    if (!doc) continue; // document was deleted out from under the step — skip
+    await notifyStep(s, doc, 'REMINDER');
+    await prisma.approvalStep.update({ where: { id: s.id }, data: { lastRemindedAt: now } });
+    sent++;
+  }
+  return { due, sent };
+}
+
+// Background poll that fires the reminders. Disabled when APPROVAL_REMINDERS=off
+// (used in local dev so it never emails real approvers). First run 60s after
+// boot, then every APPROVAL_REMINDER_POLL_MS (default hourly). The per-step
+// 24-hour gate above means the actual cadence is still once a day.
+export function startApprovalReminderPoll() {
+  if (process.env.APPROVAL_REMINDERS === 'off') { console.log('Approval reminders: disabled (APPROVAL_REMINDERS=off)'); return; }
+  const interval = Number(process.env.APPROVAL_REMINDER_POLL_MS) || 3600_000;
+  const tick = () => sendDueApprovalReminders()
+    .then((r) => { if (r.sent) console.log(`Approval reminders: sent ${r.sent} of ${r.due} due`); })
+    .catch((e) => console.error('[approval-reminder]', e));
+  setTimeout(tick, 60_000);
+  setInterval(tick, interval);
+}
+
 // Email the person who RAISED the document that it is now fully approved, with
 // the approved PDF attached. The auditor is copied by default — same policy as
 // the approval-request emails. Best-effort: a mail failure must never break

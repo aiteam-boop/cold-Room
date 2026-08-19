@@ -62,7 +62,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       payGstInclusive: !!d.payGstInclusive,
       customColumns: d.customColumns ?? [],
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null })),
       // Only sent when amending an approved doc — the server logs it and requires it.
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,
@@ -126,11 +126,16 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const payTotal = PAY.reduce((s, p) => s + (Number(d[p.key]) || 0), 0);
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
-  // GST is charged only on lines that are NOT gst-exempt (a refundable deposit is
-  // in Basic/Final but bears no GST); exempt lines still count in Basic + Final.
-  const taxable = d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
-  const gstAmt = d.gstEnabled ? Math.round(taxable * (Number(d.gstPct) / 100)) : 0;
+  // GST is charged PER LINE at that line's own rate (l.gstPct, else the doc
+  // default). Exempt lines bear none but still count in Basic + Final.
+  const gstAmt = d.gstEnabled ? Math.round(d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => {
+    const rate = l.gstPct != null ? Number(l.gstPct) : Number(d.gstPct);
+    return s + (Number(l.qty) * Number(l.unitPrice) || 0) * (rate / 100);
+  }, 0)) : 0;
   const finalAmt = basic + gstAmt;
+  // Selectable per-line GST rates — the standard slabs plus the doc's default, so
+  // the current value always has a matching option.
+  const gstRateOptions = [...new Set([5, 12, 18, 28, Number(d.gstPct) > 0 ? Number(d.gstPct) : 18])].sort((a, b) => a - b);
   // The base each payment-term % is computed from — final (incl. GST) when the PO
   // is GST-inclusive, else the basic. Milestones on the server use the same rule.
   const payBase = d.payGstInclusive ? finalAmt : basic;
@@ -431,14 +436,18 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                   <td><input className="input" type="number" disabled={!editable} value={l.unitPrice} onChange={(e) => setLine(i, { unitPrice: e.target.value })} /></td>
                   <td className="text-right font-medium">
                     {inr(Number(l.qty) * Number(l.unitPrice) || 0)}
-                    {/* Untick to make this line GST-exempt (e.g. a refundable deposit),
-                        then type WHY it is exempt. */}
+                    {/* Per-line GST rate. Pick "No GST" for an exempt line (e.g. a
+                        refundable deposit) and type WHY; else pick this line's rate. */}
                     {d.gstEnabled && (editable
                       ? <div className="mt-0.5 flex flex-col items-end gap-0.5">
-                          <label className="flex items-center gap-1 text-[10px] font-normal text-slate-400"><input type="checkbox" checked={!l.gstExempt} onChange={(e) => setLine(i, { gstExempt: !e.target.checked, ...(e.target.checked ? { gstExemptRemark: null } : {}) })} />GST</label>
+                          <select className="rounded border border-slate-300 px-1 py-0.5 text-[10px] font-normal text-slate-600" value={l.gstExempt ? 'none' : String(l.gstPct != null ? l.gstPct : d.gstPct)} onChange={(e) => { const v = e.target.value; if (v === 'none') setLine(i, { gstExempt: true, gstPct: null }); else setLine(i, { gstExempt: false, gstPct: Number(v), gstExemptRemark: null }); }}>
+                            <option value="none">No GST</option>
+                            {gstRateOptions.map((r) => <option key={r} value={r}>GST {r}%</option>)}
+                          </select>
                           {l.gstExempt && <input className="w-32 rounded border border-slate-300 px-1 py-0.5 text-[10px] font-normal text-slate-600" placeholder="why? e.g. refundable" value={l.gstExemptRemark || ''} onChange={(e) => setLine(i, { gstExemptRemark: e.target.value })} />}
                         </div>
-                      : l.gstExempt ? <div className="text-[10px] font-normal text-slate-400">No GST{l.gstExemptRemark ? ` — ${l.gstExemptRemark}` : ''}</div> : null)}
+                      : l.gstExempt ? <div className="text-[10px] font-normal text-slate-400">No GST{l.gstExemptRemark ? ` — ${l.gstExemptRemark}` : ''}</div>
+                        : <div className="text-[10px] font-normal text-slate-400">GST {l.gstPct != null ? l.gstPct : d.gstPct}%</div>)}
                   </td>
                   {editable && <td><button className="text-slate-300 hover:text-red-500" onClick={() => delLine(i)}>✕</button></td>}
                 </tr>

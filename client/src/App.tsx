@@ -13,6 +13,7 @@ import ApiKeysAdmin from './pages/ApiKeysAdmin';
 import MachineModelsPage from './pages/MachineModelsPage';
 import IntegrationKit from './pages/IntegrationKit';
 import GoResolver from './pages/GoResolver';
+import PublicGrn from './pages/PublicGrn';
 import AppShell from './components/AppShell';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -51,6 +52,8 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       {/* Public — no auth. Documents the API for integrators. */}
       <Route path="/integration-kit" element={<IntegrationKit />} />
+      {/* Public — no auth. Site-engineer goods-receipt form (token is the key). */}
+      <Route path="/grn/:token" element={<PublicGrn />} />
       {/* Deep-link resolver — authed but outside the shell; it redirects instantly. */}
       <Route path="/go/:entity/:id" element={<RequireAuth><GoResolver /></RequireAuth>} />
       <Route

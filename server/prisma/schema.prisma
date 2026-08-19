@@ -70,6 +70,9 @@ model Project {
   name                 String
   clientName           String?
   siteLocation         String?
+  // The client's PO number this project/delivery is booked against — printed on the
+  // packing list (Amisha interview 64). A client may have several; editable.
+  clientPoNumber       String?
   startDate            DateTime?
   targetCompletionDate DateTime?
   status               String          @default("DRAFT")
@@ -407,6 +410,9 @@ model ProcurementLineItem {
   // Basic/Final amount. Default false → GST applies, preserving old behaviour.
   gstExempt   Boolean @default(false)
   gstExemptRemark String? // why this line is GST-exempt, e.g. "refundable deposit"
+  // Per-line GST rate (%). Null → use the document's default gstPct. Lets each
+  // spare carry its own rate (one line 5%, another 18%). Ignored when gstExempt.
+  gstPct      Float?
   isLeadTime  Boolean @default(false) // special "Lead Time: 7 Days" row
   leadTimeText String?
   customValues String? // JSON { [colKey]: value } for the doc's user-added columns
@@ -434,19 +440,47 @@ model PaymentMilestone {
   triggerCondition String?
   percentage    Float   @default(0)
   inrAmount     Float   @default(0)
+  // Cumulative amount actually paid against this term. A term can be paid in
+  // parts (Amisha PRD A1/A3): status becomes PARTIALLY_PAID until amountPaid
+  // reaches inrAmount, then PAID. Legacy PAID rows carry 0 here — readers fall
+  // back to inrAmount via milestonePaidAmount(), so no backfill is needed.
+  amountPaid    Float   @default(0)
   expectedDate  DateTime?
   actualTriggerDate DateTime?
-  status        String  @default("PENDING")
+  status        String  @default("PENDING")  // PENDING | TRIGGERED | PARTIALLY_PAID | PAID
   accountsNotifiedAt DateTime?
   paymentDate   DateTime?
   paymentReference String?
   // UTR captured by Accounts on "Mark as Paid". Manual today; FMS auto-fetch is
-  // a Phase-2 item (Sprint PRD §9).
+  // a Phase-2 item (Sprint PRD §9). For part-payments this holds the LATEST UTR;
+  // the full history lives in `installments`.
   utrNumber       String?
   paymentProofUrl String?   // NEFT receipt / bank transfer screenshot
   remarks       String?
   sortOrder     Int     @default(0)
+  installments  PaymentInstallment[]
 
+  @@index([docId])
+}
+
+// One part-payment against a milestone (Amisha PRD A1/A3). Each partial release
+// keeps its own amount + UTR + date, so the payment history is auditable even
+// when a term is settled over several transfers.
+model PaymentInstallment {
+  id            String  @id @default(cuid()) @map("_id")
+  milestoneId   String
+  milestone     PaymentMilestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  docId         String
+  amount        Float   @default(0)
+  utrNumber     String?
+  paymentReference String?
+  paymentDate   DateTime?
+  paymentProofUrl String?
+  remarks       String?
+  paidById      String?
+  createdAt     DateTime @default(now())
+
+  @@index([milestoneId])
   @@index([docId])
 }
 
@@ -557,16 +591,44 @@ model GoodsReceipt {
   siteAddress String?
   raisedById  String?
   vehicleNumber String?
+  vehicleSize String?   // e.g. "40 FT" — shown on the packing list
   driverName  String?
   deliveryChallanNumber String?
+  // Packing-list / delivery fields (Amisha interview 63/64). dispatchDate doubles
+  // as the invoice date ("Date of Invoice / Date of Dispatch"); deliveryDate is
+  // the date material reached site.
+  invoiceNumber String?
+  dispatchDate  DateTime?
+  deliveryDate  DateTime?
+  ewayBillNumber String?
+  // Mode 1 = direct PO→GRN (received qty against PO lines). Mode 2 = custom packing
+  // list Amisha builds (own sizes/columns), then the site engineer fills received qty.
+  mode        String  @default("DIRECT")  // DIRECT | CUSTOM
+  // For Mode 2 — the configurable extra columns (JSON: [{ key, label }]).
+  customColumns String?
+  // Site-engineer share link: whom it was assigned to + the token that unlocks the
+  // no-login public GRN form.
+  siteEngineerEmail String?
+  linkToken   String?
+  packingListNo Int?
   photoUrl    String?
   remarks     String?
   status      String  @default("DRAFT")  // DRAFT | RECEIVED
+  // Phase 4 (signed packing-list upload + reminders + billing confirm):
+  // when the site engineer submitted the filled form; drives the daily
+  // "signed packing list still pending" reminder throttle.
+  submittedAt DateTime?
+  lastReminderAt DateTime?
+  // Billing confirms "material received" once a signed copy is uploaded — this
+  // closes the GRN and feeds the payment pipeline.
+  billingConfirmedAt DateTime?
+  billingConfirmedById String?
   createdAt   DateTime @default(now())
   lineItems   GoodsReceiptLine[]
 
   @@index([projectId])
   @@index([docId])
+  @@index([linkToken])
 }
 
 model GoodsReceiptLine {
@@ -583,6 +645,9 @@ model GoodsReceiptLine {
   defectQty     Float   @default(0)
   acceptedQty   Float   @default(0)
   remarks       String?
+  // Mode 2 (custom packing list) — values for the GR's configurable columns
+  // (JSON keyed by column key, e.g. { panelType, width, length, sqmtr, bundleNo }).
+  customValues  String?
 
   @@index([grId])
 }
@@ -1153,6 +1218,9 @@ model ApprovalStep {
   actedAt       DateTime?
   remarks       String?
   createdAt     DateTime  @default(now())
+  // When the current pending approver was last auto-reminded. Drives the 24-hour
+  // reminder cadence so no one is nudged more than once per window.
+  lastRemindedAt DateTime?
 
   @@index([docType, docId])
 }

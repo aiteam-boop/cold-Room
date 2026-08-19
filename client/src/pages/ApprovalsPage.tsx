@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../lib/api';
@@ -13,10 +13,24 @@ interface Item {
   basicAmount?: number | null; finalAmount?: number | null;
   submittedAt: string; myRole?: string | null; pendingWith?: string | null; pendingWithRole?: string | null; legacy?: boolean;
   invoiceNumber?: string | null; invoicePdfUrl?: string | null;
+  // Per-term Proforma Invoices uploaded on the PO/WO — the approver can open them
+  // straight from the queue.
+  pis?: { term: string; piNumber: string | null; piUrl: string }[];
   // Post-approval amendments (oldest → newest). Non-empty means the document was
   // changed after a previous approval and resubmitted — show WHY it needs
   // re-approval, so the approver isn't deciding blind.
   amendments?: { remark: string; byName: string; at: string }[];
+  // When the current approver would next be auto-reminded (ISO) — drives the countdown.
+  nextReminderAt?: string | null;
+}
+
+// "5h 23m" until the next auto-reminder; "due now" once it's overdue.
+function reminderCountdown(iso: string, now: number): string {
+  const ms = new Date(iso).getTime() - now;
+  if (ms <= 0) return 'due now';
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
 interface ApprovedItem {
@@ -24,6 +38,7 @@ interface ApprovedItem {
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string; finalAmount?: number | null;
   approvedAt?: string | null; approvedBy?: string | null;
+  pis?: { term: string; piNumber: string | null; piUrl: string }[];
 }
 
 // "My Approvals" — documents where the signed-in user is the current approver.
@@ -34,6 +49,9 @@ export default function ApprovalsPage() {
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
 
   const [tab, setTab] = useState<'pending' | 'approved'>('pending');
+  // Re-render every 30s so the "next reminder in …" countdowns tick down live.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
   const { data, isLoading, error } = useQuery({
     queryKey: ['approvals-mine'],
     queryFn: async () => (await api.get('/approvals/mine')).data.items as Item[],
@@ -115,6 +133,12 @@ export default function ApprovalsPage() {
                         {d.pendingWith && <div className="text-xs text-amber-600">⏳ Pending with: <span className="font-medium">{d.pendingWith}</span>{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
                         {!d.pendingWith && d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
                         {d.legacy && <div className="text-xs text-slate-400">no chain — admin action</div>}
+                        {/* Live countdown to the next auto-reminder for the pending approver. */}
+                        {d.nextReminderAt && (
+                          new Date(d.nextReminderAt).getTime() - now <= 0
+                            ? <div className="text-xs font-medium text-red-500">⏰ Reminder due — sending soon</div>
+                            : <div className="text-xs text-slate-400">⏰ Next reminder in {reminderCountdown(d.nextReminderAt, now)}</div>
+                        )}
                         {d.invoicePdfUrl
                           ? <a href={d.invoicePdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View invoice{d.invoiceNumber ? ` (${d.invoiceNumber})` : ''}</a>
                           : d.kind === 'GRN' && <span className="text-xs text-slate-400">no invoice file</span>}
@@ -124,7 +148,12 @@ export default function ApprovalsPage() {
                       <td className="text-right font-medium">{money(d.finalAmount)}</td>
                       <td className="text-slate-500">{fmtDate(d.submittedAt)}</td>
                       <td className="px-2 text-right">
-                        <div className="flex justify-end gap-2">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          {/* PI(s) uploaded on the PO — sit right beside View PO so the
+                              approver can open them before deciding. */}
+                          {d.pis?.map((p, i) => (
+                            <a key={i} href={p.piUrl} target="_blank" rel="noreferrer" title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</a>
+                          ))}
                           <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewDoc(d)}>📄 View {d.kind}</button>
                           <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
                           <button className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'hold')}>⏸ On Hold</button>
@@ -179,7 +208,13 @@ export default function ApprovalsPage() {
                     <td className="text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
                     <td className="text-slate-500">{d.approvedBy || '—'}</td>
                     <td className="px-2 text-right">
-                      <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.kind}</button>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {/* PI(s) uploaded on the PO — beside View PO. */}
+                        {d.pis?.map((p, i) => (
+                          <a key={i} href={p.piUrl} target="_blank" rel="noreferrer" title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</a>
+                        ))}
+                        <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.kind}</button>
+                      </div>
                     </td>
                   </tr>
                 ))}

@@ -13,6 +13,7 @@
 import { prisma } from '../lib/prisma';
 import { loadProjectProgress } from './projectProgress';
 import { deliveryInfo, type DeliveryStatus } from './delivery';
+import { milestonePaidAmount } from './procurement';
 
 /** Advance / Partial / Paid / Pending — the PRD's four payment states. */
 export type PaymentStatus = 'Paid' | 'Partial' | 'Advance' | 'Pending';
@@ -151,7 +152,7 @@ export async function buildCostSheet(projectId: string) {
           select: {
             id: true, docNumber: true, type: true, status: true, vendorName: true, basicAmount: true,
             promisedDeliveryDate: true, requiredByDate: true,
-            milestones: { select: { fieldKey: true, name: true, status: true, inrAmount: true } },
+            milestones: { select: { fieldKey: true, name: true, status: true, inrAmount: true, amountPaid: true } },
             grns: { select: { grnDate: true, status: true } },
           },
         },
@@ -230,10 +231,10 @@ export async function buildCostSheet(projectId: string) {
   const payByDoc = new Map<string, { paid: number; advance: number }>();
   for (const l of lines) {
     if (payByDoc.has(l.doc.id)) continue;
-    const paid = l.doc.milestones.filter((m) => m.status === 'PAID');
+    const ms = l.doc.milestones;
     payByDoc.set(l.doc.id, {
-      paid: paid.reduce((s, m) => s + m.inrAmount, 0),
-      advance: paid.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + m.inrAmount, 0),
+      paid: ms.reduce((s, m) => s + milestonePaidAmount(m), 0),
+      advance: ms.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + milestonePaidAmount(m), 0),
     });
   }
 
@@ -257,8 +258,9 @@ export async function buildCostSheet(projectId: string) {
       totalCost: l.totalPrice,
       advancePaid,
       amountPaid,
-      // Each paid milestone scaled by this line's share of the PO.
-      paidMilestones: l.doc.milestones.filter((m) => m.status === 'PAID').map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: r2(m.inrAmount * share) })),
+      // Each paid milestone scaled by this line's share of the PO (part-payments
+      // included — the row shows what has actually been paid, not the term face).
+      paidMilestones: l.doc.milestones.filter((m) => milestonePaidAmount(m) > 0).map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: r2(milestonePaidAmount(m) * share) })),
       balancePending: r2(l.totalPrice - amountPaid),
       paymentStatus: paymentStatus(l.totalPrice, amountPaid, advancePaid),
       qtyReceived,
@@ -285,9 +287,9 @@ export async function buildCostSheet(projectId: string) {
   function syntheticPORow(docId: string): CostPORow | null {
     const doc = poById.get(docId);
     if (!doc) return null;
-    const paid = doc.milestones.filter((m) => m.status === 'PAID');
-    const amountPaid = r2(paid.reduce((s, m) => s + m.inrAmount, 0));
-    const advancePaid = r2(paid.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + m.inrAmount, 0));
+    const paidMs = doc.milestones.filter((m) => milestonePaidAmount(m) > 0);
+    const amountPaid = r2(doc.milestones.reduce((s, m) => s + milestonePaidAmount(m), 0));
+    const advancePaid = r2(doc.milestones.filter((m) => m.fieldKey === 'advance').reduce((s, m) => s + milestonePaidAmount(m), 0));
     const total = doc.basicAmount || doc.finalAmount || 0;
     const qtyReceived = r2(receivedByDoc.get(docId) ?? 0);
     const hasUnapprovedGrn = (grnsByDoc.get(docId) ?? []).some((g) => g.status !== 'APPROVED');
@@ -295,7 +297,7 @@ export async function buildCostSheet(projectId: string) {
       poLineId: `sel-${docId}`, docId, docNumber: doc.docNumber, docType: doc.type, vendorName: doc.vendorName,
       qtyOrdered: 0, unitPrice: 0, totalCost: total,
       advancePaid, amountPaid,
-      paidMilestones: paid.map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: m.inrAmount })),
+      paidMilestones: paidMs.map((m) => ({ name: m.name, fieldKey: m.fieldKey, inrAmount: milestonePaidAmount(m) })),
       balancePending: r2(total - amountPaid),
       paymentStatus: paymentStatus(total, amountPaid, advancePaid),
       qtyReceived, receiptStatus: receiptStatus(0, qtyReceived, hasUnapprovedGrn),

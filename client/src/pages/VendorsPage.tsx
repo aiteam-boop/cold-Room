@@ -4,6 +4,7 @@ import { api, errMsg } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Modal, Spinner } from '../components/ui';
 import { fmtDate } from '../lib/format';
+import VendorDetail from '../components/procurement/VendorDetail';
 
 const KYC_DOT: Record<string, string> = { Complete: 'bg-green-500', Partial: 'bg-amber-500', Missing: 'bg-red-500' };
 
@@ -14,11 +15,19 @@ export default function VendorsPage() {
   const canManage = canEdit('vendors');
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
+  const [viewing, setViewing] = useState<string | null>(null);
   const [q, setQ] = useState('');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['all-vendors'],
     queryFn: async () => (await api.get('/vendors')).data.vendors as any[],
+  });
+  // Delete a duplicate/unused vendor — the server blocks it if any PO/WO or
+  // payment is linked, so real transactions are never orphaned.
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/vendors/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['all-vendors'] }),
+    onError: (e) => alert(errMsg(e)),
   });
 
   if (isLoading) return <Spinner label="Loading vendors…" />;
@@ -47,8 +56,9 @@ export default function VendorsPage() {
               <tr><th className="px-4 py-2">Name</th><th>Type</th><th>GSTIN</th><th>Sites</th><th>POs/WOs</th><th>KYC</th><th>Added</th>{canManage && <th></th>}</tr>
             </thead>
             <tbody>
+              {/* Click anywhere on a row to view details; Edit/Delete stop propagation. */}
               {vendors.map((v) => (
-                <tr key={v.id} className="border-b border-slate-100 hover:bg-slate-50">
+                <tr key={v.id} onClick={() => setViewing(v.id)} className="cursor-pointer border-b border-slate-100 hover:bg-slate-50">
                   <td className="px-4 py-2 font-medium text-navy">{v.name}<div className="text-xs font-normal text-slate-400">{v.contactPerson} {v.phones && `· ${v.phones}`}</div></td>
                   <td><span className="badge bg-slate-100 text-slate-600">{v.type}</span></td>
                   <td className="text-slate-500">{v.gstin || '—'}</td>
@@ -56,12 +66,20 @@ export default function VendorsPage() {
                   <td className="text-slate-500">{v._count?.docs ?? 0}</td>
                   <td><span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} />{v.kycStatus}</span></td>
                   <td className="text-slate-400">{fmtDate(v.createdAt)}</td>
-                  {canManage && <td className="px-2 text-right"><button className="text-xs font-medium text-navy hover:underline" onClick={() => setEditing(v)}>Edit</button></td>}
+                  {canManage && <td className="px-2 text-right"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      )}
+      {viewing && (
+        <VendorDetail
+          vendorId={viewing}
+          canEdit={canManage}
+          onEdit={() => { const vv = (data ?? []).find((x) => x.id === viewing); setViewing(null); if (vv) setEditing(vv); }}
+          onClose={() => setViewing(null)}
+        />
       )}
       {(show || editing) && (
         <VendorModal
