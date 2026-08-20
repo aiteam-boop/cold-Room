@@ -39,25 +39,27 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   });
   const metaQ = useQuery({ queryKey: ['vendor-meta'], queryFn: async () => (await api.get('/vendors/meta')).data as Meta });
 
-  if (isLoading) return <Spinner label="Loading vendors…" />;
-  const all = data ?? [];
-  const needle = q.toLowerCase().trim();
-  const vendors = all
-    .filter((v) => showInactive || v.isActive !== false)
-    .filter((v) => !needle || [v.name, v.legalName, v.tradeName, v.gstin, ...(v.boqCategories ?? [])].filter(Boolean).some((s: string) => s.toLowerCase().includes(needle)));
-
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['proc-vendors', projectId, 'all'] });
     qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] });
     qc.invalidateQueries({ queryKey: ['all-vendors'] });
   };
   // Delete a duplicate/unused vendor. The server refuses if it has POs/WOs or
-  // payments, so a vendor with real transactions can never be orphaned.
+  // payments, so a vendor with real transactions can never be orphaned. This hook
+  // MUST sit before the early loading return — hooks can never run conditionally,
+  // or React throws "Rendered more hooks than during the previous render".
   const del = useMutation({
     mutationFn: (id: string) => api.delete(`/vendors/${id}`),
     onSuccess: () => invalidate(),
     onError: (e) => alert(errMsg(e)),
   });
+
+  if (isLoading) return <Spinner label="Loading vendors…" />;
+  const all = data ?? [];
+  const needle = q.toLowerCase().trim();
+  const vendors = all
+    .filter((v) => showInactive || v.isActive !== false)
+    .filter((v) => !needle || [v.name, v.legalName, v.tradeName, v.gstin, ...(v.boqCategories ?? [])].filter(Boolean).some((s: string) => s.toLowerCase().includes(needle)));
 
   return (
     <div className="space-y-3">
