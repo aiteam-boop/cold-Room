@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
-import { COLOR_HEX, fmtDate } from '../../lib/format';
+import { COLOR_HEX, fmtDate, titleize } from '../../lib/format';
+import ProcurementPipeline from '../procurement/ProcurementPipeline';
 
 // NEW dashboard cards (additive — rendered below the existing dashboard):
 // Room-wise progress (F3), Gantt/timeline summary (F4), Change Orders (F5).
@@ -74,6 +76,41 @@ export default function DashboardExtras({ projectId, onOpenGantt }: { projectId:
           </div>
         </div>
       )}
+
+      {/* Procurement pipeline — each PO/WO's phases (Approval → Payment → GRN). */}
+      <ProcPipelineSection projectId={projectId} />
+    </div>
+  );
+}
+
+// A collapsible list of the project's PO/WOs; expanding one shows its phase
+// timeline (Approval → Payment → Goods Receipt), lazy-loaded on open.
+function ProcPipelineSection({ projectId }: { projectId: string }) {
+  const docsQ = useQuery({ queryKey: ['proc-docs-pipeline', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs`)).data.docs as any[] });
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const toggle = (id: string) => setOpen((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const docs = docsQ.data ?? [];
+  if (docsQ.isError || docs.length === 0) return null;
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-slate-600">Procurement Pipeline — {docs.length} PO/WO</div>
+      <div className="space-y-2">
+        {docs.map((d: any) => {
+          const isOpen = open.has(d.id);
+          return (
+            <div key={d.id} className="card overflow-hidden">
+              <button className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-slate-50" onClick={() => toggle(d.id)}>
+                <span className="text-slate-400">{isOpen ? '▾' : '▸'}</span>
+                <span className="font-medium text-navy">{d.docNumber}</span>
+                <span className="badge bg-slate-100 text-slate-600">{d.type}</span>
+                <span className="truncate text-sm text-slate-500">{d.vendorName || '—'}</span>
+                <span className={`badge ml-auto shrink-0 ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
+              </button>
+              {isOpen && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><ProcurementPipeline projectId={projectId} docId={d.id} /></div>}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

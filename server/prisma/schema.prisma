@@ -528,6 +528,16 @@ model GRN {
   paymentProofUrl String?
   paymentClosedAt DateTime?
 
+  // Payment-release sign-off from the FMS sheet's "Approval Form" link. A no-login
+  // page (keyed by releaseToken) lets management mark the payment APPROVED or
+  // ON_HOLD; the decision shows next to the payment status in the app + the sheet.
+  // It runs ALONGSIDE paymentStatus (Triggered/Paid) — it does not change it.
+  releaseToken   String?
+  releaseStatus  String?   // APPROVED | ON_HOLD (null = not decided)
+  releaseAt      DateTime?
+  releaseBy      String?
+  releaseRemark  String?
+
   // Tax-invoice section (arrives later; closes the payment side).
   invoiceNumber String?
   invoiceDate   DateTime?
@@ -552,6 +562,7 @@ model GRN {
 
   @@index([projectId])
   @@index([docId])
+  @@index([releaseToken])
 }
 
 model GRNLineItem {

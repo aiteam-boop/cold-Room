@@ -5,6 +5,7 @@ import { api, errMsg, openAuthedFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Spinner } from '../components/ui';
 import { fmtDate, inr } from '../lib/format';
+import ProcurementPipeline from '../components/procurement/ProcurementPipeline';
 
 interface Item {
   kind: 'PO' | 'WO' | 'GRN';
@@ -49,6 +50,9 @@ export default function ApprovalsPage() {
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
 
   const [tab, setTab] = useState<'pending' | 'approved'>('pending');
+  // Which Approved rows have their phase pipeline expanded (lazy-loaded on open).
+  const [openPipe, setOpenPipe] = useState<Set<string>>(new Set());
+  const togglePipe = (key: string) => setOpenPipe((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
   // Re-render every 30s so the "next reminder in …" countdowns tick down live.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
@@ -196,9 +200,15 @@ export default function ApprovalsPage() {
                 <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Approved</th><th>Approved by</th><th className="text-right">Action</th></tr>
               </thead>
               <tbody>
-                {(approvedQ.data ?? []).map((d) => (
-                  <tr key={`${d.kind}-${d.docId}`} className="border-b border-slate-100 hover:bg-slate-50">
+                {(approvedQ.data ?? []).map((d) => {
+                  const key = `${d.kind}-${d.docId}`;
+                  const canPipe = d.kind === 'PO' || d.kind === 'WO'; // pipeline is for PO/WO docs
+                  const open = openPipe.has(key);
+                  return (
+                  <Fragment key={key}>
+                  <tr className="border-b border-slate-100 hover:bg-slate-50">
                     <td className="px-4 py-2">
+                      {canPipe && <button className="mr-1 text-slate-400 hover:text-navy" title={open ? 'Hide pipeline' : 'Show phases (Approval → Payment → GRN)'} onClick={() => togglePipe(key)}>{open ? '▾' : '▸'}</button>}
                       <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
                     </td>
@@ -217,7 +227,14 @@ export default function ApprovalsPage() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  {canPipe && open && (
+                    <tr className="border-b border-slate-100 bg-slate-50/50">
+                      <td colSpan={7} className="px-4 py-3"><ProcurementPipeline projectId={d.projectId} docId={d.docId} /></td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

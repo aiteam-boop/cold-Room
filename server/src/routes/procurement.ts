@@ -5,7 +5,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { sendEmail, appClientUrl, isEmailEnabled } from '../services/email';
+import { sendEmail, appClientUrl, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from '../services/email';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../lib/errors';
 import {
   requireAuth, requireProjectMember,
@@ -218,6 +218,67 @@ router.get('/docs/:docId', requireProjectMember, requireAnyPage(...DOC_PAGES), a
   if (!doc) throw notFound('Document not found');
   const approval = await getChainState(doc.type as DocType, doc.id);
   res.json({ doc: maskFinancials(serializeDoc(doc), req.account), approval });
+}));
+
+// GET .../docs/:docId/pipeline — the phase timeline (Approval → Payment → Goods
+// Receipt) for one PO/WO. Read-only aggregation of existing data; used by the
+// Approvals "Approved" tab and the project dashboard. Financials masked like
+// every other money endpoint; the client also renders amounts via money().
+router.get('/docs/:docId/pipeline', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHandler(async (req, res) => {
+  const doc = await prisma.procurementDoc.findFirst({
+    where: { id: req.params.docId, projectId: req.params.projectId },
+    include: {
+      lineItems: { select: { qty: true } },
+      milestones: { orderBy: { sortOrder: 'asc' }, include: { installments: { orderBy: { createdAt: 'asc' } } } },
+      project: { select: { name: true } },
+    },
+  });
+  if (!doc) throw notFound('Document not found');
+
+  // ── Approval phase — who signs, in order ──
+  const chain = await getChainState(doc.type as DocType, doc.id);
+  const steps = chain.steps.map((s) => ({ order: s.order, name: s.approverName, role: s.approverRole, status: s.status, actedAt: s.actedAt, remarks: s.remarks }));
+
+  // ── Payment phase — terms with paid/remaining + UTRs (partial flagged red) ──
+  // Payment records (PAY-QAS-###) raised against each term, so a triggered term
+  // shows its payment number, trigger date, and management release decision.
+  const payGrns = await prisma.gRN.findMany({
+    where: { docId: doc.id, milestoneId: { not: null } },
+    orderBy: { createdAt: 'asc' },
+    select: { grnNumber: true, milestoneId: true, paymentStatus: true, releaseStatus: true, releaseAt: true, utrNumber: true, paidAt: true },
+  });
+  const payByTerm = new Map<string, typeof payGrns>();
+  for (const g of payGrns) { if (!g.milestoneId) continue; const arr = payByTerm.get(g.milestoneId) ?? []; arr.push(g); payByTerm.set(g.milestoneId, arr); }
+  const terms = doc.milestones.map((m) => ({
+    name: m.name, percentage: m.percentage, inrAmount: m.inrAmount,
+    amountPaid: milestonePaidAmount(m), remaining: milestoneRemaining(m),
+    status: m.status, utrNumber: m.utrNumber, triggeredAt: m.actualTriggerDate,
+    installments: m.installments.map((i) => ({ amount: i.amount, utrNumber: i.utrNumber, paymentDate: i.paymentDate })),
+    payments: (payByTerm.get(m.id) ?? []).map((g) => ({ grnNumber: g.grnNumber, paymentStatus: g.paymentStatus, releaseStatus: g.releaseStatus, releaseAt: g.releaseAt, utrNumber: g.utrNumber, paidAt: g.paidAt })),
+  }));
+  const paidAmount = Math.round(terms.reduce((s, t) => s + t.amountPaid, 0) * 100) / 100;
+  const pendingAmount = Math.round(terms.reduce((s, t) => s + t.remaining, 0) * 100) / 100;
+
+  // ── Goods Receipt phase — physical receipts against this PO + received vs PO qty ──
+  const grs = await prisma.goodsReceipt.findMany({
+    where: { docId: doc.id },
+    orderBy: { createdAt: 'desc' },
+    include: { lineItems: { select: { acceptedQty: true } } },
+  });
+  const totalPoQty = Math.round(doc.lineItems.reduce((s, l) => s + (l.qty || 0), 0) * 100) / 100;
+  const receipts = grs.map((g) => ({
+    grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate,
+    receivedQty: Math.round(g.lineItems.reduce((s, l) => s + (l.acceptedQty || 0), 0) * 100) / 100,
+  }));
+  const totalReceivedQty = Math.round(receipts.reduce((s, r) => s + r.receivedQty, 0) * 100) / 100;
+
+  const payload = {
+    doc: { docNumber: doc.docNumber, type: doc.type, vendorName: doc.vendorName, finalAmount: doc.finalAmount, status: doc.status, projectName: doc.project?.name ?? null },
+    approval: { approved: chain.approved, total: chain.total, steps },
+    payment: { paidAmount, pendingAmount, termsTotal: terms.length, terms },
+    goodsReceipt: { count: grs.length, totalPoQty, totalReceivedQty, remainingQty: Math.round(Math.max(totalPoQty - totalReceivedQty, 0) * 100) / 100, receipts },
+  };
+  res.json({ pipeline: maskFinancials(payload, req.account) });
 }));
 
 const lineSchema = z.object({
@@ -800,6 +861,48 @@ async function payGrnMilestone(grn: { milestoneId: string | null }, utr: string 
   }
 }
 
+// On payment submit: email the PO's approver(s) the no-login Approval Form link so
+// they can Approve / On-Hold (like the PO approval mail). The decision (releaseStatus)
+// is the single source shown everywhere — app badge, FMS sheet, and this form — so a
+// decision from the email reflects the same on the sheet. Best-effort; never blocks.
+async function notifyPaymentApprovers(grn: { id: string; grnNumber: string; docId: string; projectId: string; vendorName: string | null; releaseToken: string | null; amountToPay: number | null; piValue: number | null }): Promise<void> {
+  if (!isEmailEnabled()) return;
+  try {
+    // Ensure a stable Approval-Form token so the link works from the email.
+    let token = grn.releaseToken;
+    if (!token) { token = crypto.randomBytes(24).toString('hex'); await prisma.gRN.update({ where: { id: grn.id }, data: { releaseToken: token } }); }
+    const po = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { finalAmount: true, docNumber: true } });
+    // Route through the "Vendor Payments" approval chain (Settings → Approval Chain
+    // · Vendor Payments) — the order the admin set there. Value band uses the amount
+    // being paid.
+    const amount = grn.amountToPay ?? grn.piValue ?? po?.finalAmount ?? 0;
+    const auto = await resolveAutoChain('PAYMENT', grn.projectId, amount).catch(() => null);
+    let emails: string[] = [];
+    const ids = auto?.approverIds ?? [];
+    if (ids.length) {
+      // Preserve the chain order when emailing.
+      const users = await prisma.user.findMany({ where: { id: { in: ids }, active: true }, select: { id: true, email: true } });
+      const byId = new Map(users.map((u) => [u.id, u.email]));
+      emails = ids.map((id) => byId.get(id)).filter((e): e is string => !!e);
+    }
+    if (!emails.length) { const cc = approvalCcEmail(); if (cc) emails = [cc]; }
+    if (!emails.length) return;
+    const link = `${appBaseUrl()}/api/public/payment-approval/${token}`;
+    const html = approvalEmailHtml({
+      heading: `Payment approval needed — ${grn.grnNumber}`,
+      lines: [
+        `A payment <strong>${grn.grnNumber}</strong>${po?.docNumber ? ` (against ${po.docNumber})` : ''}${grn.vendorName ? ` — ${grn.vendorName}` : ''} needs your decision.`,
+        'Open the Approval Form to review the PO / GRN / KYC / amount and Approve or put it On Hold. Your decision shows on the FMS sheet and in the app.',
+      ],
+      actionUrl: link,
+      actionLabel: 'Open Approval Form',
+    });
+    for (const to of [...new Set(emails)]) {
+      try { await sendEmail({ to, cc: approvalCcEmail(), subject: `Payment approval needed — ${grn.grnNumber}${po?.docNumber ? ` (${po.docNumber})` : ''}`, html }); } catch { /* best-effort per recipient */ }
+    }
+  } catch { /* email is best-effort; never break submit */ }
+}
+
 // ── GRN ─────────────────────────────────────────────────────────────────────
 //
 // Who sees what (Sprint PRD §7.2). A site engineer raises the GRN and must see
@@ -1090,7 +1193,41 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   // Trigger the linked term and advance the payment ladder, then push to the sheet.
   await onGrnApproved(updated);
   scheduleSheetSync();
+  // Email the PO's approver(s) the Approval Form link (like the PO approval mail).
+  // Only for payment GRNs (a pure goods-receipt GRN has no payment to sign off).
+  if (updated.milestoneId) await notifyPaymentApprovers(updated);
   res.json({ grn: updated });
+}));
+
+// POST /grns/:grnId/resubmit-approval — the payment was put ON_HOLD by management
+// from the FMS "Approval Form"; after the creator corrects it, re-submitting clears
+// the hold (releaseStatus → null / Pending) so management can review again. Only
+// clears the release decision — the payment's own status/lifecycle is untouched.
+router.post('/grns/:grnId/resubmit-approval', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (grn.releaseStatus !== 'ON_HOLD') throw badRequest('This payment is not on hold.');
+  // → RESUBMITTED: goes back to the approver as "re-submitted". We KEEP the hold
+  // remark (releaseRemark) so the approval form still shows what was asked to be
+  // corrected. releaseAt = when it was re-submitted.
+  const updated = await prisma.gRN.update({ where: { id: grn.id }, data: { releaseStatus: 'RESUBMITTED', releaseAt: new Date() } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PAYMENT_RESUBMIT_APPROVAL', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber, previousRemark: grn.releaseRemark } });
+  scheduleSheetSync();
+  res.json({ grn: serializeGrn(updated, req.account) });
+}));
+
+// POST /grns/:grnId/remind-approval — resend the Approval Form email to the
+// payment approver(s) (Vendor Payments chain). Same email as on submit — a manual
+// "Send Reminder" for a payment whose decision is still pending / on hold.
+router.post('/grns/:grnId/remind-approval', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (!grn.milestoneId) throw badRequest('Only a payment can be sent for approval.');
+  if (grn.releaseStatus === 'APPROVED') throw badRequest('This payment is already approved.');
+  if (!isEmailEnabled()) throw badRequest('Email is not configured, so a reminder cannot be sent.');
+  await notifyPaymentApprovers(grn);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PAYMENT_APPROVAL_REMIND', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber } });
+  res.json({ ok: true });
 }));
 
 router.post('/grns/:grnId/approve', asyncHandler(async (req, res) => {

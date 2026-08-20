@@ -267,6 +267,9 @@ const FMS_ADMIN_HEADERS = [
 const FMS_EXTRA_HEADERS = [
   'Project', 'PO Number', 'PO PDF', 'GRN Number', 'GRN PDF', 'Invoiced', 'Paid',
   'Payment Status', 'UTR / Payment Ref', 'Payment Remark', 'PO Status', 'Vendor KYC', 'Milestone Ref',
+  // Vendor email + the no-login "Approval Form" link (management marks the payment
+  // Approved / On Hold) and the resulting Approval Status.
+  'Vendor Email', 'Approval Status', 'Approval Form',
 ];
 
 const dmy = (d: unknown): string => {
@@ -361,7 +364,7 @@ export async function exportPaymentAccountFms(): Promise<number> {
   try { await importPaidFromSheet(); } catch { /* import is best-effort */ }
   const db = await getDb();
   const base = fileBaseUrl();
-  const [docs, grns, projects, users, milestones, kycs] = await Promise.all([
+  const [docs, grns, projects, users, milestones, kycs, vendors] = await Promise.all([
     db.collection('ProcurementDoc').find({ type: { $in: ['PO', 'WO'] } }).sort({ createdAt: 1 }).toArray(),
     db.collection('GRN').find({}).sort({ createdAt: 1 }).toArray(),
     db.collection('Project').find({}).project({ name: 1 }).toArray(),
@@ -369,7 +372,11 @@ export async function exportPaymentAccountFms(): Promise<number> {
     db.collection('PaymentMilestone').find({}).toArray(),
     // Every vendor KYC document on file — Accounts needs these attached to each payment.
     db.collection('ProcurementDocument').find({ type: 'KYC' }).toArray(),
+    // Vendor emails for the FMS "Vendor Email" column.
+    db.collection('Vendor').find({}).project({ email: 1 }).toArray(),
   ]);
+  const grnsCol = db.collection('GRN');
+  const vendorEmailById = new Map(vendors.map((v) => [String(v._id), (v.email as string) || '']));
   const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
   const userById = new Map(users.map((u) => [String(u._id), u as { name: string; email: string }]));
   const grnsByDoc = new Map<string, Record<string, unknown>[]>();
@@ -458,12 +465,20 @@ export async function exportPaymentAccountFms(): Promise<number> {
         d.status ?? '',                                          // Z PO Status
         kycCell,                                                 // AA Vendor KYC (all docs)
         m ? String(m._id) : '',                                  // AB Milestone Ref (reverse-sync key)
+        vendorEmailById.get(String(d.vendorId)) ?? '',           // AC Vendor Email
+        // AD Approval Status — the management release decision (empty for milestone-
+        // only rows that have no GRN/payment yet).
+        g ? (g.releaseStatus === 'APPROVED' ? 'Approved' : g.releaseStatus === 'ON_HOLD' ? 'On Hold' : g.releaseStatus === 'RESUBMITTED' ? 'Re-submitted' : 'Pending') : '',
+        // AE Approval Form — the no-login link management opens to Approve / On-Hold.
+        g?.releaseToken ? `${base}/api/public/payment-approval/${g.releaseToken}` : '',
       ];
     };
 
     // 1) one row per approved GRN (with its linked milestone's payment status)
     const shownMs = new Set<string>();
     for (const g of gs) {
+      // Ensure a stable no-login approval-form token for this payment.
+      if (!g.releaseToken) { g.releaseToken = randomUUID(); await grnsCol.updateOne({ _id: g._id } as never, { $set: { releaseToken: g.releaseToken } }); }
       const m = milestoneOf(g);
       if (m) shownMs.add(String(m._id));
       rows.push(makeRow(g, m));

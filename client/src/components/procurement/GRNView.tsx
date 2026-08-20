@@ -99,6 +99,9 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
                     {g.paymentStatus
                       ? <span className={`badge ${g.paymentStatus === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{g.paymentStatus === 'TRIGGERED' ? 'Triggered' : g.paymentStatus === 'PAID' ? 'Paid' : 'Closed'}</span>
                       : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
+                    {/* Management release decision from the FMS "Approval Form" link,
+                        shown right next to the payment status (Approved / On Hold). */}
+                    {g.releaseStatus && <span className={`badge ml-1 ${g.releaseStatus === 'APPROVED' ? 'bg-green-100 text-green-700' : g.releaseStatus === 'RESUBMITTED' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>{g.releaseStatus === 'APPROVED' ? '✓ Approved' : g.releaseStatus === 'RESUBMITTED' ? '↻ Re-submitted' : '⏸ On Hold'}</span>}
                     {(g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl) && (
                       <div className="mt-0.5 text-[10px] leading-tight text-orange-600">tax invoice pending</div>
                     )}
@@ -214,6 +217,19 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
     onSuccess: () => { setMsg('Marked paid — the entry stays open until the tax invoice is uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Management put this payment On Hold from the FMS Approval Form; after the
+  // correction, re-submit clears the hold so it goes back to the approver.
+  const resubmitRelease = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/grns/${grnId}/resubmit-approval`, {})).data.grn,
+    onSuccess: (grn) => { setG(structuredClone(grn)); setMsg('Re-submitted for approval — sent back to the approver as Pending.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  // Resend the Approval Form email to the payment approver(s) — manual reminder.
+  const remindApproval = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/grns/${grnId}/remind-approval`, {})).data,
+    onSuccess: () => setMsg('Approval reminder email sent to the payment approver(s).'),
+    onError: (e) => setMsg(errMsg(e)),
+  });
   // The tax invoice arrives AFTER approval on a payment GRN (§6), so recording its
   // number/date/value is the closing step — not an amendment. This patches ONLY
   // those fields, which the server accepts without an amendment reason.
@@ -313,6 +329,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf`, `${g?.grnNumber || 'GRN'}.pdf`)}>📄 Download PDF</button>}
           {/* Internal copy with the FINAL APPROVAL stamp; clean one goes to the vendor. */}
           {g.status === 'APPROVED' && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/grns/${grnId}/pdf?approvals=1`, `${g?.grnNumber || 'GRN'} - Approved.pdf`)}>🕒 With Approval</button>}
+          {/* Resend the Approval Form email to the payment approver(s) while the
+              decision is still pending / on hold. */}
+          {isPaymentGrn && canEditGrn && g.releaseStatus !== 'APPROVED' && <button className="btn-outline text-sm" disabled={remindApproval.isPending} onClick={() => remindApproval.mutate()}>📧 Send Reminder</button>}
           {approved && canEditGrn && !amending && <button className="btn-outline text-sm" onClick={() => { setAmending(true); setMsg(''); }}>✎ Amend</button>}
           {amending && <button className="btn-outline text-sm" onClick={() => { setAmending(false); setAmendRemark(''); setG(structuredClone(grnQ.data!.grn)); }}>Cancel amend</button>}
           {editable && (
@@ -341,6 +360,24 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           <div className="text-sm font-semibold text-orange-800">⏸ On hold — correct this and resubmit</div>
           {g.rejectionReason && <div className="mt-1 text-sm text-orange-900">{g.rejectionReason}</div>}
           <div className="mt-1 text-[11px] text-orange-700">Fix the points above, Save, then Submit again for approval.</div>
+        </div>
+      )}
+      {/* Management put the PAYMENT on hold from the FMS Approval Form — show what
+          to correct, and let the creator re-submit once fixed. */}
+      {g.releaseStatus === 'ON_HOLD' && (
+        <div className="rounded-lg border border-orange-300 bg-orange-50 px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-orange-800">⏸ Payment put On Hold by management{g.releaseBy ? ` · ${g.releaseBy}` : ''}{g.releaseAt ? ` · ${fmtDate(g.releaseAt)}` : ''}</div>
+            {canEditGrn && <button className="btn-primary text-sm" disabled={resubmitRelease.isPending} onClick={() => { if (confirm('Re-submit this payment for approval? The On Hold is cleared and it goes back to the approver as Pending.')) resubmitRelease.mutate(); }}>↻ Re-submit for approval</button>}
+          </div>
+          {g.releaseRemark && <div className="mt-1 text-sm text-orange-900"><span className="font-semibold">What to correct:</span> {g.releaseRemark}</div>}
+          <div className="mt-1 text-[11px] text-orange-700">Correct the above, Save your changes, then re-submit — it returns to the approver as Pending.</div>
+        </div>
+      )}
+      {/* After the creator re-submits a held payment — awaiting the approver again. */}
+      {g.releaseStatus === 'RESUBMITTED' && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm text-blue-800">
+          ↻ Re-submitted for approval{g.releaseAt ? ` on ${fmtDate(g.releaseAt)}` : ''} — awaiting management’s decision on the Approval Form.
         </div>
       )}
       {askResubmit && (
