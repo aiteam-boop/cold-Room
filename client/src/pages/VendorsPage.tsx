@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth';
 import { EmptyState, Modal, Spinner } from '../components/ui';
 import { fmtDate } from '../lib/format';
 import VendorDetail from '../components/procurement/VendorDetail';
+import ViewToggle, { useViewMode } from '../components/ViewToggle';
 
 const KYC_DOT: Record<string, string> = { Complete: 'bg-green-500', Partial: 'bg-amber-500', Missing: 'bg-red-500' };
 
@@ -17,6 +18,7 @@ export default function VendorsPage() {
   const [editing, setEditing] = useState<any | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
   const [q, setQ] = useState('');
+  const [view, setView] = useViewMode('vendorsView.page', 'grid');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['all-vendors'],
@@ -42,6 +44,7 @@ export default function VendorsPage() {
           <p className="text-sm text-slate-500">Company-wide vendor database with KYC and site mapping.</p>
         </div>
         <div className="flex items-center gap-2">
+          <ViewToggle view={view} onChange={setView} />
           <input className="input w-56" placeholder="Search vendor…" value={q} onChange={(e) => setQ(e.target.value)} />
           {canManage && <button className="btn-primary" onClick={() => setShow(true)}>+ Add Vendor</button>}
         </div>
@@ -49,6 +52,31 @@ export default function VendorsPage() {
 
       {vendors.length === 0 ? (
         <EmptyState title="No vendors yet" hint="Add vendors/contractors here; map them to project sites so they appear in PO/WO creation." action={canManage ? <button className="btn-primary mt-2" onClick={() => setShow(true)}>+ Add Vendor</button> : undefined} />
+      ) : view === 'cards' ? (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {/* Click a card to view details; Edit/Delete stop propagation. */}
+          {vendors.map((v) => (
+            <div key={v.id} role="button" onClick={() => setViewing(v.id)} className="card cursor-pointer p-4 transition-shadow hover:shadow-md">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 truncate font-semibold text-navy">{v.name}</div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {canManage && <button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button>}
+                  {canManage && <button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button>}
+                  <span className="badge bg-slate-100 text-slate-600">{v.type}</span>
+                </div>
+              </div>
+              <div className="mt-1 flex items-center gap-1 text-xs text-slate-500">
+                <span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} /> KYC {v.kycStatus}
+              </div>
+              <div className="mt-2 space-y-0.5 text-xs text-slate-400">
+                {(v.contactPerson || v.phones) && <div className="truncate">Contact: {v.contactPerson}{v.phones ? ` · ${v.phones}` : ''}</div>}
+                {v.gstin && <div>GSTIN: {v.gstin}</div>}
+                <div>Sites: {v.siteMappings?.map((s: any) => s.project?.name).filter(Boolean).join(', ') || '—'}</div>
+                <div>{v._count?.docs ?? 0} PO/WO · added {fmtDate(v.createdAt)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
