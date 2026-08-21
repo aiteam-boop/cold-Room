@@ -269,9 +269,24 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const approvers = approverIds.length ? await prisma.user.findMany({ where: { id: { in: approverIds } }, select: { id: true, name: true } }) : [];
   const nameById = new Map(approvers.map((a) => [a.id, a.name]));
 
+  // Physical goods receipts (GRN-QAS) raised against each approved PO/WO — powers
+  // the "GRN" action (one opens directly; several open a popup list).
+  const docIds = docs.map((d) => d.id);
+  const goodsReceipts = docIds.length
+    ? await prisma.goodsReceipt.findMany({ where: { docId: { in: docIds } }, orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, receivedDate: true, docId: true } })
+    : [];
+  const grByDoc = new Map<string, { id: string; grnNumber: string; status: string; receivedDate: Date | null }[]>();
+  for (const g of goodsReceipts) {
+    const arr = grByDoc.get(g.docId!) ?? [];
+    arr.push({ id: g.id, grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate });
+    grByDoc.set(g.docId!, arr);
+  }
+
   const items = [
-    ...docs.map((d) => ({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis) })),
-    ...grns.map((g) => ({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null })),
+    // `label` is what the UI shows (PO/WO, or "Payment" for a PAY-### record); `kind`
+    // stays PO/WO/GRN so the PDF path + pipeline logic keep working.
+    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [] })),
+    ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, goodsReceipts: [] })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 
   res.json({ items: maskFinancials(items, req.account) });

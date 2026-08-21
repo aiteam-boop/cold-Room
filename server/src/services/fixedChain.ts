@@ -23,9 +23,30 @@ export interface ChainStep { approverId: string; approverName: string; approverR
 export interface ResolvedChain {
   approverIds: string[];
   steps: ChainStep[];
+  /**
+   * The chain grouped into ordered STEPS. Each inner array is one step: when it
+   * holds 2+ approvers they are all notified at once and ANY ONE approving passes
+   * the step (Approval Chain · same "order"). A single-approver step is just a
+   * one-element group, so a plain sequential chain is `[[a],[b],[c]]`.
+   */
+  groups: string[][];
   /** 'fixed' = admin chain, 'matrix' = derived from value bands, 'none' = nothing configured. */
   source: 'fixed' | 'matrix' | 'none';
   scope: 'project' | 'global' | 'none';
+}
+
+/** Group ordered rows into step-buckets, preserving order and de-duplicating ids. */
+export function groupByOrder(rows: { approverId: string; order: number }[]): string[][] {
+  const seen = new Set<string>();
+  const byOrder = new Map<number, string[]>();
+  for (const r of [...rows].sort((a, b) => a.order - b.order)) {
+    if (seen.has(r.approverId)) continue;
+    seen.add(r.approverId);
+    const bucket = byOrder.get(r.order) ?? [];
+    bucket.push(r.approverId);
+    byOrder.set(r.order, bucket);
+  }
+  return [...byOrder.keys()].sort((a, b) => a - b).map((o) => byOrder.get(o)!);
 }
 
 /** The admin-configured chain for a doc type. Project rules override globals. */
@@ -58,18 +79,27 @@ export async function resolveAutoChain(docType: ChainDocType, projectId: string,
 
   if (fixed.length) {
     const steps: ChainStep[] = fixed.map((r) => ({ approverId: r.approverId, approverName: r.approverName, approverRole: r.approverRole }));
-    // Never let the fixed chain bypass a value-mandated approver.
+    // Preserve the admin's step grouping (approvers sharing an `order` = one
+    // any-one-approves step).
+    const groups = groupByOrder(fixed.map((r) => ({ approverId: r.approverId, order: r.order })));
+    // Never let the fixed chain bypass a value-mandated approver — append each
+    // missing mandatory approver as its own trailing (single-person) step.
     const present = new Set(steps.map((s) => s.approverId));
     for (const m of matrix.steps) {
-      if (!present.has(m.approverId)) steps.push({ approverId: m.approverId, approverName: m.approverName, approverRole: m.approverRole });
+      if (!present.has(m.approverId)) {
+        steps.push({ approverId: m.approverId, approverName: m.approverName, approverRole: m.approverRole });
+        groups.push([m.approverId]);
+        present.add(m.approverId);
+      }
     }
-    return { approverIds: steps.map((s) => s.approverId), steps, source: 'fixed', scope };
+    return { approverIds: steps.map((s) => s.approverId), steps, groups, source: 'fixed', scope };
   }
 
   if (matrix.configured && matrix.steps.length) {
     const steps = matrix.steps.map((s) => ({ approverId: s.approverId, approverName: s.approverName, approverRole: s.approverRole }));
-    return { approverIds: steps.map((s) => s.approverId), steps, source: 'matrix', scope: matrix.scope === 'none' ? 'none' : matrix.scope };
+    // The value matrix is one approver per band → one per step.
+    return { approverIds: steps.map((s) => s.approverId), steps, groups: steps.map((s) => [s.approverId]), source: 'matrix', scope: matrix.scope === 'none' ? 'none' : matrix.scope };
   }
 
-  return { approverIds: [], steps: [], source: 'none', scope: 'none' };
+  return { approverIds: [], steps: [], groups: [], source: 'none', scope: 'none' };
 }

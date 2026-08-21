@@ -165,6 +165,54 @@ export function kycStatus(docs: { kycKind: string | null }[]): 'Complete' | 'Par
   return 'Partial';
 }
 
+// ── KYC completeness score (Procurement PRD §4 · Workstream C) ────────────────
+// One checklist of the things a vendor needs before we can raise a PO and *pay*
+// them. Each item is worth an equal share of the score; the mandatory ones gate
+// usability — a vendor missing any mandatory item is "not usable" (a payment
+// can't go out, e.g. no email = no payment intimation, no bank = nowhere to pay).
+export interface KycScoreItem { key: string; label: string; done: boolean; mandatory: boolean }
+export interface KycScore {
+  items: KycScoreItem[];
+  completed: number;
+  total: number;
+  percent: number;
+  mandatoryMissing: string[];  // labels of the mandatory items still missing
+  usable: boolean;             // true only when every mandatory item is present
+  level: 'Complete' | 'Usable' | 'Incomplete' | 'Missing';
+}
+
+export function kycScore(
+  vendor: { email?: string | null; gstin?: string | null; bankAccount?: string | null; ifsc?: string | null; bankAccounts?: unknown },
+  docs: { kycKind: string | null }[],
+): KycScore {
+  const kinds = new Set(docs.map((d) => d.kycKind).filter(Boolean) as KycKind[]);
+  // Legacy vendors uploaded docs before `kycKind` existed — count 4+ untyped docs
+  // as covering the three required certificates, so they don't regress overnight.
+  const legacyComplete = kinds.size === 0 && docs.length >= 4;
+  const hasDoc = (k: KycKind) => kinds.has(k) || legacyComplete;
+  const bankOk = (() => {
+    const accs = normalizeBankAccounts(vendor.bankAccounts);
+    if (accs.some((a) => a.accountNo && a.ifsc)) return true;
+    return Boolean(vendor.bankAccount && vendor.ifsc);
+  })();
+  const filled = (v?: string | null) => Boolean(v && v.trim());
+  const items: KycScoreItem[] = [
+    { key: 'GST_CERTIFICATE', label: 'GST Certificate', done: hasDoc('GST_CERTIFICATE'), mandatory: true },
+    { key: 'PAN_CARD', label: 'PAN Card', done: hasDoc('PAN_CARD'), mandatory: true },
+    { key: 'CANCELLED_CHEQUE', label: 'Cancelled Cheque', done: hasDoc('CANCELLED_CHEQUE'), mandatory: true },
+    { key: 'BANK_ACCOUNT', label: 'Bank Account', done: bankOk, mandatory: true },
+    { key: 'EMAIL', label: 'Email ID', done: filled(vendor.email), mandatory: true },
+    { key: 'GST_NUMBER', label: 'GST Number', done: filled(vendor.gstin), mandatory: false },
+  ];
+  const completed = items.filter((i) => i.done).length;
+  const total = items.length;
+  const percent = Math.round((completed / total) * 100);
+  const mandatoryMissing = items.filter((i) => i.mandatory && !i.done).map((i) => i.label);
+  const usable = mandatoryMissing.length === 0;
+  const level: KycScore['level'] = completed === 0 ? 'Missing' : completed === total ? 'Complete' : usable ? 'Usable' : 'Incomplete';
+  return { items, completed, total, percent, mandatoryMissing, usable, level };
+}
+
 /**
  * Derive the legacy scalar columns from the rich profile, so PO snapshots and
  * every existing read path (DocPaper, PDF, sheets sync) keep working.

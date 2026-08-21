@@ -73,7 +73,7 @@ export function vendorBlock(v: {
 }
 
 // Inline-editable, PDF-styled document with the company's bordered grid layout.
-export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[] }) {
+export default function DocPaper({ d, setD, editable, vendors, boqHeads = [] }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[]; boqHeads?: string[] }) {
   const isWO = d.type === 'WO';
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
   // GST charged PER LINE at that line's own rate (l.gstPct, else doc default);
@@ -98,6 +98,13 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
   const setLine = (i: number, patch: any) => setD({ ...d, lineItems: d.lineItems.map((l: any, idx: number) => (idx === i ? { ...l, ...patch } : l)) });
   const addLine = (lead = false) => setD({ ...d, lineItems: [...d.lineItems, { description: '', qty: 0, unitPrice: 0, totalPrice: 0, uom: isWO ? 'Nos.' : null, isLeadTime: lead, leadTimeText: lead ? '7 Days' : null }] });
   const delLine = (i: number) => setD({ ...d, lineItems: d.lineItems.filter((_: any, idx: number) => idx !== i) });
+  // "Head then many items" (D2): assign one head to several lines at once. Touches
+  // ONLY boqHead; `onlyEmpty` leaves lines that already have a head untouched.
+  const [bulkHead, setBulkHead] = useState('');
+  const applyHeadToLines = (head: string, onlyEmpty: boolean) => {
+    if (!head) return;
+    setD({ ...d, lineItems: d.lineItems.map((l: any) => (l.isLeadTime || (onlyEmpty && l.boqHead) ? l : { ...l, boqHead: head })) });
+  };
 
   // User-added item columns (e.g. HSN Code, Make, Size). The definitions live on
   // the doc; each row's value lives in its own customValues map.
@@ -215,6 +222,19 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
         </div>
       </div>
 
+      {/* Head then many items (D2) — internal helper bar, never on the PDF. */}
+      {editable && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded bg-amber-50/70 px-2 py-1.5 text-[10px] print:hidden">
+          <span className="font-medium text-amber-700">🔒 Set head for many:</span>
+          <select className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[10px]" value={bulkHead} onChange={(e) => setBulkHead(e.target.value)}>
+            <option value="">— choose a head —</option>
+            {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
+          </select>
+          <button className="rounded border border-slate-300 bg-white px-1.5 py-0.5 disabled:opacity-40" disabled={!bulkHead} onClick={() => applyHeadToLines(bulkHead, true)} title="Fill only the lines that have no head yet">Apply to empty</button>
+          <button className="rounded border border-slate-300 bg-white px-1.5 py-0.5 disabled:opacity-40" disabled={!bulkHead} onClick={() => applyHeadToLines(bulkHead, false)} title="Overwrite the head on every line">Apply to all</button>
+          <span className="text-slate-400">(internal — not on PDF)</span>
+        </div>
+      )}
       {/* Line items table (fully bordered) */}
       <table className={`w-full table-fixed border-collapse border ${B} text-[10.5px]`}>
         <thead>
@@ -248,7 +268,24 @@ export default function DocPaper({ d, setD, editable, vendors }: { d: any; setD:
           ) : (
             <tr key={i} className="align-top">
               <td className={`border ${B} p-1 text-center`}>{i + 1}</td>
-              <td className={`border ${B} p-1`}><TA value={l.description} onChange={(x: string) => setLine(i, { description: x })} rows={Math.min((l.description || '').split('\n').length + 1, 10)} placeholder="Description / specification" /></td>
+              <td className={`border ${B} p-1`}>
+                <TA value={l.description} onChange={(x: string) => setLine(i, { description: x })} rows={Math.min((l.description || '').split('\n').length + 1, 10)} placeholder="Description / specification" />
+                {/* BOQ head — INTERNAL: shown here for convenience but NEVER printed on
+                    the vendor PO PDF (the PDF is generated server-side without it). */}
+                <div className="mt-1 flex items-center gap-1 rounded bg-amber-50/60 px-1 py-0.5 text-[10px] text-slate-500 print:hidden">
+                  <span className="whitespace-nowrap font-medium text-amber-700">🔒 Head *</span>
+                  {editable ? (
+                    <select className={`min-w-0 flex-1 rounded border bg-white px-1 py-0.5 text-[10px] ${!l.boqHead ? 'border-amber-400' : 'border-slate-200'}`} value={l.boqHead || ''} onChange={(e) => setLine(i, { boqHead: e.target.value || null })}>
+                      <option value="">— select head —</option>
+                      {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
+                      {l.boqHead && !boqHeads.includes(l.boqHead) && <option value={l.boqHead}>{l.boqHead}</option>}
+                    </select>
+                  ) : (
+                    <span className={l.boqHead ? 'text-slate-600' : 'text-amber-600'}>{l.boqHead || 'not set'}</span>
+                  )}
+                  <span className="whitespace-nowrap text-slate-400">(internal — not on PDF)</span>
+                </div>
+              </td>
               {customCols.map((c) => (
                 <td key={c.key} className={`border ${B} p-1`}><T value={l.customValues?.[c.key] ?? ''} onChange={(x: string) => setCell(i, c.key, x)} className="text-center" /></td>
               ))}

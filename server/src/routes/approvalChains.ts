@@ -72,18 +72,22 @@ router.put('/', requireAdmin, asyncHandler(async (req, res) => {
     }
   }
 
-  // Replace the chain for this (docType, projectId) scope.
+  // Replace the chain for this (docType, projectId) scope. Approvers sharing an
+  // `order` are one step (any one of them can approve it). Normalise the sent
+  // orders to a contiguous 1..n while PRESERVING which approvers share a step.
   await prisma.approvalChainConfig.deleteMany({ where: { docType: b.docType, projectId } });
   if (b.approvers.length) {
+    const distinct = [...new Set(b.approvers.map((a) => a.order))].sort((x, y) => x - y);
+    const orderMap = new Map(distinct.map((o, i) => [o, i + 1]));
     await prisma.approvalChainConfig.createMany({
       data: b.approvers
         .slice()
         .sort((x, y) => x.order - y.order)
-        .map((a, i) => {
+        .map((a) => {
           const u = byId.get(a.approverId)!;
           const prof = parseApprover(u.approver);
           const approvalRole = prof.approvalRole || (isAdmin(u.role) ? 'Admin' : u.role ?? null);
-          return { docType: b.docType, projectId, approverId: a.approverId, approverName: u.name, approverRole: approvalRole, order: i + 1, isActive: a.isActive };
+          return { docType: b.docType, projectId, approverId: a.approverId, approverName: u.name, approverRole: approvalRole, order: orderMap.get(a.order)!, isActive: a.isActive };
         }),
     });
   }

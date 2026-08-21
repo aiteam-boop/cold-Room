@@ -423,6 +423,14 @@ model ProcurementLineItem {
   boqItemId   String?
   boqItem     BOQItem? @relation(fields: [boqItemId], references: [id])
 
+  // BOQ head (heading/category) this line rolls up under — Procurement PRD §5 (D2).
+  // INTERNAL ONLY: mandatory to issue a PO, never printed on the vendor PDF. The
+  // linked boqItem (above) is the finer "sub-item"; the head is the coarse bucket
+  // (e.g. "Refrigeration Units"). "Other" is a valid value when the exact head
+  // isn't known. Null = legacy line issued before head-mapping existed (fixed via
+  // the Head Mapping view, D3).
+  boqHead     String?
+
   grnLines    GRNLineItem[]
 
   @@index([docId])

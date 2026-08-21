@@ -452,7 +452,7 @@ export async function exportPaymentAccountFms(): Promise<number> {
         // ── P onwards: Cold Room detail ──
         projName.get(String(d.projectId)) ?? '',                 // P Project
         d.docNumber ?? '',                                       // Q PO Number
-        fileUrl(`/api/projects/${d.projectId}/procurement/docs/${id}/pdf`, base), // R PO PDF
+        fileUrl(`/api/projects/${d.projectId}/procurement/docs/${id}/pdf`, base) + '&approvals=1', // R PO PDF (with approval trail — Accounts needs the signed copy)
         (g?.grnNumber ?? '') as string,                          // S GRN Number
         g ? fileUrl(`/api/projects/${g.projectId}/procurement/grns/${String(g._id)}/pdf`, base) : '', // T GRN PDF
         Number(g?.invoiceValue) || 0,                            // U Invoiced (this GRN)

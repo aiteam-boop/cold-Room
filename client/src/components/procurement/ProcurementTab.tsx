@@ -4,6 +4,7 @@ import DocList from './DocList';
 import GRNView from './GRNView';
 import VendorsView from './VendorsView';
 import DocumentsView from './DocumentsView';
+import HeadMappingView from './HeadMappingView';
 
 const SUBS = [
   { key: 'dashboard', label: 'Payment Pipeline' },
@@ -11,6 +12,7 @@ const SUBS = [
   { key: 'wo', label: 'Work Orders' },
   { key: 'grn', label: 'GRNs' },
   { key: 'vendors', label: 'Vendors' },
+  { key: 'heads', label: 'BOQ Heads' },
   { key: 'documents', label: 'Documents' },
 ] as const;
 
@@ -30,6 +32,7 @@ export default function ProcurementTab({ projectId, role }: { projectId: string;
       {sub === 'wo' && <DocList projectId={projectId} role={role} type="WO" />}
       {sub === 'grn' && <GRNView projectId={projectId} role={role} />}
       {sub === 'vendors' && <VendorsView projectId={projectId} role={role} />}
+      {sub === 'heads' && <HeadMappingView projectId={projectId} role={role} />}
       {sub === 'documents' && <DocumentsView projectId={projectId} role={role} />}
     </div>
   );

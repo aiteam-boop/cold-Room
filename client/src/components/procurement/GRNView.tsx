@@ -270,9 +270,10 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   const amendments: { at: string; byName: string; byEmail: string; remark: string }[] = g.amendments ?? [];
 
   // Approval-chain state (mirrors DocBuilder).
-  const approval = grnQ.data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
+  const approval = grnQ.data?.approval as { steps: any[]; total: number; currentApproverId?: string | null; currentApproverIds?: string[] } | undefined;
   const hasChain = (approval?.total ?? 0) > 0;
-  const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
+  const currentApprovers = approval?.currentApproverIds ?? (approval?.currentApproverId ? [approval.currentApproverId] : []);
+  const myTurn = !!user?.id && currentApprovers.includes(user.id);
   const canAct = g.status === 'OPEN' && (hasChain ? (myTurn || canApprove) : canApprove);
   // Payment (§3): PO milestones for the term dropdown + the advance already paid,
   // which auto-captures so the balance can compute.

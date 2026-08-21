@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { EmptyState, Spinner } from '../components/ui';
+import { EmptyState, Spinner, Modal } from '../components/ui';
 import { fmtDate, inr } from '../lib/format';
 import ProcurementPipeline from '../components/procurement/ProcurementPipeline';
 
@@ -36,10 +36,13 @@ function reminderCountdown(iso: string, now: number): string {
 
 interface ApprovedItem {
   kind: 'PO' | 'WO' | 'GRN';
+  label?: string; // display label — 'PO' | 'WO' | 'Payment' | 'GRN'
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string; finalAmount?: number | null;
   approvedAt?: string | null; approvedBy?: string | null;
   pis?: { term: string; piNumber: string | null; piUrl: string }[];
+  // Physical goods receipts raised against this PO/WO (for the GRN action + popup).
+  goodsReceipts?: { id: string; grnNumber: string; status: string; receivedDate?: string | null }[];
 }
 
 // "My Approvals" — documents where the signed-in user is the current approver.
@@ -53,6 +56,8 @@ export default function ApprovalsPage() {
   // Which Approved rows have their phase pipeline expanded (lazy-loaded on open).
   const [openPipe, setOpenPipe] = useState<Set<string>>(new Set());
   const togglePipe = (key: string) => setOpenPipe((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  // When a PO/WO has several goods receipts, the "GRN" action opens this popup list.
+  const [grnPopup, setGrnPopup] = useState<ApprovedItem | null>(null);
   // Re-render every 30s so the "next reminder in …" countdowns tick down live.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
@@ -197,7 +202,7 @@ export default function ApprovalsPage() {
           <div className="card overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-                <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Approved</th><th>Approved by</th><th className="text-right">Action</th></tr>
+                <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Approved</th><th>Approved by</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>
               </thead>
               <tbody>
                 {(approvedQ.data ?? []).map((d) => {
@@ -209,7 +214,7 @@ export default function ApprovalsPage() {
                   <tr className="border-b border-slate-100 hover:bg-slate-50">
                     <td className="px-4 py-2">
                       {canPipe && <button className="mr-1 text-slate-400 hover:text-navy" title={open ? 'Hide pipeline' : 'Show phases (Approval → Payment → GRN)'} onClick={() => togglePipe(key)}>{open ? '▾' : '▸'}</button>}
-                      <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
+                      <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
                     </td>
                     <td className="text-slate-600">{d.projectName}</td>
@@ -217,19 +222,26 @@ export default function ApprovalsPage() {
                     <td className="text-right font-medium">{money(d.finalAmount)}</td>
                     <td className="text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
                     <td className="text-slate-500">{d.approvedBy || '—'}</td>
+                    {/* Goods receipts against this PO/WO — one opens directly, several open a popup. */}
+                    <td className="text-slate-500">
+                      {(d.goodsReceipts?.length ?? 0) === 0 ? <span className="text-slate-300">—</span>
+                        : d.goodsReceipts!.length === 1
+                          ? <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/goods-receipts/${d.goodsReceipts![0].id}/pdf`)}>📦 {d.goodsReceipts![0].grnNumber}</button>
+                          : <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => setGrnPopup(d)}>📦 {d.goodsReceipts!.length} GRNs</button>}
+                    </td>
                     <td className="px-2 text-right">
                       <div className="flex flex-wrap justify-end gap-2">
                         {/* PI(s) uploaded on the PO — beside View PO. */}
                         {d.pis?.map((p, i) => (
                           <a key={i} href={p.piUrl} target="_blank" rel="noreferrer" title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</a>
                         ))}
-                        <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.kind}</button>
+                        <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.label ?? d.kind}</button>
                       </div>
                     </td>
                   </tr>
                   {canPipe && open && (
                     <tr className="border-b border-slate-100 bg-slate-50/50">
-                      <td colSpan={7} className="px-4 py-3"><ProcurementPipeline projectId={d.projectId} docId={d.docId} /></td>
+                      <td colSpan={8} className="px-4 py-3"><ProcurementPipeline projectId={d.projectId} docId={d.docId} /></td>
                     </tr>
                   )}
                   </Fragment>
@@ -239,6 +251,24 @@ export default function ApprovalsPage() {
             </table>
           </div>
         )
+      )}
+
+      {/* Popup listing all goods receipts for a PO/WO (when there are several). */}
+      {grnPopup && (
+        <Modal title={`Goods Receipts — ${grnPopup.number}`} onClose={() => setGrnPopup(null)}>
+          <div className="space-y-2">
+            {(grnPopup.goodsReceipts ?? []).map((g) => (
+              <div key={g.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                <span>
+                  <span className="font-medium text-navy">{g.grnNumber}</span>
+                  <span className={`badge ml-2 ${g.status === 'RECEIVED' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{g.status === 'RECEIVED' ? 'Received' : 'Draft'}</span>
+                  {g.receivedDate && <span className="ml-2 text-xs text-slate-400">{fmtDate(g.receivedDate)}</span>}
+                </span>
+                <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${grnPopup.projectId}/procurement/goods-receipts/${g.id}/pdf`)}>📄 View</button>
+              </div>
+            ))}
+          </div>
+        </Modal>
       )}
     </div>
   );

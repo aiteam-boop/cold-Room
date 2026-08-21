@@ -34,6 +34,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [view, setView] = useState<'document' | 'form'>('document');
   const [showChain, setShowChain] = useState(false);
+  const [bulkHead, setBulkHead] = useState(''); // "head then many items" quick-assign
   // Post-approval amendment: an approved doc is locked until the editor opts to
   // amend it, which then requires a written reason on save.
   const [amending, setAmending] = useState(false);
@@ -48,6 +49,17 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   // Same queryKey + shape as BOQTab so the React Query cache isn't corrupted.
   const boqQ = useQuery({ queryKey: ['boq', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/boq`)).data });
   const boqItems: any[] = (boqQ.data?.items ?? []).filter((i: any) => !i.isGroup);
+  // BOQ heads (headings/categories) a PO line can roll up under — Procurement PRD
+  // §5 (D2). Sourced from the project's BOQ categories + any category on a BOQ
+  // line. Internal only — never printed on the vendor PDF.
+  const boqHeads: string[] = (() => {
+    const set = new Set<string>();
+    (boqQ.data?.categories ?? []).forEach((c: any) => { const n = typeof c === 'string' ? c : c?.category; if (n) set.add(n); });
+    boqItems.forEach((b) => { if (b.category) set.add(b.category); });
+    // Head is a real BOQ heading only — the "Other" bypass lives on the BOQ Item
+    // (sub-item) dropdown, not here. "Miscellaneous" is the genuine catch-all head.
+    return [...set].sort((a, b) => a.localeCompare(b));
+  })();
   useEffect(() => { if (data?.doc) setD(structuredClone(data.doc)); }, [data]);
 
   const save = useMutation({
@@ -62,7 +74,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       payGstInclusive: !!d.payGstInclusive,
       customColumns: d.customColumns ?? [],
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null, boqHead: l.boqHead ?? null })),
       // Only sent when amending an approved doc — the server logs it and requires it.
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,
@@ -111,9 +123,11 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const amendments: { at: string; byName: string; byEmail: string; remark: string }[] = d.amendments ?? [];
 
   // Approval-chain state. Whose turn it is drives which action buttons show.
-  const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
+  const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null; currentApproverIds?: string[] } | undefined;
   const hasChain = (approval?.total ?? 0) > 0;
-  const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
+  // A step can have several approvers (any one approves) — my turn if I'm any of them.
+  const currentApprovers = approval?.currentApproverIds ?? (approval?.currentApproverId ? [approval.currentApproverId] : []);
+  const myTurn = !!user?.id && currentApprovers.includes(user.id);
   // Show Approve/On Hold to the current approver, or (legacy, no chain) to canApprove holders.
   const canAct = d.status === 'PENDING_APPROVAL' && (hasChain ? (myTurn || canApprove) : canApprove);
   // Approvers never reject: they put the document ON HOLD with a note saying what
@@ -154,6 +168,13 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   }
   function addLine(lead = false) { setD((p: any) => ({ ...p, lineItems: [...p.lineItems, { description: '', qty: 0, unitPrice: 0, totalPrice: 0, uom: isWO ? 'Nos.' : null, isLeadTime: lead, leadTimeText: lead ? '7 Days' : null }] })); }
   function delLine(i: number) { setD((p: any) => ({ ...p, lineItems: p.lineItems.filter((_: any, idx: number) => idx !== i) })); }
+  // "Head then many items" (PRD §5/D2): assign one head to several lines at once.
+  // Touches ONLY boqHead — never description/qty/price/link. `onlyEmpty` protects
+  // lines that already have a head.
+  function applyHeadToLines(head: string, onlyEmpty: boolean) {
+    if (!head) return;
+    setD((p: any) => ({ ...p, lineItems: p.lineItems.map((l: any) => (l.isLeadTime || (onlyEmpty && l.boqHead) ? l : { ...l, boqHead: head })) }));
+  }
 
   function selectVendor(id: string) {
     const v = vendorsQ.data?.find((x) => x.id === id);
@@ -164,14 +185,14 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   }
 
   // Linking a PO line to a BOQ item is what makes the BOQ Cost view work
-  // (Sprint PRD §6.3). Description, unit and model are pulled from the BOQ so
-  // they match exactly — Amisha never re-types them.
+  // (Sprint PRD §6.3). It ONLY sets the link — the user's typed description/spec is
+  // left untouched (they don't want it overwritten). The BOQ head auto-fills from
+  // the item's category when none is chosen; the unit fills in too.
   async function selectBoqItem(i: number, boqItemId: string) {
     if (!boqItemId) { setLine(i, { boqItemId: null }); return; }
     const b = boqItems.find((x) => x.id === boqItemId);
     if (!b) return;
-    const description = [b.description, b.makeModel].filter(Boolean).join('\n');
-    setLine(i, { boqItemId, description, uom: b.unit ?? null });
+    setLine(i, { boqItemId, uom: b.unit ?? null, ...(!d.lineItems?.[i]?.boqHead && b.category ? { boqHead: b.category } : {}) });
 
     // Auto-suggest this vendor's current rate for the item; Amisha can override.
     if (!d.vendorId) return;
@@ -221,7 +242,13 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
               to the matrix / free-form picker as before. */}
           {editable && (d.status === 'DRAFT' || d.status === 'ON_HOLD') && (
             <button className="btn-primary text-sm" disabled={save.isPending || doAction.isPending}
-              onClick={() => setShowChain(true)}>
+              onClick={() => {
+                // D2: every real (non-lead-time) line must carry a BOQ head before
+                // the PO can be issued. "Other" counts. Save first so the head persists.
+                const miss = (d.lineItems ?? []).filter((l: any) => !l.isLeadTime && l.description?.trim() && !l.boqHead).length;
+                if (miss) { setMsg({ ok: false, t: `Set a BOQ head for every item before submitting — ${miss} line(s) missing. Pick “Other” if the head isn’t known. (Save after setting heads.)` }); return; }
+                setShowChain(true);
+              }}>
               {doAction.isPending ? 'Submitting…' : d.status === 'ON_HOLD' ? 'Resubmit for Approval' : 'Submit for Approval'}
             </button>
           )}
@@ -317,7 +344,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
       )}
 
-      {view === 'document' && <DocPaper d={d} setD={setD} editable={editable} vendors={vendorsQ.data ?? []} />}
+      {view === 'document' && <DocPaper d={d} setD={setD} editable={editable} vendors={vendorsQ.data ?? []} boqHeads={boqHeads} />}
 
       {view === 'form' && <>
       {/* Vendor + header */}
@@ -403,14 +430,27 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         <div className="mb-3 flex items-center justify-between"><div className="text-sm font-semibold text-slate-600">Line Items</div>
           {editable && <div className="flex gap-2"><button className="btn-outline text-xs" onClick={() => addLine(false)}>+ Row</button>{isWO && <button className="btn-outline text-xs" onClick={() => addLine(true)}>+ Lead Time</button>}</div>}
         </div>
+        {/* Head then many items (D2): pick a head once, apply to many lines. */}
+        {editable && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs">
+            <span className="font-medium text-slate-600">Set head for many:</span>
+            <select className="input h-8 w-52 text-xs" value={bulkHead} onChange={(e) => setBulkHead(e.target.value)}>
+              <option value="">— choose a head —</option>
+              {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
+            </select>
+            <button className="btn-outline text-xs disabled:opacity-40" disabled={!bulkHead} onClick={() => applyHeadToLines(bulkHead, true)} title="Fill only the lines that have no head yet">Apply to empty</button>
+            <button className="btn-outline text-xs disabled:opacity-40" disabled={!bulkHead} onClick={() => applyHeadToLines(bulkHead, false)} title="Overwrite the head on every line">Apply to all</button>
+            <span className="text-slate-400">— then adjust any exceptions per row.</span>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="w-8">#</th><th>Description</th><th className="w-52">BOQ Item</th>{isWO && <th className="w-20">UOM</th>}<th className="w-20">Qty</th><th className="w-28">Unit Price</th><th className="w-28 text-right">Total</th>{editable && <th></th>}</tr></thead>
+            <thead className="text-left text-xs uppercase text-slate-400"><tr><th className="w-8">#</th><th>Description</th><th className="w-52">BOQ Item</th><th className="w-40" title="Internal BOQ head — not printed on the vendor PDF">Head *</th>{isWO && <th className="w-20">UOM</th>}<th className="w-20">Qty</th><th className="w-28">Unit Price</th><th className="w-28 text-right">Total</th>{editable && <th></th>}</tr></thead>
             <tbody>
               {d.lineItems.map((l: any, i: number) => l.isLeadTime ? (
                 <tr key={i} className="border-b border-slate-100 bg-purple-50/40">
                   <td className="py-1 text-center text-purple-500">⏱</td>
-                  <td colSpan={isWO ? 4 : 3}><input className="input bg-transparent text-purple-700" disabled={!editable} value={l.leadTimeText || ''} onChange={(e) => setLine(i, { leadTimeText: e.target.value })} placeholder="Lead Time e.g. 7 Days" /></td>
+                  <td colSpan={isWO ? 5 : 4}><input className="input bg-transparent text-purple-700" disabled={!editable} value={l.leadTimeText || ''} onChange={(e) => setLine(i, { leadTimeText: e.target.value })} placeholder="Lead Time e.g. 7 Days" /></td>
                   <td colSpan={2}></td>{editable && <td><button className="text-slate-300 hover:text-red-500" onClick={() => delLine(i)}>✕</button></td>}
                 </tr>
               ) : (
@@ -421,10 +461,19 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                     {/* Optional but strongly recommended: without it this line's cost
                         never reaches the BOQ Cost sheet and shows up as "unlinked". */}
                     <select className="input text-xs" disabled={!editable} value={l.boqItemId || ''} onChange={(e) => selectBoqItem(i, e.target.value)}>
-                      <option value="">— not linked —</option>
+                      <option value="">Other (no specific BOQ item)</option>
                       {boqItems.map((b) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
                     </select>
-                    {!l.boqItemId && !!l.description?.trim() && <div className="mt-0.5 text-[10px] text-amber-600">Unlinked — cost won’t appear in BOQ Cost</div>}
+                    {!l.boqItemId && !!l.description?.trim() && <div className="mt-0.5 text-[10px] text-amber-600">Other — cost won’t appear in BOQ Cost</div>}
+                  </td>
+                  {/* BOQ head (D2) — mandatory to issue, internal only (never on vendor PDF). */}
+                  <td>
+                    <select className={`input text-xs ${!l.boqHead && l.description?.trim() ? 'border-amber-400' : ''}`} disabled={!editable} value={l.boqHead || ''} onChange={(e) => setLine(i, { boqHead: e.target.value || null })}>
+                      <option value="">— select head —</option>
+                      {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
+                      {l.boqHead && !boqHeads.includes(l.boqHead) && <option value={l.boqHead}>{l.boqHead}</option>}
+                    </select>
+                    {!l.boqHead && !!l.description?.trim() && <div className="mt-0.5 text-[10px] text-amber-600">Head required to issue</div>}
                   </td>
                   {isWO && <td>
                     <select className="input" disabled={!editable} value={l.uom || ''} onChange={(e) => setLine(i, { uom: e.target.value })}>

@@ -289,32 +289,46 @@ async function notifyStep(step: { id: string; docType: string; docId: string; ap
 }
 
 // ── Build the chain on submit ────────────────────────────────────────────────
-export async function buildChain(docType: DocType, docId: string, projectId: string, approverIds: string[], actor: ActorInfo) {
-  if (!approverIds.length) throw new Error('Select at least one approver for the chain.');
+// The chain may be given as a flat list of approver ids (one per step, the
+// classic sequential chain) or as GROUPS — each inner array is one step that may
+// hold several approvers, any one of whom can approve it (Approval Chain · same
+// order). A flat list is treated as one approver per step.
+export async function buildChain(docType: DocType, docId: string, projectId: string, chain: string[] | string[][], actor: ActorInfo) {
+  const groups: string[][] = (Array.isArray(chain[0]) ? chain as string[][] : (chain as string[]).map((id) => [id]))
+    .map((g) => g.filter(Boolean))
+    .filter((g) => g.length);
+  const flat = groups.flat();
+  if (!flat.length) throw new Error('Select at least one approver for the chain.');
   const type = approvalTypeFor(docType);
-  const users = await prisma.user.findMany({ where: { id: { in: approverIds }, active: true }, select: { id: true, name: true, email: true, approver: true, role: true } });
+  const users = await prisma.user.findMany({ where: { id: { in: flat }, active: true }, select: { id: true, name: true, email: true, approver: true, role: true } });
   const byId = new Map(users.map((u) => [u.id, u]));
 
-  // Preserve the order the creator chose; validate each is a valid approver.
-  // Admins can approve any document type, so they are always allowed in a chain
-  // even without an explicit approver profile.
-  const steps = approverIds.map((id, i) => {
-    const u = byId.get(id);
-    if (!u) throw new Error('An approver in the chain no longer exists.');
-    const prof = parseApprover(u.approver);
-    const admin = isAdmin(u.role);
-    if (!admin && !approverHandlesType(prof, type)) throw new Error(`${u.name} is not authorised to approve ${type}.`);
-    return { order: i + 1, approverId: u.id, approverName: u.name, approverEmail: u.email, approverRole: prof.approvalRole || (admin ? 'Admin' : null), status: i === 0 ? 'PENDING' : 'WAITING' };
-  });
+  // One row per approver. Everyone in group `gi` shares order gi+1; the whole
+  // first group is PENDING (all notified at once), later groups WAITING. A person
+  // is placed once, at their earliest group. Admins may approve any doc type.
+  const placed = new Set<string>();
+  const rows = groups.flatMap((group, gi) =>
+    group.flatMap((id) => {
+      if (placed.has(id)) return [];
+      placed.add(id);
+      const u = byId.get(id);
+      if (!u) throw new Error('An approver in the chain no longer exists.');
+      const prof = parseApprover(u.approver);
+      const admin = isAdmin(u.role);
+      if (!admin && !approverHandlesType(prof, type)) throw new Error(`${u.name} is not authorised to approve ${type}.`);
+      return [{ order: gi + 1, approverId: u.id, approverName: u.name, approverEmail: u.email, approverRole: prof.approvalRole || (admin ? 'Admin' : null), status: gi === 0 ? 'PENDING' : 'WAITING' }];
+    }),
+  );
 
   // Clear any prior chain (re-submit) then create fresh.
   await prisma.approvalStep.deleteMany({ where: { docType, docId } });
-  await prisma.approvalStep.createMany({ data: steps.map((s) => ({ ...s, docType, docId, projectId })) });
+  await prisma.approvalStep.createMany({ data: rows.map((s) => ({ ...s, docType, docId, projectId })) });
   await logAction(docType, docId, null, actor, 'SUBMITTED');
 
+  // Notify every approver on the first step (any one of them can approve it).
   const doc = await docSummary(docType, docId);
-  const first = await prisma.approvalStep.findFirst({ where: { docType, docId, order: 1 } });
-  if (doc && first) await notifyStep(first, doc, 'NEW');
+  const firstSteps = await prisma.approvalStep.findMany({ where: { docType, docId, order: 1 } });
+  if (doc) for (const s of firstSteps) await notifyStep(s, doc, 'NEW');
 }
 
 // ── Chain state (for the timeline) ───────────────────────────────────────────
@@ -323,9 +337,22 @@ export async function getChainState(docType: DocType, docId: string) {
     prisma.approvalStep.findMany({ where: { docType, docId }, orderBy: { order: 'asc' } }),
     prisma.approvalAction.findMany({ where: { docType, docId }, orderBy: { at: 'asc' } }),
   ]);
-  const current = steps.find((s) => s.status === 'PENDING') || null;
-  const approved = steps.filter((s) => s.status === 'APPROVED').length;
-  return { steps, actions, currentStepId: current?.id ?? null, currentApproverId: current?.approverId ?? null, approved, total: steps.length };
+  // A step = all rows sharing an `order`. Count/current are computed per STEP so
+  // an any-one-approves step (2+ people, one order) counts once.
+  const pending = steps.filter((s) => s.status === 'PENDING');
+  const currentOrder = pending.length ? Math.min(...pending.map((s) => s.order)) : null;
+  const currentGroup = currentOrder != null ? pending.filter((s) => s.order === currentOrder) : [];
+  const orders = [...new Set(steps.map((s) => s.order))];
+  const approved = orders.filter((o) => steps.some((s) => s.order === o && s.status === 'APPROVED')).length;
+  return {
+    steps, actions,
+    currentStepId: currentGroup[0]?.id ?? null,
+    currentApproverId: currentGroup[0]?.approverId ?? null,
+    // Everyone who can act on the current step — the client checks membership so
+    // BOTH people on a shared step see the Approve button.
+    currentApproverIds: currentGroup.map((s) => s.approverId),
+    approved, total: orders.length,
+  };
 }
 
 export type Outcome = 'ADVANCED' | 'COMPLETED' | 'ON_HOLD';
@@ -338,26 +365,41 @@ export type Outcome = 'ADVANCED' | 'COMPLETED' | 'ON_HOLD';
 // approver, or an admin override. Returns the outcome; the caller finalizes.
 export async function recordDecision(docType: DocType, docId: string, actor: ActorInfo, decision: 'APPROVE' | 'HOLD', remarks?: string): Promise<Outcome> {
   const steps = await prisma.approvalStep.findMany({ where: { docType, docId }, orderBy: { order: 'asc' } });
-  const current = steps.find((s) => s.status === 'PENDING');
-  if (!current) throw new Error('There is no pending approval step for this document.');
-  if (current.approverId !== actor.id && !actor.isAdmin) throw new Error('Only the current approver can act on this step.');
+  const pending = steps.filter((s) => s.status === 'PENDING');
+  if (!pending.length) throw new Error('There is no pending approval step for this document.');
+
+  // The current STEP is every pending row at the lowest pending order — a step
+  // may hold several approvers, any one of whom can act on it.
+  const currentOrder = Math.min(...pending.map((s) => s.order));
+  const group = pending.filter((s) => s.order === currentOrder);
+  // The acting user's own row in the step (admins may act on behalf of the step).
+  const mine = group.find((s) => s.approverId === actor.id);
+  if (!mine && !actor.isAdmin) throw new Error('Only the current approver can act on this step.');
+  const acting = mine ?? group[0];
 
   const doc = await docSummary(docType, docId);
 
   if (decision === 'HOLD') {
-    await prisma.approvalStep.update({ where: { id: current.id }, data: { status: 'ON_HOLD', actedAt: new Date(), remarks: remarks ?? null } });
-    await logAction(docType, docId, current.id, actor, 'ON_HOLD', remarks);
+    await prisma.approvalStep.update({ where: { id: acting.id }, data: { status: 'ON_HOLD', actedAt: new Date(), remarks: remarks ?? null } });
+    await logAction(docType, docId, acting.id, actor, 'ON_HOLD', remarks);
     if (doc?.createdById) await notifyUser(doc.createdById, { type: 'APPROVAL_ON_HOLD', title: `${doc.label} ${doc.number} put on hold`, message: `${actor.name} put it on hold — please correct and resubmit${remarks ? `: ${remarks}` : '.'}`, projectId: doc.projectId, relatedDocType: docType, relatedDocId: docId, link: doc.link });
     return 'ON_HOLD';
   }
 
-  await prisma.approvalStep.update({ where: { id: current.id }, data: { status: 'APPROVED', actedAt: new Date(), remarks: remarks ?? null } });
-  await logAction(docType, docId, current.id, actor, 'APPROVED', remarks);
+  await prisma.approvalStep.update({ where: { id: acting.id }, data: { status: 'APPROVED', actedAt: new Date(), remarks: remarks ?? null } });
+  await logAction(docType, docId, acting.id, actor, 'APPROVED', remarks);
+  // Any-one-approves: the other approvers on this step are no longer needed.
+  const peers = group.filter((s) => s.id !== acting.id);
+  if (peers.length) await prisma.approvalStep.updateMany({ where: { id: { in: peers.map((p) => p.id) } }, data: { status: 'SKIPPED', actedAt: new Date() } });
 
-  const next = steps.find((s) => s.order > current.order && s.status === 'WAITING');
-  if (next) {
-    await prisma.approvalStep.update({ where: { id: next.id }, data: { status: 'PENDING' } });
-    if (doc) await notifyStep(next, doc, 'NEW');
+  // Advance to the next step: promote every row at the next-highest order and
+  // notify all of them at once.
+  const higher = steps.filter((s) => s.order > currentOrder);
+  if (higher.length) {
+    const nextOrder = Math.min(...higher.map((s) => s.order));
+    const nextGroup = higher.filter((s) => s.order === nextOrder);
+    await prisma.approvalStep.updateMany({ where: { id: { in: nextGroup.map((s) => s.id) } }, data: { status: 'PENDING' } });
+    if (doc) for (const s of nextGroup) await notifyStep(s, doc, 'NEW');
     return 'ADVANCED';
   }
   return 'COMPLETED';

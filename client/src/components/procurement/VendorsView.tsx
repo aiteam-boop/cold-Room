@@ -17,6 +17,32 @@ const VENDOR_TYPE_LABEL: Record<string, string> = {
   MANUFACTURER: 'Manufacturer', TRADER: 'Trader', CONTRACTOR: 'Contractor', SERVICE_PROVIDER: 'Service Provider',
 };
 
+// KYC completeness score (Procurement PRD §4). Colour by level: green = all done,
+// blue = usable (mandatory met) but some optional left, red = a mandatory item is
+// missing so the vendor can't be used yet, grey = nothing on file.
+interface KycScore { completed: number; total: number; percent: number; mandatoryMissing: string[]; usable: boolean; level: string; items?: { key: string; label: string; done: boolean; mandatory: boolean }[] }
+// Pill colour follows the classic KYC status (Complete = green, Partial = amber,
+// Missing = red) so the familiar traffic-light stays; the percentage + a ⚠ (when a
+// mandatory item is missing) ride along inside the same pill.
+const KYC_STATUS_CLASS: Record<string, string> = {
+  Complete: 'bg-green-100 text-green-700 border-green-200',
+  Partial: 'bg-amber-100 text-amber-700 border-amber-200',
+  Missing: 'bg-red-100 text-red-700 border-red-200',
+};
+function KycBadge({ kyc, kycStatus }: { kyc?: KycScore; kycStatus?: string }) {
+  const status = kycStatus || 'Missing';
+  if (!kyc) return <span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[status]}`} />{status}</span>;
+  const tip = kyc.mandatoryMissing.length ? `Cannot use — missing: ${kyc.mandatoryMissing.join(', ')}` : kyc.percent < 100 ? 'Usable · optional details pending' : 'KYC complete';
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${KYC_STATUS_CLASS[status] || KYC_STATUS_CLASS.Missing}`} title={tip}>
+      <span className={`h-2 w-2 rounded-full ${KYC_DOT[status]}`} />
+      <span>{kyc.percent}%</span>
+      <span className="opacity-70">· {kyc.completed}/{kyc.total}</span>
+      {!kyc.usable && <span title={tip}>⚠</span>}
+    </span>
+  );
+}
+
 interface Meta {
   vendorTypes: string[]; boqCategories: string[]; workCategories: string[];
   authorityLevels: string[]; bankAccountTypes: string[]; kycKinds: string[];
@@ -94,7 +120,7 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
                     <td className="text-slate-500">{v.gstin || '—'}</td>
                     <td className="text-slate-500">{v.boqCategories?.length ? v.boqCategories.slice(0, 2).join(', ') + (v.boqCategories.length > 2 ? ` +${v.boqCategories.length - 2}` : '') : '—'}</td>
                     <td className="text-slate-500">{pc ? `${pc.name}${pc.phones?.[0] ? ` · ${pc.phones[0]}` : ''}` : '—'}</td>
-                    <td><span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} />{v.kycStatus}{v.kycDocCount > 0 && <span className="text-slate-300">· {v.kycDocCount}</span>}</span></td>
+                    <td><KycBadge kyc={v.kyc} kycStatus={v.kycStatus} /></td>
                     {canManage && <td className="px-2 text-right"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
                   </tr>
                 );
@@ -120,9 +146,8 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
               </div>
 
               {v.isActive === false && <div className="mt-1 text-[11px] font-semibold text-red-600">Inactive — hidden from PO/WO search</div>}
-              <div className="mt-1 flex items-center gap-1 text-xs text-slate-500">
-                <span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} /> KYC {v.kycStatus}
-                {v.kycDocCount > 0 && <span className="text-slate-300">· {v.kycDocCount} doc{v.kycDocCount > 1 ? 's' : ''}</span>}
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
+                <span className="text-slate-400">KYC</span> <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
               </div>
 
               {(v.boqCategories?.length > 0) && (
@@ -495,14 +520,34 @@ function KycPanel({ projectId, vendorId, meta, onExtracted }: {
 
   const docs: any[] = docsQ.data?.kycDocs ?? [];
   const status = docsQ.data?.kycStatus ?? 'Missing';
+  const kyc: KycScore | undefined = docsQ.data?.kyc;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm">
-        <span className={`h-2.5 w-2.5 rounded-full ${KYC_DOT[status]}`} />
-        <span className="font-medium text-slate-700">KYC {status}</span>
-        <span className="text-xs text-slate-400">Complete requires GST certificate + PAN card + cancelled cheque.</span>
-      </div>
+      {kyc ? (
+        <div className="rounded-lg border border-slate-200 p-3">
+          <div className="flex items-center gap-2 text-sm">
+            <KycBadge kyc={kyc} kycStatus={status} />
+            <span className="font-medium text-slate-700">{kyc.completed} of {kyc.total} completed</span>
+            {!kyc.usable && <span className="text-xs font-medium text-red-600">⚠ Not usable — {kyc.mandatoryMissing.join(', ')} missing</span>}
+          </div>
+          {/* Per-item checklist so it's clear exactly what's pending. */}
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {kyc.items?.map((it) => (
+              <span key={it.key} className={it.done ? 'text-emerald-600' : it.mandatory ? 'text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
+                {it.done ? '✓' : '○'} {it.label}{it.mandatory && !it.done ? ' *' : ''}
+              </span>
+            ))}
+          </div>
+          <div className="mt-1 text-[11px] text-slate-400">Mandatory (*) items must be present before this vendor can be used for a PO/payment.</div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-sm">
+          <span className={`h-2.5 w-2.5 rounded-full ${KYC_DOT[status]}`} />
+          <span className="font-medium text-slate-700">KYC {status}</span>
+          <span className="text-xs text-slate-400">Complete requires GST certificate + PAN card + cancelled cheque.</span>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 p-3">
         <div className="flex-1">

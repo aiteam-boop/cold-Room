@@ -11,7 +11,7 @@ import {
   MAX_CONTACT_PHONES, MAX_VENDOR_CONTACTS, VENDOR_TYPES, WORK_CATEGORIES,
 } from '../lib/enums';
 import {
-  kycStatus, legacyMirror, normalizeBankAccounts, normalizeBillingAddress,
+  kycScore, kycStatus, legacyMirror, normalizeBankAccounts, normalizeBillingAddress,
   normalizeBoqCategories, normalizeContacts, normalizePlants, normalizeRateChart,
   normalizeWorkCategories, rateFor,
 } from '../services/vendorProfile';
@@ -174,7 +174,7 @@ router.get(
       },
     });
     res.json({
-      vendors: vendors.map(({ kycDocs, ...v }) => ({ ...v, kycStatus: kycStatus(kycDocs), kycDocCount: kycDocs.length })),
+      vendors: vendors.map(({ kycDocs, ...v }) => ({ ...v, kycStatus: kycStatus(kycDocs), kycDocCount: kycDocs.length, kyc: kycScore(v, kycDocs) })),
     });
   })
 );
@@ -258,7 +258,7 @@ router.get(
       },
     });
     if (!vendor) throw notFound('Vendor not found');
-    res.json({ vendor: maskFinancials({ ...vendor, kycStatus: kycStatus(vendor.kycDocs) }, req.account) });
+    res.json({ vendor: maskFinancials({ ...vendor, kycStatus: kycStatus(vendor.kycDocs), kyc: kycScore(vendor, vendor.kycDocs) }, req.account) });
   })
 );
 

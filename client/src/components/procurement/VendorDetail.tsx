@@ -4,6 +4,12 @@ import { Modal, Spinner } from '../ui';
 import { fmtDate, inr, titleize } from '../../lib/format';
 
 const KYC_DOT: Record<string, string> = { Complete: 'bg-green-500', Partial: 'bg-amber-500', Missing: 'bg-red-500' };
+// Pill colour follows the classic KYC status (green/amber/red); percentage rides inside.
+const KYC_STATUS_CLASS: Record<string, string> = {
+  Complete: 'bg-green-100 text-green-700 border-green-200',
+  Partial: 'bg-amber-100 text-amber-700 border-amber-200',
+  Missing: 'bg-red-100 text-red-700 border-red-200',
+};
 
 // Read-only vendor detail — opened by clicking a vendor card/row, so anyone can
 // SEE a vendor's details without going through the Edit form.
@@ -16,7 +22,14 @@ export default function VendorDetail({ vendorId, canEdit, onEdit, onClose }: { v
         <div className="space-y-4 text-sm">
           <div className="flex flex-wrap items-center gap-2">
             <span className="badge bg-slate-100 text-slate-600">{v.vendorType || v.type || 'Vendor'}</span>
-            <span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus] || 'bg-slate-300'}`} /> KYC {v.kycStatus || '—'}</span>
+            {v.kyc ? (
+              <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${KYC_STATUS_CLASS[v.kycStatus] || KYC_STATUS_CLASS.Missing}`} title={v.kyc.mandatoryMissing?.length ? `Cannot use — missing: ${v.kyc.mandatoryMissing.join(', ')}` : 'KYC complete'}>
+                <span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus] || 'bg-slate-300'}`} />
+                KYC {v.kyc.percent}% · {v.kyc.completed}/{v.kyc.total}{!v.kyc.usable && ' ⚠'}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus] || 'bg-slate-300'}`} /> KYC {v.kycStatus || '—'}</span>
+            )}
             {v.isActive === false && <span className="badge bg-red-50 text-red-600">Inactive</span>}
             {canEdit && onEdit && <button className="btn-outline ml-auto text-xs" onClick={onEdit}>✎ Edit</button>}
           </div>
@@ -53,6 +66,19 @@ export default function VendorDetail({ vendorId, canEdit, onEdit, onClose }: { v
           {(v.siteMappings?.length ?? 0) > 0 && (
             <Section title="Mapped sites">
               <div className="text-slate-600">{v.siteMappings.map((s: any) => s.project?.name).filter(Boolean).join(', ') || '—'}</div>
+            </Section>
+          )}
+
+          {v.kyc?.items && (
+            <Section title="KYC checklist">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                {v.kyc.items.map((it: any) => (
+                  <span key={it.key} className={it.done ? 'text-emerald-600' : it.mandatory ? 'text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
+                    {it.done ? '✓' : '○'} {it.label}{it.mandatory && !it.done ? ' *' : ''}
+                  </span>
+                ))}
+              </div>
+              {!v.kyc.usable && <div className="mt-1 text-[11px] font-medium text-red-600">⚠ Not usable for PO/payment — {v.kyc.mandatoryMissing.join(', ')} missing.</div>}
             </Section>
           )}
 

@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../../lib/api';
-import { COLOR_HEX, fmtDate, titleize } from '../../lib/format';
+import { api, openAuthedFile } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
+import { COLOR_HEX, fmtDate, titleize, inr } from '../../lib/format';
+import { Modal } from '../ui';
 import ProcurementPipeline from '../procurement/ProcurementPipeline';
 
 // NEW dashboard cards (additive — rendered below the existing dashboard):
@@ -86,31 +88,100 @@ export default function DashboardExtras({ projectId, onOpenGantt }: { projectId:
 // A collapsible list of the project's PO/WOs; expanding one shows its phase
 // timeline (Approval → Payment → Goods Receipt), lazy-loaded on open.
 function ProcPipelineSection({ projectId }: { projectId: string }) {
+  const { hideFinancials } = useAuth();
+  const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
   const docsQ = useQuery({ queryKey: ['proc-docs-pipeline', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs`)).data.docs as any[] });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (id: string) => setOpen((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  // When a PO/WO has several goods receipts, the GRN action opens this popup list.
+  const [grnPopup, setGrnPopup] = useState<any | null>(null);
   const docs = docsQ.data ?? [];
   if (docsQ.isError || docs.length === 0) return null;
   return (
     <div>
       <div className="mb-2 text-sm font-medium text-slate-600">Procurement Pipeline — {docs.length} PO/WO</div>
-      <div className="space-y-2">
-        {docs.map((d: any) => {
-          const isOpen = open.has(d.id);
-          return (
-            <div key={d.id} className="card overflow-hidden">
-              <button className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-slate-50" onClick={() => toggle(d.id)}>
-                <span className="text-slate-400">{isOpen ? '▾' : '▸'}</span>
-                <span className="font-medium text-navy">{d.docNumber}</span>
-                <span className="badge bg-slate-100 text-slate-600">{d.type}</span>
-                <span className="truncate text-sm text-slate-500">{d.vendorName || '—'}</span>
-                <span className={`badge ml-auto shrink-0 ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
-              </button>
-              {isOpen && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><ProcurementPipeline projectId={projectId} docId={d.id} /></div>}
-            </div>
-          );
-        })}
+      {/* A real HTML table so every column lines up under its header (independent per-row
+          grids never aligned). Order: Document · Vendor · Raised By · Amount · Date · Items ·
+          Documents (PO/PI/GRN) · Status (pending-approver + badge, rightmost). */}
+      <div className="overflow-x-auto rounded-lg border border-slate-200">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              <th className="w-6 px-2 py-2"></th>
+              <th className="px-3 py-2">Document</th>
+              <th className="px-3 py-2">Vendor</th>
+              <th className="px-3 py-2">Raised By</th>
+              <th className="px-3 py-2 text-right">Amount</th>
+              <th className="px-3 py-2">Date</th>
+              <th className="px-3 py-2">Items</th>
+              <th className="px-3 py-2 text-right">Documents</th>
+              <th className="px-3 py-2 text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {docs.map((d: any) => {
+              const isOpen = open.has(d.id);
+              return (
+                <Fragment key={d.id}>
+                  <tr className="cursor-pointer align-middle hover:bg-slate-50" onClick={() => toggle(d.id)}>
+                    <td className="px-2 py-2.5 text-slate-400">{isOpen ? '▾' : '▸'}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      <span className="font-medium text-navy">{d.docNumber}</span>
+                      <span className="badge ml-1.5 bg-slate-100 text-slate-600">{d.type}</span>
+                    </td>
+                    <td className="max-w-[220px] truncate px-3 py-2.5 text-slate-500" title={d.vendorName || ''}>{d.vendorName || '—'}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-xs text-slate-400" title={d.createdBy?.name ? `Raised by ${d.createdBy.name}` : ''}>{d.createdBy?.name ? `👤 ${d.createdBy.name}` : '—'}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium text-slate-700">{d.finalAmount != null ? money(d.finalAmount) : ''}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-xs text-slate-400">{d.docDate ? fmtDate(d.docDate) : ''}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-xs text-slate-400">
+                      {(d.counts?.lineItems ?? 0) > 0 ? `📋 ${d.counts.lineItems} items` : ''}
+                      {d.delivery?.status === 'LATE' || d.delivery?.status === 'OVERDUE'
+                        ? <span className="ml-1 font-medium text-rose-600">🚚 {d.delivery.status === 'LATE' ? `Late${d.delivery.delayDays ? ` +${d.delivery.delayDays}d` : ''}` : `Overdue${d.delivery.delayDays ? ` +${d.delivery.delayDays}d` : ''}`}</span>
+                        : d.delivery?.status === 'ON_TIME' ? <span className="ml-1 text-emerald-600">🚚 On time</span> : ''}
+                    </td>
+                    {/* Documents: PO/WO PDF, PI (if any), GRN (if any). */}
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      <span className="flex items-center justify-end gap-1">
+                        <span role="link" tabIndex={0} onClick={(e) => { e.stopPropagation(); openAuthedFile(`/projects/${projectId}/procurement/docs/${d.id}/pdf`); }} className="cursor-pointer rounded border border-slate-300 px-1.5 py-0.5 text-[10px] font-medium text-navy hover:bg-slate-50" title={`Open ${d.type} PDF`}>📄 {d.type}</span>
+                        {(d.pis?.length ?? 0) > 0 && <span role="link" tabIndex={0} onClick={(e) => { e.stopPropagation(); window.open(d.pis[0].piUrl, '_blank'); }} className="cursor-pointer rounded border border-navy/20 bg-navy/5 px-1.5 py-0.5 text-[10px] font-medium text-navy hover:bg-navy/10" title="Open Proforma Invoice">📄 PI{d.pis.length > 1 ? ` (${d.pis.length})` : ''}</span>}
+                        {(d.goodsReceipts?.length ?? 0) > 0 && <span role="link" tabIndex={0} onClick={(e) => { e.stopPropagation(); if (d.goodsReceipts.length === 1) openAuthedFile(`/projects/${projectId}/procurement/goods-receipts/${d.goodsReceipts[0].id}/pdf`); else setGrnPopup(d); }} className="cursor-pointer rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100" title="Open Goods Receipt PDF">📦 GRN{d.goodsReceipts.length > 1 ? ` (${d.goodsReceipts.length})` : ''}</span>}
+                      </span>
+                    </td>
+                    {/* Status: pending-approver merged next to the status badge (rightmost). */}
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      <span className="flex items-center justify-end gap-2">
+                        {d.status === 'PENDING_APPROVAL' && d.pendingWith && (
+                          <span className="rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700" title="Currently pending with">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</span>
+                        )}
+                        <span className={`badge ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : d.status === 'ON_HOLD' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
+                      </span>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={9} className="border-t border-slate-100 bg-slate-50/50 px-4 py-3">
+                        <ProcurementPipeline projectId={projectId} docId={d.id} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
+      {grnPopup && (
+        <Modal onClose={() => setGrnPopup(null)} title={`Goods Receipts — ${grnPopup.docNumber}`}>
+          <div className="space-y-2">
+            {(grnPopup.goodsReceipts ?? []).map((g: any) => (
+              <button key={g.id} onClick={() => openAuthedFile(`/projects/${projectId}/procurement/goods-receipts/${g.id}/pdf`)} className="flex w-full items-center justify-between rounded border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50">
+                <span className="font-medium text-navy">📦 {g.grnNumber}</span>
+                <span className="flex items-center gap-2"><span className="badge bg-slate-100 text-slate-600">{titleize(g.status || '')}</span><span className="text-[10px] text-navy underline">Open PDF</span></span>
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { sendEmail, appClientUrl, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from '../services/email';
 import { asyncHandler, badRequest, conflict, forbidden, notFound } from '../lib/errors';
+import { signApiPath } from '../lib/signedUrl';
 import {
   requireAuth, requireProjectMember,
   requirePage, requireEdit, requireAnyPage, requireAnyEdit, requireSection, requireFinancialView,
@@ -27,12 +28,13 @@ import { renderProcurementPdf, renderGRNPdf, renderPackingListPdf } from '../ser
 import { notifyUser, notifyProjectRoles } from '../services/notify';
 import { hasSection, shouldHideFinancials } from '../lib/permissions';
 import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
-import { kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
+import { kycScore, kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
 import { extractKycFields } from '../services/kycExtract';
 import { readFromDb } from '../lib/fileStore';
 import { deliveryInfo } from '../services/delivery';
 import { chainForAmount, validateChain, type MatrixDocType } from '../services/approvalMatrix';
 import { resolveAutoChain } from '../services/fixedChain';
+import { buildPaymentSteps, ensurePaymentSteps, notifyCurrentPaymentStep } from '../services/paymentChain';
 import {
   buildChain, recordDecision, remindCurrent, finalizeApproval, markDocOnHold,
   getChainState, resolveActor, type DocType,
@@ -65,6 +67,7 @@ router.get('/vendors', requireProjectMember, requirePage('vendors'), asyncHandle
       rateChart: normalizeRateChart(v.rateChart),
       kycStatus: kycStatus(kycDocs),
       kycDocCount: kycDocs.length,
+      kyc: kycScore(v, kycDocs),
     })),
   });
 }));
@@ -162,6 +165,12 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
     ? await prisma.approvalStep.findMany({ where: { docId: { in: pendingIds }, status: 'PENDING' }, select: { docId: true, approverName: true, approverRole: true } })
     : [];
   const pendingBy = new Map(pendingSteps.map((s) => [s.docId, s]));
+  // Physical goods receipts (GRN-QAS) per PO/WO — for the "GRN pdf" action.
+  const goodsReceipts = docs.length
+    ? await prisma.goodsReceipt.findMany({ where: { docId: { in: docs.map((d) => d.id) } }, orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, docId: true } })
+    : [];
+  const grByDoc = new Map<string, { id: string; grnNumber: string; status: string }[]>();
+  for (const g of goodsReceipts) { const a = grByDoc.get(g.docId!) ?? []; a.push({ id: g.id, grnNumber: g.grnNumber, status: g.status }); grByDoc.set(g.docId!, a); }
   res.json({
     docs: maskFinancials(
       docs.map((d) => ({
@@ -172,6 +181,9 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         createdBy: (d.createdById && creators.get(d.createdById)) || null,
         pendingWith: pendingBy.get(d.id)?.approverName ?? null,
         pendingWithRole: pendingBy.get(d.id)?.approverRole ?? null,
+        // Proforma Invoices uploaded on this PO/WO (per term) — shown as a link.
+        pis: Object.entries(parseJson(d.termPis, {}) as Record<string, any>).filter(([, v]) => v && v.piPdfUrl).map(([k, v]) => ({ term: k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl as string })),
+        goodsReceipts: grByDoc.get(d.id) ?? [],
       })),
       req.account,
     ),
@@ -202,6 +214,47 @@ router.post('/docs', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHa
   });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_DOC_CREATE', entity: 'ProcurementDoc', entityId: doc.id, details: { type: b.type, docNumber } });
   res.status(201).json({ doc: serializeDoc(doc) });
+}));
+
+// ── BOQ Head Mapping (Procurement PRD §5 · D2/D3) ────────────────────────────
+// Re-map already-issued PO/WO line items to their BOQ head. The head is INTERNAL
+// only, so setting it never touches the vendor PDF and needs no re-approval —
+// hence these light endpoints instead of the full document PATCH/amendment flow.
+router.get('/head-mapping', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHandler(async (req, res) => {
+  const docs = await prisma.procurementDoc.findMany({
+    where: { projectId: req.params.projectId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true, docNumber: true, type: true, status: true, vendorName: true, createdAt: true,
+      lineItems: {
+        where: { isLeadTime: false },
+        orderBy: { sortOrder: 'asc' },
+        select: { id: true, description: true, boqHead: true, boqItem: { select: { category: true } } },
+      },
+    },
+  });
+  res.json({
+    docs: docs.map((d) => ({
+      id: d.id, docNumber: d.docNumber, type: d.type, status: d.status, vendorName: d.vendorName, createdAt: d.createdAt,
+      lineItems: d.lineItems.map((l) => ({ id: l.id, description: l.description, boqHead: l.boqHead, suggestedHead: l.boqItem?.category ?? null })),
+    })),
+  });
+}));
+
+// PATCH .../line-items/heads — bulk-set the internal BOQ head on issued lines (D3).
+router.patch('/line-items/heads', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHandler(async (req, res) => {
+  const body = z.object({ items: z.array(z.object({ id: z.string(), boqHead: z.string().trim().max(120).nullable() })).max(1000) }).parse(req.body);
+  // Only touch line items that belong to THIS project's documents.
+  const owned = await prisma.procurementLineItem.findMany({ where: { id: { in: body.items.map((i) => i.id) }, doc: { projectId: req.params.projectId } }, select: { id: true } });
+  const ownedSet = new Set(owned.map((o) => o.id));
+  let updated = 0;
+  for (const it of body.items) {
+    if (!ownedSet.has(it.id)) continue;
+    await prisma.procurementLineItem.update({ where: { id: it.id }, data: { boqHead: it.boqHead || null } });
+    updated++;
+  }
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PROC_HEAD_REMAP', entity: 'ProcurementLineItem', entityId: req.params.projectId, details: { updated } });
+  res.json({ ok: true, updated });
 }));
 
 // GET .../docs/:docId — full document. Line items carry their linked BOQ row so
@@ -293,6 +346,8 @@ const lineSchema = z.object({
   // Links this PO line back to the BOQ item it fulfils — the join that powers
   // the BOQ Cost view (Sprint PRD §6.3). Optional but strongly recommended.
   boqItemId: z.string().nullable().optional(),
+  // BOQ head (heading/category) this line rolls up under — internal only (D2).
+  boqHead: z.string().trim().max(120).nullable().optional(),
 });
 // Accept null on optional string fields — the client sends null for the
 // address field that doesn't apply (siteAddress on a PO, shipTo on a WO).
@@ -373,7 +428,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, boqHead: li.boqHead ?? null, sortOrder: order++ } });
     }
     totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt, gstPct: l.gstPct })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
@@ -493,6 +548,9 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
   const total = paymentTotalPct(doc);
   if (Math.abs(total - 100) > 0.01) throw badRequest(`Payment terms must total 100% (currently ${total}%).`);
   let chain = z.object({ chain: z.array(z.string()).optional() }).parse(req.body ?? {}).chain ?? [];
+  // Grouped steps (any-one-approves) when the fixed chain defines them; null lets
+  // buildChain treat `chain` as one approver per step (the legacy behaviour).
+  let chainGroups: string[][] | null = null;
 
   // 1) FIXED chain (admin-configured in Users → Approval Chain) wins. When one
   //    exists the document routes through it automatically — the creator never
@@ -501,6 +559,7 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
   const auto = await resolveAutoChain(doc.type as MatrixDocType, req.params.projectId, doc.finalAmount);
   if (auto.source === 'fixed') {
     chain = auto.approverIds;
+    chainGroups = auto.groups;
   } else {
     // 2) No fixed chain → unchanged legacy behaviour: the value-band matrix fills
     //    an empty selection, and a hand-picked chain must still satisfy it.
@@ -528,7 +587,7 @@ router.post('/docs/:docId/submit', requireProjectMember, requireAnyEdit(...DOC_P
   if (chain.length) {
     // Build the sequential approval chain; only the first approver is notified.
     const actor = await resolveActor(req.account!.id);
-    await buildChain(doc.type as DocType, doc.id, req.params.projectId, chain, actor);
+    await buildChain(doc.type as DocType, doc.id, req.params.projectId, chainGroups ?? chain, actor);
   } else {
     // No chain chosen → fall back to notifying project admins (legacy behaviour).
     await notifyProjectRoles(req.params.projectId, ['ADMIN'], { type: 'DOC_SUBMITTED', title: `${doc.type} pending approval`, message: `${doc.docNumber} (${doc.vendorName || 'vendor'}) for ${rs(doc.finalAmount)} needs approval.`, relatedDocType: 'ProcurementDoc', relatedDocId: doc.id, link: `/projects/${req.params.projectId}` }, req.user!.sub);
@@ -861,47 +920,8 @@ async function payGrnMilestone(grn: { milestoneId: string | null }, utr: string 
   }
 }
 
-// On payment submit: email the PO's approver(s) the no-login Approval Form link so
-// they can Approve / On-Hold (like the PO approval mail). The decision (releaseStatus)
-// is the single source shown everywhere — app badge, FMS sheet, and this form — so a
-// decision from the email reflects the same on the sheet. Best-effort; never blocks.
-async function notifyPaymentApprovers(grn: { id: string; grnNumber: string; docId: string; projectId: string; vendorName: string | null; releaseToken: string | null; amountToPay: number | null; piValue: number | null }): Promise<void> {
-  if (!isEmailEnabled()) return;
-  try {
-    // Ensure a stable Approval-Form token so the link works from the email.
-    let token = grn.releaseToken;
-    if (!token) { token = crypto.randomBytes(24).toString('hex'); await prisma.gRN.update({ where: { id: grn.id }, data: { releaseToken: token } }); }
-    const po = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { finalAmount: true, docNumber: true } });
-    // Route through the "Vendor Payments" approval chain (Settings → Approval Chain
-    // · Vendor Payments) — the order the admin set there. Value band uses the amount
-    // being paid.
-    const amount = grn.amountToPay ?? grn.piValue ?? po?.finalAmount ?? 0;
-    const auto = await resolveAutoChain('PAYMENT', grn.projectId, amount).catch(() => null);
-    let emails: string[] = [];
-    const ids = auto?.approverIds ?? [];
-    if (ids.length) {
-      // Preserve the chain order when emailing.
-      const users = await prisma.user.findMany({ where: { id: { in: ids }, active: true }, select: { id: true, email: true } });
-      const byId = new Map(users.map((u) => [u.id, u.email]));
-      emails = ids.map((id) => byId.get(id)).filter((e): e is string => !!e);
-    }
-    if (!emails.length) { const cc = approvalCcEmail(); if (cc) emails = [cc]; }
-    if (!emails.length) return;
-    const link = `${appBaseUrl()}/api/public/payment-approval/${token}`;
-    const html = approvalEmailHtml({
-      heading: `Payment approval needed — ${grn.grnNumber}`,
-      lines: [
-        `A payment <strong>${grn.grnNumber}</strong>${po?.docNumber ? ` (against ${po.docNumber})` : ''}${grn.vendorName ? ` — ${grn.vendorName}` : ''} needs your decision.`,
-        'Open the Approval Form to review the PO / GRN / KYC / amount and Approve or put it On Hold. Your decision shows on the FMS sheet and in the app.',
-      ],
-      actionUrl: link,
-      actionLabel: 'Open Approval Form',
-    });
-    for (const to of [...new Set(emails)]) {
-      try { await sendEmail({ to, cc: approvalCcEmail(), subject: `Payment approval needed — ${grn.grnNumber}${po?.docNumber ? ` (${po.docNumber})` : ''}`, html }); } catch { /* best-effort per recipient */ }
-    }
-  } catch { /* email is best-effort; never break submit */ }
-}
+// Payment-approval email + sequential step chain now live in services/paymentChain
+// (buildPaymentSteps / notifyCurrentPaymentStep / decidePaymentStep).
 
 // ── GRN ─────────────────────────────────────────────────────────────────────
 //
@@ -1193,9 +1213,10 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   // Trigger the linked term and advance the payment ladder, then push to the sheet.
   await onGrnApproved(updated);
   scheduleSheetSync();
-  // Email the PO's approver(s) the Approval Form link (like the PO approval mail).
-  // Only for payment GRNs (a pure goods-receipt GRN has no payment to sign off).
-  if (updated.milestoneId) await notifyPaymentApprovers(updated);
+  // Build the sequential Vendor-Payments step chain and email ONLY the first
+  // step (any one of them approves → the next step is mailed, and so on). Only
+  // for payment GRNs (a pure goods-receipt GRN has no payment to sign off).
+  if (updated.milestoneId) { await buildPaymentSteps(updated); await notifyCurrentPaymentStep(updated); }
   res.json({ grn: updated });
 }));
 
@@ -1210,10 +1231,22 @@ router.post('/grns/:grnId/resubmit-approval', requireProjectMember, requireEdit(
   // → RESUBMITTED: goes back to the approver as "re-submitted". We KEEP the hold
   // remark (releaseRemark) so the approval form still shows what was asked to be
   // corrected. releaseAt = when it was re-submitted.
-  const updated = await prisma.gRN.update({ where: { id: grn.id }, data: { releaseStatus: 'RESUBMITTED', releaseAt: new Date() } });
+  await prisma.gRN.update({ where: { id: grn.id }, data: { releaseStatus: 'RESUBMITTED', releaseAt: new Date() } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PAYMENT_RESUBMIT_APPROVAL', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber, previousRemark: grn.releaseRemark } });
   scheduleSheetSync();
-  res.json({ grn: serializeGrn(updated, req.account) });
+  // Back for review → restart the chain at step 1 and mail that step only.
+  await buildPaymentSteps(grn);
+  await notifyCurrentPaymentStep(grn);
+  // Return the FULLY-included GRN (lineItems + doc) — the client replaces its state
+  // with this, so a partial payload would crash the form on g.lineItems.map(...).
+  const full = await prisma.gRN.findFirst({
+    where: { id: grn.id, projectId: req.params.projectId },
+    include: {
+      lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
+    },
+  });
+  res.json({ grn: serializeGrn(full, req.account) });
 }));
 
 // POST /grns/:grnId/remind-approval — resend the Approval Form email to the
@@ -1225,7 +1258,10 @@ router.post('/grns/:grnId/remind-approval', requireProjectMember, requireEdit('g
   if (!grn.milestoneId) throw badRequest('Only a payment can be sent for approval.');
   if (grn.releaseStatus === 'APPROVED') throw badRequest('This payment is already approved.');
   if (!isEmailEnabled()) throw badRequest('Email is not configured, so a reminder cannot be sent.');
-  await notifyPaymentApprovers(grn);
+  // Re-mail the CURRENT step only (don't restart progress). Build the chain if a
+  // pre-existing payment never had one.
+  await ensurePaymentSteps(grn);
+  await notifyCurrentPaymentStep(grn);
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PAYMENT_APPROVAL_REMIND', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber } });
   res.json({ ok: true });
 }));

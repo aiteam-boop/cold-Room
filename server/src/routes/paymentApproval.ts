@@ -5,6 +5,7 @@ import { asyncHandler } from '../lib/errors';
 import { audit } from '../lib/audit';
 import { appBaseUrl } from '../services/email';
 import { signApiPath } from '../lib/signedUrl';
+import { decidePaymentStep, notifyCurrentPaymentStep } from '../services/paymentChain';
 
 // ── Public, no-login payment-release "Approval Form" (Amisha FMS request) ───────
 // The FMS sheet carries an "Approval Form" link per payment. Opening it shows the
@@ -42,12 +43,18 @@ function statusBadge(status: string | null): string {
   return '<span style="background:#f1f5f9;color:#64748b;padding:3px 10px;border-radius:999px;font-weight:600;font-size:13px">Pending decision</span>';
 }
 
-function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token: string, notice?: string, edit = false): string {
+function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token: string, notice?: string, edit = false, step?: string | null): string {
   const { gr, doc, project, vendorId, vendorEmail, kycCount } = data;
   const base = appBaseUrl();
-  const poPdf = base + signApiPath(`/api/projects/${gr.projectId}/procurement/docs/${gr.docId}/pdf`);
+  // Accounts must see the APPROVED PO (with the signed approval trail), not the
+  // clean supplier copy. ?approvals=1 prints the FINAL APPROVAL stamp; the sig
+  // covers only the path, so the extra query param is safe.
+  const poPdf = base + signApiPath(`/api/projects/${gr.projectId}/procurement/docs/${gr.docId}/pdf`) + '&approvals=1';
   const grnPdf = base + signApiPath(`/api/projects/${gr.projectId}/procurement/grns/${gr.id}/pdf`);
   const kycUrl = vendorId && kycCount ? base + signApiPath(`/api/vendors/${vendorId}/kyc-view`) : null;
+  // Proforma Invoice — the payment is made against it, so the approver must see it.
+  // /uploads/* is public; a signed /api/* link if it ever moves there.
+  const piUrl = gr.piPdfUrl ? (gr.piPdfUrl.startsWith('/api/') ? base + signApiPath(gr.piPdfUrl) : base + gr.piPdfUrl) : null;
   const row = (k: string, v: string) => `<tr><td style="padding:7px 10px;color:#64748b;font-size:12px;white-space:nowrap;vertical-align:top">${k}</td><td style="padding:7px 10px;font-weight:600;color:#0f172a">${v}</td></tr>`;
   const link = (label: string, url: string | null) => (url ? `<a href="${url}" target="_blank" style="color:#052379;font-weight:600;text-decoration:none">📄 ${label}</a>` : '<span style="color:#94a3b8">—</span>');
   const action = `/api/public/payment-approval/${esc(token)}/decide`;
@@ -73,7 +80,7 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
         ${row('Amount to Pay', gr.amountToPay != null ? rs(gr.amountToPay) : '—')}
         ${row('PO Total', doc?.finalAmount != null ? rs(doc.finalAmount) : '—')}
         ${row('Payment Status', esc(gr.paymentStatus ?? '—'))}
-        ${row('Documents', `${link('PO', poPdf)} &nbsp; ${link('Payment / GRN', grnPdf)} &nbsp; ${link(`KYC (${kycCount})`, kycUrl)}`)}
+        ${row('Documents', `${link('PO', poPdf)} &nbsp; ${link('PI', piUrl)} &nbsp; ${link('Payment / GRN', grnPdf)} &nbsp; ${link(`KYC (${kycCount})`, kycUrl)}`)}
         ${(gr.releaseStatus === 'APPROVED' || gr.releaseStatus === 'ON_HOLD') ? row('Current Decision', `${statusBadge(gr.releaseStatus)}${gr.releaseBy ? ` · by ${esc(gr.releaseBy)}` : ''}${gr.releaseAt ? ` · ${dmy(gr.releaseAt)}` : ''}`) : ''}
       </table>
     </div>
@@ -97,6 +104,7 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
     <div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;margin-top:14px">
       <div style="font-weight:700;margin-bottom:10px">Your decision</div>
       <form method="POST" action="${action}">
+        <input type="hidden" name="step" value="${step ? esc(String(step)) : ''}" />
         <label style="display:block;font-size:12px;color:#64748b;margin-bottom:4px">Your email (optional — recorded as who made this decision)</label>
         <input name="by" type="email" value="${edit ? esc(gr.releaseBy ?? '') : ''}" placeholder="e.g. accounts@crystalgroup.in" style="width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:10px;font-size:14px" />
         <label style="display:block;font-size:12px;color:#64748b;margin-bottom:4px">Remark (optional — required when putting on hold; say what needs correcting)</label>
@@ -112,24 +120,41 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
 </body></html>`;
 }
 
-// GET /:token — the approval page (opened from the FMS sheet link).
+// GET /:token — the approval page (opened from the email / FMS sheet link).
+// ?step=<order> ties the link to a chain step; the form carries it forward.
 router.get('/:token', asyncHandler(async (req, res) => {
   const data = await loadByToken(req.params.token);
   if (!data) { res.status(404).type('html').send('<div style="font-family:system-ui;padding:40px;text-align:center"><h2>🔒 Link not valid</h2><p>This payment-approval link is invalid or has expired.</p></div>'); return; }
-  res.type('html').send(page(data, req.params.token, undefined, req.query.edit === '1'));
+  res.type('html').send(page(data, req.params.token, undefined, req.query.edit === '1', typeof req.query.step === 'string' ? req.query.step : null));
 }));
 
-// POST /:token/decide — record APPROVED / ON_HOLD against the payment.
+// POST /:token/decide — record the decision on the CURRENT step of the payment
+// chain. Approve advances to the next step (or finalises on the last); On Hold
+// freezes it. A stale link (its step already passed) is refused.
 router.post('/:token/decide', asyncHandler(async (req, res) => {
   const decision = String((req.body?.decision ?? '')).toUpperCase();
   if (decision !== 'APPROVED' && decision !== 'ON_HOLD') { res.status(400).type('html').send('Invalid decision.'); return; }
   const by = String(req.body?.by ?? '').trim().slice(0, 120) || null;
   const remark = String(req.body?.remark ?? '').trim().slice(0, 500) || null;
+  const linkStep = Number(req.body?.step) || null;
   const gr = await prisma.gRN.findFirst({ where: { releaseToken: req.params.token } });
   if (!gr) { res.status(404).type('html').send('Link not valid.'); return; }
-  await prisma.gRN.update({ where: { id: gr.id }, data: { releaseStatus: decision, releaseAt: new Date(), releaseBy: by, releaseRemark: remark } });
-  await audit({ projectId: gr.projectId, action: 'PAYMENT_RELEASE_DECISION', entity: 'GRN', entityId: gr.id, details: { grnNumber: gr.grnNumber, decision, by, via: 'fms-approval-link' } });
+
+  const outcome = await decidePaymentStep(gr.id, decision as 'APPROVED' | 'ON_HOLD', by, remark, linkStep);
+  await audit({ projectId: gr.projectId, action: 'PAYMENT_RELEASE_DECISION', entity: 'GRN', entityId: gr.id, details: { grnNumber: gr.grnNumber, decision, by, outcome, via: 'fms-approval-link' } });
+
   const data = await loadByToken(req.params.token);
+  if (outcome === 'STALE') {
+    res.type('html').send(page(data!, req.params.token, 'This step has already been approved by someone on it — nothing more is needed from you.'));
+    return;
+  }
+  if (outcome === 'ADVANCED') {
+    // Mail the next step (best-effort) and tell this approver it moved on.
+    const fresh = await prisma.gRN.findFirst({ where: { id: gr.id } });
+    if (fresh) await notifyCurrentPaymentStep(fresh);
+    res.type('html').send(page(data!, req.params.token, 'Approved — thank you. The payment now moves to the next approver in the chain.'));
+    return;
+  }
   res.type('html').send(page(data!, req.params.token, `Recorded: ${decision === 'APPROVED' ? 'Approved' : 'On Hold'}. Thank you.`));
 }));
 

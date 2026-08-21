@@ -223,9 +223,10 @@ function PaymentDetail({ projectId, paymentId, editable, onClose }: { projectId:
   }
 
   if (!p) return <Spinner label="Loading payment…" />;
-  const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null } | undefined;
+  const approval = data?.approval as { steps: any[]; total: number; currentApproverId?: string | null; currentApproverIds?: string[] } | undefined;
   const hasChain = (approval?.total ?? 0) > 0;
-  const myTurn = !!approval?.currentApproverId && approval.currentApproverId === user?.id;
+  const currentApprovers = approval?.currentApproverIds ?? (approval?.currentApproverId ? [approval.currentApproverId] : []);
+  const myTurn = !!user?.id && currentApprovers.includes(user.id);
   const canApprove = can('canApprove');
   const canAct = p.status === 'PENDING_APPROVAL' && (hasChain ? (myTurn || canApprove) : canApprove);
   const locked = p.status === 'APPROVED' || p.status === 'PAID' || p.status === 'CLOSED';
