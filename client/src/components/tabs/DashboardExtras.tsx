@@ -147,14 +147,22 @@ function ProcPipelineSection({ projectId }: { projectId: string }) {
                         {(d.goodsReceipts?.length ?? 0) > 0 && <span role="link" tabIndex={0} onClick={(e) => { e.stopPropagation(); if (d.goodsReceipts.length === 1) openAuthedFile(`/projects/${projectId}/procurement/goods-receipts/${d.goodsReceipts[0].id}/pdf`); else setGrnPopup(d); }} className="cursor-pointer rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100" title="Open Goods Receipt PDF">📦 GRN{d.goodsReceipts.length > 1 ? ` (${d.goodsReceipts.length})` : ''}</span>}
                       </span>
                     </td>
-                    {/* Status: pending-approver merged next to the status badge (rightmost). */}
+                    {/* Status: pending-approver + badge, with the Accounts-sheet UTR (if
+                        the PO was paid via the form) shown right under it. */}
                     <td className="whitespace-nowrap px-3 py-2.5">
-                      <span className="flex items-center justify-end gap-2">
-                        {d.status === 'PENDING_APPROVAL' && d.pendingWith && (
-                          <span className="rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700" title="Currently pending with">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</span>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="flex items-center justify-end gap-2">
+                          {d.status === 'PENDING_APPROVAL' && d.pendingWith && (
+                            <span className="rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700" title="Currently pending with">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</span>
+                          )}
+                          <span className={`badge ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : d.status === 'ON_HOLD' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
+                        </span>
+                        {(d.sheetPayments?.length ?? 0) > 0 && (
+                          <span className="max-w-[260px] truncate rounded bg-green-50 px-2 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments.map((s: any) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>
+                            💠 Paid · UTR: {d.sheetPayments.map((s: any) => s.utr).join(', ')}
+                          </span>
                         )}
-                        <span className={`badge ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : d.status === 'ON_HOLD' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
-                      </span>
+                      </div>
                     </td>
                   </tr>
                   {isOpen && (

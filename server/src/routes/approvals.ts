@@ -13,6 +13,9 @@ const router = Router();
 // Per-term Proforma Invoices uploaded on a PO/WO, flattened to links the approver
 // can open straight from the queue (same shape the approval email uses).
 const TERM_NAMES: Record<string, string> = { advance: 'Advance', beforeDelivery: 'Before Delivery', running: 'Running', postDelivery: 'Post Delivery', postCompletion: 'Post Completion', retention: 'Retention' };
+function parseSheetPayments(json: string | null | undefined): any[] {
+  try { const a = json ? JSON.parse(json) : []; return Array.isArray(a) ? a : []; } catch { return []; }
+}
 function piLinks(json: string | null | undefined): { term: string; piNumber: string | null; piUrl: string }[] {
   let raw: Record<string, any> = {};
   try { raw = json ? JSON.parse(json) : {}; } catch { return []; }
@@ -129,7 +132,11 @@ router.get('/act', asyncHandler(async (req, res) => {
 
   const data = await approvalDocData(p.docType, p.docId);
   // Sign the PDF path so the embedded viewer loads it without an app session.
-  const pdfUrl = data?.pdfPath ? signApiPath(data.pdfPath) : null;
+  // For a PO/WO, the approver reviews the INTERNAL copy (BOQ head + item under each
+  // line) but WITHOUT the "INTERNAL COPY" marker — it's a review, not a vendor copy.
+  // Query params are excluded from the signature, so appending after signing is safe.
+  let pdfUrl = data?.pdfPath ? signApiPath(data.pdfPath) : null;
+  if (pdfUrl && data?.pdfPath?.includes('/procurement/docs/')) pdfUrl += '&internal=1&marker=0';
   res.send(actPage({
     token, intent, pdfUrl,
     title: data ? `${data.docLabelLong} ${data.number}` : 'Approval',
@@ -285,7 +292,7 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const items = [
     // `label` is what the UI shows (PO/WO, or "Payment" for a PAY-### record); `kind`
     // stays PO/WO/GRN so the PDF path + pipeline logic keep working.
-    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [] })),
+    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
     ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, goodsReceipts: [] })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 

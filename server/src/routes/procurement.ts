@@ -29,6 +29,7 @@ import { notifyUser, notifyProjectRoles } from '../services/notify';
 import { hasSection, shouldHideFinancials } from '../lib/permissions';
 import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
 import { kycScore, kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
+import { fetchUtrRows, matchPaymentUtr, matchDocUtrs } from '../services/fmsUtr';
 import { extractKycFields } from '../services/kycExtract';
 import { readFromDb } from '../lib/fileStore';
 import { deliveryInfo } from '../services/delivery';
@@ -184,6 +185,8 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         // Proforma Invoices uploaded on this PO/WO (per term) — shown as a link.
         pis: Object.entries(parseJson(d.termPis, {}) as Record<string, any>).filter(([, v]) => v && v.piPdfUrl).map(([k, v]) => ({ term: k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl as string })),
         goodsReceipts: grByDoc.get(d.id) ?? [],
+        // UTR(s) backfilled from the Accounts sheet (paid via the form) — shown inline.
+        sheetPayments: parseJson(d.sheetPayments, []),
       })),
       req.account,
     ),
@@ -326,9 +329,11 @@ router.get('/docs/:docId/pipeline', requireProjectMember, requireAnyPage(...DOC_
   const totalReceivedQty = Math.round(receipts.reduce((s, r) => s + r.receivedQty, 0) * 100) / 100;
 
   const payload = {
-    doc: { docNumber: doc.docNumber, type: doc.type, vendorName: doc.vendorName, finalAmount: doc.finalAmount, status: doc.status, projectName: doc.project?.name ?? null },
+    doc: { docNumber: doc.docNumber, type: doc.type, vendorName: doc.vendorName, finalAmount: doc.finalAmount, basicAmount: doc.basicAmount, gstEnabled: doc.gstEnabled, gstPct: doc.gstPct, payGstInclusive: doc.payGstInclusive, status: doc.status, projectName: doc.project?.name ?? null },
     approval: { approved: chain.approved, total: chain.total, steps },
-    payment: { paidAmount, pendingAmount, termsTotal: terms.length, terms },
+    // sheetPayments: UTR(s) backfilled from the Accounts sheet for POs paid via the
+    // form before the in-app flow (read-only mirror — not counted in paid/pending).
+    payment: { paidAmount, pendingAmount, termsTotal: terms.length, terms, sheetPayments: parseJson(doc.sheetPayments, []) },
     goodsReceipt: { count: grs.length, totalPoQty, totalReceivedQty, remainingQty: Math.round(Math.max(totalPoQty - totalReceivedQty, 0) * 100) / 100, receipts },
   };
   res.json({ pipeline: maskFinancials(payload, req.account) });
@@ -700,7 +705,12 @@ function pdfFileName(...parts: (string | null | undefined)[]): string {
 
 // GET .../docs/:docId/pdf — render the PO/WO PDF.
 router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES), requireFinancialView, asyncHandler(async (req, res) => {
-  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { sortOrder: 'asc' } }, project: { select: { name: true } } } });
+  // The INTERNAL copy also needs the linked BOQ item's description (shown under
+  // each line). The vendor copy ignores it. `marker=0` keeps the internal content
+  // but drops the red "INTERNAL COPY" banner — used by the approver-review PDF.
+  const internal = req.query.internal === '1';
+  const internalMarker = req.query.marker !== '0';
+  const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId }, include: { lineItems: { orderBy: { sortOrder: 'asc' }, include: { boqItem: { select: { description: true } } } }, project: { select: { name: true } } } });
   if (!doc) throw notFound();
   // The clean PDF (for the supplier) carries NO approval trail. Only when the
   // caller asks with ?approvals=1 do we print the internal FINAL APPROVAL stamp
@@ -714,9 +724,11 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
       .sort((a, b) => a.order - b.order)
       .map((s) => ({ name: s.approverName, role: s.approverRole, at: s.actedAt, remarks: s.remarks }));
   }
+  // Attach the linked BOQ item's description as boqItemName (internal copy only).
+  const lineItems = doc.lineItems.map(({ boqItem, ...l }: any) => ({ ...l, boqItemName: internal ? (boqItem?.description ?? null) : null }));
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, withApprovals ? 'Approved' : undefined)}"`);
-  renderProcurementPdf({ ...doc, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res);
+  res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, internal ? 'Internal' : withApprovals ? 'Approved' : undefined)}"`);
+  renderProcurementPdf({ ...doc, lineItems, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res, { internal, internalMarker });
 }));
 
 // POST .../docs/:docId/term-pi/:termKey — upload the Proforma Invoice for ONE
@@ -1335,6 +1347,72 @@ router.post('/grns/:grnId/mark-paid', requireProjectMember, requireSection('canM
   res.json({ grn: updated });
 }));
 
+// POST .../fetch-sheet-utr — backfill UTRs for payments made BEFORE the in-app flow
+// (they were paid via the company Accounts sheet). Reads the FMS sheet READ-ONLY,
+// matches each payment missing a UTR, and applies ONLY confident (unique) matches;
+// ambiguous ones are returned for manual review — never auto-applied.
+router.post('/fetch-sheet-utr', requireProjectMember, requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
+  const rows = await fetchUtrRows(req.query.force === '1');
+  const pays = await prisma.gRN.findMany({
+    where: { projectId: req.params.projectId },
+    select: { id: true, grnNumber: true, vendorName: true, invoiceNumber: true, amountToPay: true, piValue: true, invoiceValue: true, utrNumber: true, paymentStatus: true, paidAt: true },
+  });
+  const matched: any[] = [], ambiguous: any[] = [], skipped: any[] = [];
+  for (const p of pays) {
+    if (p.utrNumber) { skipped.push({ payment: p.grnNumber, reason: 'already has a UTR' }); continue; }
+    const amount = Number(p.amountToPay ?? p.piValue ?? p.invoiceValue ?? 0);
+    if (!(amount > 0)) { skipped.push({ payment: p.grnNumber, reason: 'no amount to match on' }); continue; }
+    const { match, reason } = matchPaymentUtr({ vendorName: p.vendorName, invoiceNumber: p.invoiceNumber, amount }, rows);
+    if (match) {
+      // Attach the UTR + mark the payment paid (it truly was). We do NOT touch the
+      // milestone here — that would over-mark a partial term as fully paid. The
+      // pipeline reads the UTR straight off the payment record.
+      await prisma.gRN.update({ where: { id: p.id }, data: { utrNumber: match.utr, paymentStatus: p.paymentStatus === 'CLOSED' ? 'CLOSED' : 'PAID', ...(p.paidAt ? {} : { paidAt: new Date() }) } });
+      await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_UTR_FROM_SHEET', entity: 'GRN', entityId: p.id, details: { utr: match.utr, vrNo: match.vrNo, via: match.via } });
+      matched.push({ payment: p.grnNumber, vendor: p.vendorName, amount, utr: match.utr, vrNo: match.vrNo, via: match.via, sheetVendor: match.sheetVendor, sheetInvoice: match.sheetInvoice });
+    } else {
+      ambiguous.push({ payment: p.grnNumber, vendor: p.vendorName, amount, reason });
+    }
+  }
+
+  // Approved PO/WO docs paid via the Accounts FORM (no in-app payment record). Match
+  // by vendor + amount and store the UTR(s) on the doc so the pipeline can show them.
+  // SAFETY: if the SAME sheet UTR is claimed by more than one PO (a duplicate/revised
+  // PO), we do NOT auto-apply it — those are returned for manual review. Installment
+  // POs (several UNIQUE UTRs) are fine and are applied.
+  // Collision map is built from ALL approved docs (every project) so a UTR shared by
+  // two POs is caught even if they live in different projects. We only persist/report
+  // the CURRENT project's docs.
+  const allApprovedDocs = await prisma.procurementDoc.findMany({
+    where: { type: { in: ['PO', 'WO'] }, status: { in: ['APPROVED', 'ON_HOLD'] } },
+    select: { id: true, projectId: true, docNumber: true, type: true, vendorName: true, basicAmount: true, finalAmount: true, termPis: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  const allMatches = allApprovedDocs.map((d) => {
+    const piValues = Object.values(parseJson(d.termPis, {}) as Record<string, any>).map((v) => Number(v?.piValue)).filter((n) => n > 0);
+    return { d, utrs: matchDocUtrs({ vendorName: d.vendorName, basicAmount: d.basicAmount, finalAmount: d.finalAmount, piValues }, rows).utrs };
+  }).filter((x) => x.utrs.length > 0);
+  const vrToDocs = new Map<string, string[]>();
+  for (const { d, utrs } of allMatches) for (const u of utrs) { const a = vrToDocs.get(u.vrNo) || []; a.push(d.docNumber); vrToDocs.set(u.vrNo, a); }
+  const collides = (utrs: typeof allMatches[number]['utrs']) => utrs.some((u) => (vrToDocs.get(u.vrNo)?.length ?? 0) > 1);
+
+  const docMatches = allMatches.filter((m) => m.d.projectId === req.params.projectId);
+  const docsUpdated: any[] = [], docsAmbiguous: any[] = [];
+  const fetchedAt = new Date().toISOString();
+  for (const { d, utrs } of docMatches) {
+    if (collides(utrs)) {
+      docsAmbiguous.push({ docNumber: d.docNumber, vendor: d.vendorName, amount: d.finalAmount, utrs: utrs.map((u) => ({ utr: u.utr, vrNo: u.vrNo })), sharedWith: [...new Set(utrs.flatMap((u) => vrToDocs.get(u.vrNo) || []))].filter((x) => x !== d.docNumber), reason: 'same UTR is on another PO (likely a duplicate) — apply manually' });
+      continue;
+    }
+    const payload = utrs.map((u) => ({ utr: u.utr, vrNo: u.vrNo, amount: u.sheetAmount, invoice: u.sheetInvoice, matchedBy: u.via, fetchedAt }));
+    await prisma.procurementDoc.update({ where: { id: d.id }, data: { sheetPayments: JSON.stringify(payload) } });
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'DOC_UTR_FROM_SHEET', entity: 'ProcurementDoc', entityId: d.id, details: { count: payload.length, vrNos: utrs.map((u) => u.vrNo) } });
+    docsUpdated.push({ docNumber: d.docNumber, vendor: d.vendorName, amount: d.finalAmount, utrs: payload });
+  }
+
+  res.json({ matched, ambiguous, skipped, docsUpdated, docsAmbiguous, sheetRowsScanned: rows.length });
+}));
+
 // Optional payment-proof PDF (bank advice / UTR screenshot) shown on the entry.
 router.post('/grns/:grnId/payment-proof', requireProjectMember, requireSection('canMarkPaid'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw badRequest('No file uploaded');
@@ -1405,14 +1483,18 @@ export function packingListShape(gr: any) {
     customerName: gr.project?.clientName ?? null,
     customerAddress: gr.siteAddress || gr.project?.siteLocation || null,
     clientPoNumber: gr.project?.clientPoNumber ?? null,
+    // The internal PO/WO this GRN is against (shown on the packing list).
+    againstNumber: gr.doc?.docNumber ?? null,
+    againstType: gr.doc?.type ?? null,
     invoiceNumber: gr.invoiceNumber,
     dispatchDate: gr.dispatchDate,
     deliveryDate: gr.deliveryDate,
     vehicleNumber: gr.vehicleNumber,
     vehicleSize: gr.vehicleSize,
     ewayBillNumber: gr.ewayBillNumber,
+    siteSupervisor: gr.siteSupervisor || null,
     customColumns: parseJson(gr.customColumns, []),
-    lineItems: (gr.lineItems || []).map((l: any) => ({ srNo: l.srNo, description: l.description, receiptQty: l.receiptQty, customValues: parseJson(l.customValues, {}) })),
+    lineItems: (gr.lineItems || []).map((l: any) => ({ srNo: l.srNo, description: l.description, receiptQty: l.receiptQty, defectQty: l.defectQty, customValues: parseJson(l.customValues, {}) })),
   };
 }
 
@@ -1496,6 +1578,7 @@ const goodsReceiptUpdate = z.object({
   // Packing-list / delivery fields (Amisha interview 63/64).
   invoiceNumber: z.string().nullable().optional(), dispatchDate: z.string().nullable().optional(), deliveryDate: z.string().nullable().optional(), ewayBillNumber: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
+  siteSupervisor: z.string().nullable().optional(),
   // Mode 2 (custom packing list) — configurable columns Amisha builds.
   customColumns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
   packingListNo: z.coerce.number().int().nullable().optional(),
@@ -1533,6 +1616,7 @@ router.patch('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), 
     where: { id: gr.id },
     data: {
       vehicleNumber: b.vehicleNumber ?? undefined, vehicleSize: b.vehicleSize ?? undefined, driverName: b.driverName ?? undefined, deliveryChallanNumber: b.deliveryChallanNumber ?? undefined, remarks: b.remarks ?? undefined,
+      siteSupervisor: b.siteSupervisor ?? undefined,
       invoiceNumber: b.invoiceNumber ?? undefined, ewayBillNumber: b.ewayBillNumber ?? undefined,
       dispatchDate: b.dispatchDate ? new Date(b.dispatchDate) : (b.dispatchDate === null ? null : undefined),
       deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : (b.deliveryDate === null ? null : undefined),
@@ -1613,16 +1697,18 @@ router.post('/goods-receipts/:grId/confirm-billing', requireProjectMember, requi
   res.json({ goodsReceipt: { ...serializeGoodsReceipt(updated), signedDocs: await signedDocsFor(gr.grnNumber) } });
 }));
 
-// GET .../goods-receipts/:grId/pdf — the "Manifest cum Final Packing List" PDF.
+// GET .../goods-receipts/:grId/pdf — the "Final Packing List" PDF.
 // Ends in /pdf so the signed-link gate in requireAuth also serves it to Sheets.
 router.get('/goods-receipts/:grId/pdf', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const gr = await prisma.goodsReceipt.findFirst({
     where: { id: req.params.grId, projectId: req.params.projectId },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } }, doc: { select: { docNumber: true, type: true } } },
   });
   if (!gr) throw notFound();
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="PackingList-${gr.grnNumber}.pdf"`);
+  // Site Supervisor prints only the typed name (blank → blank line); it no longer
+  // falls back to the raiser, so no raiser lookup is needed.
   renderPackingListPdf(packingListShape(gr), res);
 }));
 
@@ -1632,6 +1718,16 @@ router.post('/goods-receipts/:grId/photo', requireProjectMember, requireEdit('gr
   const gr = await prisma.goodsReceipt.update({ where: { id: req.params.grId }, data: { photoUrl: fileUrl } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PHOTO', fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
   res.status(201).json({ ok: true, photoUrl: gr.photoUrl });
+}));
+
+// POST .../goods-receipts/:grId/lines/:lineId/photo — per-item delivery photo (B5).
+router.post('/goods-receipts/:grId/lines/:lineId/photo', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('No file uploaded');
+  const line = await prisma.goodsReceiptLine.findFirst({ where: { id: req.params.lineId, grId: req.params.grId, gr: { projectId: req.params.projectId } }, select: { id: true } });
+  if (!line) throw notFound('Line not found on this goods receipt');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  await prisma.goodsReceiptLine.update({ where: { id: line.id }, data: { photoUrl: fileUrl } });
+  res.status(201).json({ ok: true, photoUrl: fileUrl });
 }));
 
 router.delete('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
@@ -1759,6 +1855,9 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     };
     return {
       docId: d.id, type: d.type, docNumber: d.docNumber, vendorName: d.vendorName,
+      // UTR(s) backfilled from the Accounts sheet (paid via the form before the
+      // in-app flow) — shown in the pipeline, not part of the in-app paid/pending.
+      sheetPayments: parseJson(d.sheetPayments, []),
       totalValue: d.basicAmount, gstAmount: d.gstAmount, totalWithGst: total,
       amountInvoiced: invoiced, amountAdvanced: advanced, amountPaid: paid, amountPending: Math.round((total - paid) * 100) / 100,
       progressPct: total > 0 ? Math.round((paid / total) * 1000) / 10 : 0,

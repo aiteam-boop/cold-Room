@@ -5,7 +5,7 @@ import { asyncHandler, badRequest, notFound } from '../lib/errors';
 import { audit } from '../lib/audit';
 import { renderPackingListPdf } from '../services/procurementPdf';
 import { packingListShape, signedDocsFor } from './procurement';
-import { uploadPdf } from '../middleware/upload';
+import { uploadPdf, upload } from '../middleware/upload';
 import { SIGNED_TYPE } from '../services/grnReminders';
 
 // ── Public, no-login Goods-Receipt form (Amisha interview 63/64, Phase 2) ──────
@@ -46,6 +46,7 @@ function publicSerialize(gr: any, signedDocs: any[] = []) {
     dispatchDate: gr.dispatchDate,
     deliveryDate: gr.deliveryDate,
     remarks: gr.remarks,
+    siteSupervisor: gr.siteSupervisor,
     packingListNo: gr.packingListNo,
     photoUrl: gr.photoUrl,
     billingConfirmedAt: gr.billingConfirmedAt,
@@ -63,6 +64,7 @@ function publicSerialize(gr: any, signedDocs: any[] = []) {
       receiptQty: l.receiptQty,
       defectQty: l.defectQty,
       acceptedQty: l.acceptedQty,
+      photoUrl: l.photoUrl,
       customValues: parseJson(l.customValues, {}),
       remarks: l.remarks,
     })),
@@ -95,6 +97,7 @@ const updateSchema = z.object({
   deliveryDate: z.string().nullable().optional(),
   ewayBillNumber: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
+  siteSupervisor: z.string().nullable().optional(),
   packingListNo: z.coerce.number().int().nullable().optional(),
   lineItems: z.array(z.object({
     id: z.string().optional(),
@@ -142,6 +145,7 @@ router.patch('/:token', asyncHandler(async (req, res) => {
       invoiceNumber: b.invoiceNumber ?? undefined,
       ewayBillNumber: b.ewayBillNumber ?? undefined,
       remarks: b.remarks ?? undefined,
+      siteSupervisor: b.siteSupervisor ?? undefined,
       dispatchDate: b.dispatchDate ? new Date(b.dispatchDate) : (b.dispatchDate === null ? null : undefined),
       deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : (b.deliveryDate === null ? null : undefined),
       ...(b.packingListNo !== undefined && { packingListNo: b.packingListNo }),
@@ -155,12 +159,30 @@ router.patch('/:token', asyncHandler(async (req, res) => {
   res.json({ goodsReceipt: publicSerialize(updated) });
 }));
 
+// POST /:token/lines/:lineId/photo — attach the per-item delivery photo (B5).
+// Camera or gallery image from the mobile form. Only while the GR is a DRAFT.
+router.post('/:token/lines/:lineId/photo', upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Please attach a photo.');
+  const gr = await findByToken(req.params.token);
+  if (!gr) throw notFound('This link is invalid or has expired.');
+  if (gr.status !== 'DRAFT') throw badRequest('This goods receipt is already submitted and locked.');
+  const line = gr.lineItems.find((l) => l.id === req.params.lineId);
+  if (!line) throw notFound('Line not found on this goods receipt.');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  await prisma.goodsReceiptLine.update({ where: { id: line.id }, data: { photoUrl: fileUrl } });
+  res.status(201).json({ ok: true, photoUrl: fileUrl });
+}));
+
 // POST /:token/submit — the engineer confirms delivery; the record is locked.
 // `submittedAt` starts the daily "signed packing list pending" reminder clock.
 router.post('/:token/submit', asyncHandler(async (req, res) => {
   const gr = await findByToken(req.params.token);
   if (!gr) throw notFound('This link is invalid or has expired.');
   if (gr.status !== 'DRAFT') throw badRequest('This goods receipt is already submitted.');
+  // B5: a photo is COMPULSORY for every item that actually arrived (receiptQty > 0)
+  // — strict enforcement with site staff. Lines with nothing received are exempt.
+  const missing = gr.lineItems.filter((l) => (l.receiptQty || 0) > 0 && !l.photoUrl);
+  if (missing.length) throw badRequest(`Add a delivery photo for every received item before submitting. Missing on ${missing.length} item(s) (Sr. ${missing.map((l) => l.srNo).join(', ')}).`);
   const updated = await prisma.goodsReceipt.update({ where: { id: gr.id }, data: { status: 'RECEIVED', submittedAt: new Date() } });
   await audit({ projectId: gr.projectId, action: 'GOODS_RECEIPT_SUBMIT_PUBLIC', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, via: 'site-engineer-link', siteEngineerEmail: gr.siteEngineerEmail } });
   res.json({ ok: true, goodsReceipt: publicSerialize({ ...gr, ...updated, lineItems: gr.lineItems, doc: gr.doc, project: gr.project }) });

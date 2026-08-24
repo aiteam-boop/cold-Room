@@ -5,6 +5,30 @@ import { useAuth } from '../../lib/auth';
 import { EmptyState, KPI, Modal, Spinner } from '../ui';
 import { fmtDate, inr } from '../../lib/format';
 
+// Spread a PO's Accounts-sheet payments across its still-PENDING terms (greedy, in
+// order) so each term SHOWS as paid-via-sheet with its UTR. This is a display mirror
+// only — the in-app milestone/installment records are never touched (the payment was
+// actually made outside the app, via the Accounts form). Terms already active in-app
+// (TRIGGERED/PAID) are left to the in-app flow.
+function computeSheetAlloc(r: any): Record<string, { paid: number; full: boolean; utrs: any[] }> {
+  const alloc: Record<string, { paid: number; full: boolean; utrs: any[] }> = {};
+  const pool = (r.sheetPayments || []).map((s: any) => ({ ...s, left: Number(s.amount) || 0 }));
+  if (!pool.length) return alloc;
+  for (const m of (r.milestones || [])) {
+    if (m.status !== 'PENDING') continue;
+    let need = m.inrAmount || 0;
+    const utrs: any[] = []; let paid = 0;
+    for (const p of pool) {
+      if (need <= 0.01) break;
+      if (p.left <= 0.01) continue;
+      const take = Math.min(p.left, need);
+      paid += take; need -= take; p.left -= take; utrs.push(p);
+    }
+    if (paid > 0.01) alloc[m.id] = { paid, full: need <= 0.01, utrs };
+  }
+  return alloc;
+}
+
 export default function PaymentDashboard({ projectId }: { projectId: string; role: string }) {
   const qc = useQueryClient();
   const { canEdit, can, hideFinancials } = useAuth();
@@ -23,13 +47,40 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pay-dash', projectId] }),
     onError: (e) => alert(errMsg(e)),
   });
+  // Backfill UTRs for old payments from the company Accounts sheet (read-only).
+  const [utrReport, setUtrReport] = useState<any>(null);
+  const fetchUtr = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/fetch-sheet-utr`)).data,
+    onSuccess: (r) => { setUtrReport(r); qc.invalidateQueries({ queryKey: ['pay-dash', projectId] }); },
+    onError: (e) => alert(errMsg(e)),
+  });
 
   if (isLoading || !data) return <Spinner label="Loading payment pipeline…" />;
   const { rows, summary, vendors = [] } = data;
   if (rows.length === 0) return <EmptyState title="No approved POs/WOs yet" hint="Approved Purchase Orders and Work Orders appear here with their payment milestones." />;
+  // Per-PO sheet-payment allocation (display mirror — see computeSheetAlloc).
+  const allocByDoc: Record<string, ReturnType<typeof computeSheetAlloc>> = {};
+  for (const r of rows) allocByDoc[r.docId] = computeSheetAlloc(r);
+
+  // The row's paid amount/percentage must also count payments made via the
+  // Accounts sheet (they never touch the in-app amountPaid), otherwise a PO that
+  // shows "Paid (Accounts)" still reads "0% paid" with an empty bar. The sheet
+  // allocation only fills PENDING terms, so it never double-counts in-app paid.
+  const sheetPaidOf = (r: any) => Object.values(allocByDoc[r.docId] ?? {}).reduce((s: number, a: { paid: number }) => s + a.paid, 0);
+  const dispPaidOf = (r: any) => (r.amountPaid || 0) + sheetPaidOf(r);
+  const dispPctOf = (r: any) => (r.totalWithGst > 0 ? Math.min(Math.round((dispPaidOf(r) / r.totalWithGst) * 100), 100) : r.progressPct);
 
   return (
     <div className="space-y-4">
+      {isAccounts && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs">
+          <span className="font-medium text-slate-600">Old payments paid via the Accounts sheet?</span>
+          <button className="btn-outline text-xs disabled:opacity-40" disabled={fetchUtr.isPending} onClick={() => fetchUtr.mutate()}>
+            {fetchUtr.isPending ? 'Fetching from sheet…' : '⬇ Fetch UTR from Accounts sheet'}
+          </button>
+          <span className="text-slate-400">Reads the FMS sheet (view-only), matches by vendor + amount, and fills the UTR for any payment still missing one.</span>
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <KPI label="Total PO Value" value={money(summary.totalPO)} />
         <KPI label="Total WO Value" value={money(summary.totalWO)} />
@@ -50,8 +101,8 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
               </div>
               <div className="hidden w-28 text-right text-sm sm:block">{money(r.totalWithGst)}</div>
               <div className="flex-1">
-                <div className="h-2.5 w-full rounded-full bg-slate-200"><div className="h-2.5 rounded-full bg-green-500" style={{ width: `${Math.min(r.progressPct, 100)}%` }} /></div>
-                <div className="mt-0.5 text-xs text-slate-400">{r.progressPct}% paid · {money(r.amountPaid)} / {money(r.totalWithGst)} · {r.milestonesTriggered}/{r.milestonesTotal} triggered</div>
+                <div className="h-2.5 w-full rounded-full bg-slate-200"><div className="h-2.5 rounded-full bg-green-500" style={{ width: `${dispPctOf(r)}%` }} /></div>
+                <div className="mt-0.5 text-xs text-slate-400">{dispPctOf(r)}% paid · {money(dispPaidOf(r))} / {money(r.totalWithGst)} · {r.milestonesTriggered}/{r.milestonesTotal} triggered{sheetPaidOf(r) > 0 && <span className="text-green-600"> · incl. {money(sheetPaidOf(r))} via Accounts sheet</span>}</div>
                 {/* Invoiced vs PO variance — payments are capped at the invoiced amount. */}
                 {!hideFinancials && r.amountInvoiced > 0 && (
                   <div className="mt-0.5 text-xs">
@@ -63,7 +114,9 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                   </div>
                 )}
               </div>
-              <span className={`badge ${r.grnStatus === 'Payment Paid' ? 'bg-green-100 text-green-700' : r.grnStatus === 'Payment Triggered' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{r.grnStatus}</span>
+              {(r.sheetPayments?.length ?? 0) > 0 && r.grnStatus === 'No Payment'
+                ? <span className="badge bg-green-100 text-green-700" title="Paid via the Accounts sheet (outside the app)">✓ Paid (Accounts)</span>
+                : <span className={`badge ${r.grnStatus === 'Payment Paid' ? 'bg-green-100 text-green-700' : r.grnStatus === 'Payment Triggered' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{r.grnStatus}</span>}
             </button>
 
             {open === r.docId && (
@@ -71,7 +124,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                 <table className="w-full text-sm">
                   <thead><tr className="text-left text-xs uppercase text-slate-400"><th className="py-1">Milestone</th><th>Condition</th><th className="text-right">Amount</th><th>Status</th><th></th></tr></thead>
                   <tbody>
-                    {r.milestones.map((m: any) => (
+                    {r.milestones.map((m: any) => { const sa = allocByDoc[r.docId]?.[m.id]; return (
                       <tr key={m.id} className="border-t border-slate-100">
                         <td className="py-2 font-medium text-slate-700">{m.name} <span className="text-xs font-normal text-slate-400">{m.percentage}%</span></td>
                         <td className="text-xs text-slate-500">{m.triggerCondition || '—'}</td>
@@ -88,34 +141,47 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                           )}
                         </td>
                         <td>
-                          <span className={`badge ${m.status === 'PAID' ? 'bg-green-100 text-green-700' : m.status === 'PARTIALLY_PAID' ? 'bg-orange-100 text-orange-700' : m.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{m.status === 'PARTIALLY_PAID' ? 'PARTLY PAID' : m.status}</span>
-                          {m.actualTriggerDate && m.status !== 'PAID' && m.status !== 'PARTIALLY_PAID' && <div className="text-[11px] text-slate-400">Triggered {fmtDate(m.actualTriggerDate)}</div>}
-                          {(m.status === 'PAID' || m.status === 'PARTIALLY_PAID') && (
-                            <div className="text-[11px] text-slate-400">
-                              {m.utrNumber ? <>UTR: <span className="font-medium text-slate-600">{m.utrNumber}</span></> : m.paymentReference ? `Ref: ${m.paymentReference}` : ''}
-                              {m.paymentDate && ` · ${fmtDate(m.paymentDate)}`}
-                              {m.paymentProofUrl && <> · <a className="text-navy hover:underline" href={m.paymentProofUrl} target="_blank" rel="noreferrer">proof</a></>}
-                              {m.installments?.length > 1 && (
-                                <div className="mt-0.5">{m.installments.map((i: any, idx: number) => (<span key={i.id}>{idx > 0 ? ' · ' : ''}{money(i.amount)}{i.utrNumber ? ` (${i.utrNumber})` : ''}</span>))}</div>
+                          {/* Paid via the Accounts sheet (outside the app) — show it as
+                              paid with the UTR, in green, instead of PENDING. */}
+                          {sa && m.status === 'PENDING' ? (
+                            <>
+                              <span className="badge bg-green-100 text-green-700">✓ PAID{sa.full ? '' : ' (PART)'} · sheet</span>
+                              <div className="mt-0.5 text-[11px] text-slate-500">UTR: {sa.utrs.map((u: any, i: number) => <span key={i}>{i > 0 ? ', ' : ''}<span className="font-medium text-slate-700">{u.utr}</span>{u.vrNo ? <span className="text-slate-400"> ({u.vrNo})</span> : ''}</span>)}</div>
+                              <div className="text-[10px] text-slate-400">via Accounts sheet · {money(sa.paid)}{sa.full ? '' : ` of ${money(m.inrAmount)}`}</div>
+                            </>
+                          ) : (
+                            <>
+                              <span className={`badge ${m.status === 'PAID' ? 'bg-green-100 text-green-700' : m.status === 'PARTIALLY_PAID' ? 'bg-orange-100 text-orange-700' : m.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{m.status === 'PARTIALLY_PAID' ? 'PARTLY PAID' : m.status}</span>
+                              {m.actualTriggerDate && m.status !== 'PAID' && m.status !== 'PARTIALLY_PAID' && <div className="text-[11px] text-slate-400">Triggered {fmtDate(m.actualTriggerDate)}</div>}
+                              {(m.status === 'PAID' || m.status === 'PARTIALLY_PAID') && (
+                                <div className="text-[11px] text-slate-400">
+                                  {m.utrNumber ? <>UTR: <span className="font-medium text-slate-600">{m.utrNumber}</span></> : m.paymentReference ? `Ref: ${m.paymentReference}` : ''}
+                                  {m.paymentDate && ` · ${fmtDate(m.paymentDate)}`}
+                                  {m.paymentProofUrl && <> · <a className="text-navy hover:underline" href={m.paymentProofUrl} target="_blank" rel="noreferrer">proof</a></>}
+                                  {m.installments?.length > 1 && (
+                                    <div className="mt-0.5">{m.installments.map((i: any, idx: number) => (<span key={i.id}>{idx > 0 ? ' · ' : ''}{money(i.amount)}{i.utrNumber ? ` (${i.utrNumber})` : ''}</span>))}</div>
+                                  )}
+                                </div>
                               )}
-                            </div>
+                            </>
                           )}
                         </td>
                         <td className="text-right">
-                          {m.status === 'PENDING' && isProc && (
+                          {/* Sheet-paid terms need no action — they were settled outside the app. */}
+                          {!sa && m.status === 'PENDING' && isProc && (
                             <button className="text-xs font-medium text-navy hover:underline" onClick={() => trigger.mutate({ docId: r.docId, mid: m.id, date: new Date().toISOString().slice(0, 10) })}>Mark Triggered</button>
                           )}
                           {/* Term triggers on submit, but is only payable once its own
                               payment is approved. A partly-paid term can be re-paid for
                               the balance (A1/A3). */}
-                          {(m.status === 'TRIGGERED' || m.status === 'PARTIALLY_PAID') && isAccounts && (
+                          {!sa && (m.status === 'TRIGGERED' || m.status === 'PARTIALLY_PAID') && isAccounts && (
                             m.paymentApproved
                               ? <button className="text-xs font-medium text-green-700 hover:underline" onClick={() => setPaying({ docId: r.docId, milestone: m })}>{m.status === 'PARTIALLY_PAID' ? 'Pay balance' : 'Mark Paid'}</button>
                               : <span className="text-[11px] text-slate-400">Awaiting approval</span>
                           )}
                         </td>
                       </tr>
-                    ))}
+                    ); })}
                   </tbody>
                 </table>
                 {/* Approved GRNs on this PO/WO with their invoice files. */}
@@ -199,6 +265,89 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
           onClose={() => setPaying(null)}
           onDone={() => { setPaying(null); qc.invalidateQueries({ queryKey: ['pay-dash', projectId] }); }}
         />
+      )}
+
+      {utrReport && (
+        <Modal title="UTR fetch from Accounts sheet" onClose={() => setUtrReport(null)} wide>
+          <div className="space-y-3 text-sm">
+            <div className="text-xs text-slate-500">Scanned {utrReport.sheetRowsScanned} sheet rows with a UTR.</div>
+            <div>
+              <div className="mb-1 font-semibold text-green-700">✓ Matched &amp; filled ({utrReport.matched?.length ?? 0})</div>
+              {(utrReport.matched?.length ?? 0) === 0 ? <div className="text-xs text-slate-400">None.</div> : (
+                <table className="w-full text-xs">
+                  <thead className="text-left text-slate-400"><tr><th className="py-1">Payment</th><th>Vendor</th><th className="text-right">Amount</th><th>UTR</th><th>VR No.</th><th>Matched by</th></tr></thead>
+                  <tbody>
+                    {utrReport.matched.map((m: any) => (
+                      <tr key={m.payment} className="border-t border-slate-100">
+                        <td className="py-1 font-medium text-navy">{m.payment}</td>
+                        <td className="text-slate-600">{m.vendor}</td>
+                        <td className="text-right">{money(m.amount)}</td>
+                        <td className="font-mono text-[11px] text-slate-700">{m.utr}</td>
+                        <td className="text-slate-500">{m.vrNo}</td>
+                        <td><span className="badge bg-green-50 text-green-700">{m.via}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {(utrReport.docsUpdated?.length ?? 0) > 0 && (
+              <div>
+                <div className="mb-0.5 font-semibold text-navy">💠 Approved POs updated with sheet UTR ({utrReport.docsUpdated.length})</div>
+                <div className="mb-1 text-[11px] text-slate-400">Paid via the Accounts form — the UTR now shows in each PO's pipeline (Payment card). Read-only mirror; not counted in in-app paid/pending.</div>
+                <table className="w-full text-xs">
+                  <thead className="text-left text-slate-400"><tr><th className="py-1">PO/WO</th><th>Vendor</th><th className="text-right">Amount</th><th>UTR(s) · VR No.</th></tr></thead>
+                  <tbody>
+                    {utrReport.docsUpdated.map((d: any) => (
+                      <tr key={d.docNumber} className="border-t border-slate-100 align-top">
+                        <td className="py-1 font-medium text-navy">{d.docNumber}</td>
+                        <td className="text-slate-600">{d.vendor}</td>
+                        <td className="text-right">{money(d.amount)}</td>
+                        <td>{d.utrs.map((u: any, i: number) => <div key={i} className="font-mono text-[11px] text-slate-700">{u.utr} <span className="text-slate-400">· {u.vrNo}</span></div>)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(utrReport.docsAmbiguous?.length ?? 0) > 0 && (
+              <div>
+                <div className="mb-0.5 font-semibold text-rose-700">⛔ POs with a shared UTR — NOT applied ({utrReport.docsAmbiguous.length})</div>
+                <div className="mb-1 text-[11px] text-slate-400">The same sheet UTR is on more than one PO (likely a duplicate/revised PO). Left untouched — decide manually which PO it belongs to.</div>
+                <table className="w-full text-xs">
+                  <thead className="text-left text-slate-400"><tr><th className="py-1">PO/WO</th><th>Vendor</th><th className="text-right">Amount</th><th>Shared UTR · with</th></tr></thead>
+                  <tbody>
+                    {utrReport.docsAmbiguous.map((d: any) => (
+                      <tr key={d.docNumber} className="border-t border-slate-100 align-top">
+                        <td className="py-1 font-medium text-navy">{d.docNumber}</td>
+                        <td className="text-slate-600">{d.vendor}</td>
+                        <td className="text-right">{money(d.amount)}</td>
+                        <td>{d.utrs.map((u: any, i: number) => <div key={i} className="font-mono text-[11px] text-slate-700">{u.vrNo}</div>)}<span className="text-[10px] text-rose-500">shared with {(d.sharedWith || []).join(', ')}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(utrReport.ambiguous?.length ?? 0) > 0 && (
+              <div>
+                <div className="mb-1 font-semibold text-amber-700">⚠ Needs manual check ({utrReport.ambiguous.length})</div>
+                <table className="w-full text-xs">
+                  <thead className="text-left text-slate-400"><tr><th className="py-1">Payment</th><th>Vendor</th><th className="text-right">Amount</th><th>Why not auto-filled</th></tr></thead>
+                  <tbody>
+                    {utrReport.ambiguous.map((a: any) => (
+                      <tr key={a.payment} className="border-t border-slate-100"><td className="py-1 font-medium text-navy">{a.payment}</td><td className="text-slate-600">{a.vendor}</td><td className="text-right">{money(a.amount)}</td><td className="text-slate-500">{a.reason}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(utrReport.skipped?.length ?? 0) > 0 && (
+              <div className="text-xs text-slate-400">Skipped {utrReport.skipped.length}: {utrReport.skipped.map((s: any) => `${s.payment} (${s.reason})`).join(', ')}</div>
+            )}
+            <div className="flex justify-end"><button className="btn-primary text-sm" onClick={() => setUtrReport(null)}>Done</button></div>
+          </div>
+        </Modal>
       )}
     </div>
   );

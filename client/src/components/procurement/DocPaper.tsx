@@ -73,7 +73,7 @@ export function vendorBlock(v: {
 }
 
 // Inline-editable, PDF-styled document with the company's bordered grid layout.
-export default function DocPaper({ d, setD, editable, vendors, boqHeads = [] }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[]; boqHeads?: string[] }) {
+export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], boqItems = [], onSelectVendor }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[]; boqHeads?: string[]; boqItems?: any[]; onSelectVendor?: (id: string) => void }) {
   const isWO = d.type === 'WO';
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
   // GST charged PER LINE at that line's own rate (l.gstPct, else doc default);
@@ -105,6 +105,26 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [] }: 
     if (!head) return;
     setD({ ...d, lineItems: d.lineItems.map((l: any) => (l.isLeadTime || (onlyEmpty && l.boqHead) ? l : { ...l, boqHead: head })) });
   };
+  // Link a line to a BOQ item (same rule as the Form view): sets the link only —
+  // the typed description is NOT overwritten. The head auto-fills from the item's
+  // category when none is chosen, and the unit fills in.
+  const selectBoqItem = (i: number, boqItemId: string) => {
+    if (!boqItemId) { setLine(i, { boqItemId: null }); return; }
+    const b = boqItems.find((x: any) => x.id === boqItemId);
+    if (!b) return;
+    setLine(i, { boqItemId, uom: b.unit ?? null, ...(!d.lineItems?.[i]?.boqHead && b.category ? { boqHead: b.category } : {}) });
+  };
+  const boqItemName = (l: any) => (l.boqItem?.description ?? boqItems.find((x: any) => x.id === l.boqItemId)?.description ?? '').split('\n')[0];
+  // "Head then item" (D2): a line with a head lists only that head's items (+ the
+  // linked one, kept visible). No head → all items.
+  const itemsForLine = (l: any) => {
+    let list = l.boqHead ? boqItems.filter((b: any) => b.category === l.boqHead) : boqItems;
+    if (l.boqItemId && !list.some((b: any) => b.id === l.boqItemId)) {
+      const cur = boqItems.find((b: any) => b.id === l.boqItemId);
+      if (cur) list = [cur, ...list];
+    }
+    return list;
+  };
 
   // User-added item columns (e.g. HSN Code, Make, Size). The definitions live on
   // the doc; each row's value lives in its own customValues map.
@@ -116,11 +136,13 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [] }: 
   const setCell = (i: number, key: string, val: string) => setLine(i, { customValues: { ...(d.lineItems[i].customValues || {}), [key]: val } });
   // The "To," block is a single editable text. Selecting a vendor fills it;
   // vendorName is kept as the first line so lists/dashboard still show a name.
-  const selectVendor = (id: string) => {
+  // Prefer the parent's handler (it also gates on vendor KYC completeness); fall
+  // back to a plain local fill when used standalone.
+  const selectVendor = onSelectVendor ?? ((id: string) => {
     const v = vendors.find((x) => x.id === id);
     if (!v) { setD({ ...d, vendorId: id || null }); return; }
     setD({ ...d, vendorId: id, vendorName: v.name, vendorAddress: vendorBlock(v), vendorGstin: v.gstin, vendorContact: v.contactPerson, vendorPhone: v.phones });
-  };
+  });
   const setVendorBlock = (x: string) => setD({ ...d, vendorAddress: x, vendorName: (x.split('\n')[0] || '').trim() });
 
   // Stable component identity (memoized by `editable`) so inputs don't remount
@@ -270,19 +292,32 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [] }: 
               <td className={`border ${B} p-1 text-center`}>{i + 1}</td>
               <td className={`border ${B} p-1`}>
                 <TA value={l.description} onChange={(x: string) => setLine(i, { description: x })} rows={Math.min((l.description || '').split('\n').length + 1, 10)} placeholder="Description / specification" />
-                {/* BOQ head — INTERNAL: shown here for convenience but NEVER printed on
-                    the vendor PO PDF (the PDF is generated server-side without it). */}
-                <div className="mt-1 flex items-center gap-1 rounded bg-amber-50/60 px-1 py-0.5 text-[10px] text-slate-500 print:hidden">
-                  <span className="whitespace-nowrap font-medium text-amber-700">🔒 Head *</span>
-                  {editable ? (
-                    <select className={`min-w-0 flex-1 rounded border bg-white px-1 py-0.5 text-[10px] ${!l.boqHead ? 'border-amber-400' : 'border-slate-200'}`} value={l.boqHead || ''} onChange={(e) => setLine(i, { boqHead: e.target.value || null })}>
-                      <option value="">— select head —</option>
-                      {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
-                      {l.boqHead && !boqHeads.includes(l.boqHead) && <option value={l.boqHead}>{l.boqHead}</option>}
-                    </select>
-                  ) : (
-                    <span className={l.boqHead ? 'text-slate-600' : 'text-amber-600'}>{l.boqHead || 'not set'}</span>
-                  )}
+                {/* BOQ Item + head — INTERNAL: shown here for convenience but NEVER
+                    printed on the vendor PO PDF (the PDF is generated server-side without them). */}
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-amber-50/60 px-1 py-0.5 text-[10px] text-slate-500 print:hidden">
+                  <span className="flex min-w-0 items-center gap-1">
+                    <span className="whitespace-nowrap font-medium text-amber-700">BOQ Item</span>
+                    {editable ? (
+                      <select className="min-w-0 rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value={l.boqItemId || ''} onChange={(e) => selectBoqItem(i, e.target.value)}>
+                        <option value="">Other (no specific BOQ item)</option>
+                        {itemsForLine(l).map((b: any) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-slate-600">{boqItemName(l) || 'Other'}</span>
+                    )}
+                  </span>
+                  <span className="flex min-w-0 items-center gap-1">
+                    <span className="whitespace-nowrap font-medium text-amber-700">🔒 Head *</span>
+                    {editable ? (
+                      <select className={`min-w-0 rounded border bg-white px-1 py-0.5 text-[10px] ${!l.boqHead ? 'border-amber-400' : 'border-slate-200'}`} value={l.boqHead || ''} onChange={(e) => setLine(i, { boqHead: e.target.value || null })}>
+                        <option value="">— select head —</option>
+                        {boqHeads.map((h) => <option key={h} value={h}>{h}</option>)}
+                        {l.boqHead && !boqHeads.includes(l.boqHead) && <option value={l.boqHead}>{l.boqHead}</option>}
+                      </select>
+                    ) : (
+                      <span className={l.boqHead ? 'text-slate-600' : 'text-amber-600'}>{l.boqHead || 'not set'}</span>
+                    )}
+                  </span>
                   <span className="whitespace-nowrap text-slate-400">(internal — not on PDF)</span>
                 </div>
               </td>

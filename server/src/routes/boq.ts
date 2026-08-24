@@ -313,6 +313,30 @@ router.post(
   })
 );
 
+// PATCH .../items/categories — bulk re-categorise BOQ headings (Procurement PRD
+// §5 · D1). The category is a CLASSIFICATION (like the model number), not the
+// scope/qty, so — like model-number — it stays editable even when the BOQ is
+// locked. Declared BEFORE `/items/:itemId` so "categories" isn't read as an id.
+router.patch(
+  '/items/categories',
+  requireProjectMember,
+  requireEdit('boq'),
+  asyncHandler(async (req, res) => {
+    const body = z.object({ items: z.array(z.object({ id: z.string(), category: z.string().trim().max(120).nullable() })).max(4000) }).parse(req.body);
+    // Only touch BOQ items in THIS project.
+    const owned = await prisma.bOQItem.findMany({ where: { id: { in: body.items.map((i) => i.id) }, projectId: req.params.projectId }, select: { id: true } });
+    const ownedSet = new Set(owned.map((o) => o.id));
+    let updated = 0;
+    for (const it of body.items) {
+      if (!ownedSet.has(it.id)) continue;
+      await prisma.bOQItem.update({ where: { id: it.id }, data: { category: it.category || null } });
+      updated++;
+    }
+    await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'BOQ_RECATEGORIZE', entity: 'BOQItem', entityId: req.params.projectId, details: { updated } });
+    res.json({ ok: true, updated });
+  })
+);
+
 router.patch(
   '/items/:itemId',
   requireProjectMember,
@@ -356,6 +380,48 @@ router.delete(
     res.json({ ok: true });
   })
 );
+
+// ── BOQ-vs-Received reconciliation & remark log (Procurement PRD §8 · G1/G2) ──
+// Per BOQ item: ordered (BOQ planned qty) vs received (accepted qty on RECEIVED
+// goods receipts, mapped through the PO line each GRN row fulfils) → remaining
+// (shortfall +, over-receipt −). Plus the append-only remark history for the row.
+router.get('/reconciliation', requireProjectMember, requirePage('boq'), asyncHandler(async (req, res) => {
+  const projectId = req.params.projectId;
+  const [items, grLines, remarks] = await Promise.all([
+    prisma.bOQItem.findMany({ where: { projectId, isGroup: false }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }], select: { id: true, srNo: true, description: true, category: true, roomZone: true, unit: true, plannedQty: true } }),
+    prisma.goodsReceiptLine.findMany({ where: { gr: { projectId, status: 'RECEIVED' }, lineItemId: { not: null } }, select: { lineItemId: true, acceptedQty: true } }),
+    prisma.bOQReconRemark.findMany({ where: { projectId }, orderBy: { createdAt: 'desc' } }),
+  ]);
+  // Map each received GRN row → the BOQ item its PO line belongs to.
+  const lineIds = [...new Set(grLines.map((l) => l.lineItemId).filter(Boolean) as string[])];
+  const poLines = lineIds.length ? await prisma.procurementLineItem.findMany({ where: { id: { in: lineIds } }, select: { id: true, boqItemId: true } }) : [];
+  const boqByLine = new Map(poLines.map((l) => [l.id, l.boqItemId]));
+  const receivedByBoq = new Map<string, number>();
+  for (const gl of grLines) {
+    const boqId = gl.lineItemId ? boqByLine.get(gl.lineItemId) : null;
+    if (!boqId) continue;
+    receivedByBoq.set(boqId, Math.round(((receivedByBoq.get(boqId) ?? 0) + (gl.acceptedQty || 0)) * 100) / 100);
+  }
+  const remByItem = new Map<string, { text: string; by: string | null; at: Date }[]>();
+  for (const r of remarks) { const a = remByItem.get(r.boqItemId) ?? []; a.push({ text: r.text, by: r.createdByName, at: r.createdAt }); remByItem.set(r.boqItemId, a); }
+  const rows = items.map((it) => {
+    const ordered = Math.round((it.plannedQty ?? 0) * 100) / 100;
+    const received = receivedByBoq.get(it.id) ?? 0;
+    return { id: it.id, srNo: it.srNo, description: it.description, category: it.category || 'Uncategorized', roomZone: it.roomZone, unit: it.unit, ordered, received, remaining: Math.round((ordered - received) * 100) / 100, remarks: remByItem.get(it.id) ?? [] };
+  });
+  res.json({ rows });
+}));
+
+// POST .../boq/reconciliation/:boqItemId/remark — APPEND a remark (never overwrite).
+router.post('/reconciliation/:boqItemId/remark', requireProjectMember, requireEdit('boq'), asyncHandler(async (req, res) => {
+  const { text } = z.object({ text: z.string().trim().min(1).max(2000) }).parse(req.body);
+  const item = await prisma.bOQItem.findFirst({ where: { id: req.params.boqItemId, projectId: req.params.projectId }, select: { id: true } });
+  if (!item) throw notFound('BOQ item not found in this project');
+  const user = await prisma.user.findUnique({ where: { id: req.user!.sub }, select: { name: true } });
+  const rem = await prisma.bOQReconRemark.create({ data: { projectId: req.params.projectId, boqItemId: item.id, text, createdById: req.user!.sub, createdByName: user?.name ?? null } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'BOQ_RECON_REMARK', entity: 'BOQItem', entityId: item.id, details: { text } });
+  res.status(201).json({ remark: { text: rem.text, by: rem.createdByName, at: rem.createdAt } });
+}));
 
 // GET .../boq/analysis — the AI-processed "bible" (clean procurement breakdown).
 router.get(

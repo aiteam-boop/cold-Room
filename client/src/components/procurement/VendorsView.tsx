@@ -203,9 +203,9 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'rates', label: 'Rate Chart' },
 ];
 
-function VendorModal({ projectId, vendor, meta, onClose, onDone }: { projectId: string; vendor?: any; meta: Meta; onClose: () => void; onDone: () => void }) {
+export function VendorModal({ projectId, vendor, meta, onClose, onDone, initialTab }: { projectId: string; vendor?: any; meta: Meta; onClose: () => void; onDone: () => void; initialTab?: Tab }) {
   const isEdit = !!vendor?.id;
-  const [tab, setTab] = useState<Tab>('basic');
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'basic');
   const [err, setErr] = useState('');
   const [f, setF] = useState<any>(() => ({
     name: vendor?.name ?? '', legalName: vendor?.legalName ?? '', tradeName: vendor?.tradeName ?? '',

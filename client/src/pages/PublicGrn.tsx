@@ -21,7 +21,7 @@ export default function PublicGrn() {
   useEffect(() => { if (grQ.data) setG(structuredClone(grQ.data)); }, [grQ.data]);
 
   const body = () => ({
-    vehicleNumber: g.vehicleNumber, vehicleSize: g.vehicleSize, remarks: g.remarks,
+    vehicleNumber: g.vehicleNumber, vehicleSize: g.vehicleSize, remarks: g.remarks, siteSupervisor: g.siteSupervisor,
     dispatchDate: g.dispatchDate?.slice?.(0, 10) || null, deliveryDate: g.deliveryDate?.slice?.(0, 10) || null,
     ...(g.mode === 'CUSTOM'
       ? {
@@ -51,6 +51,15 @@ export default function PublicGrn() {
     onSuccess: (gr) => { setG(structuredClone(gr)); setMsg('Confirmed — material received. Thank you!'); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Per-item delivery photo (B5) — camera OR gallery (accept=image/* offers both).
+  const uploadLinePhoto = useMutation({
+    mutationFn: async ({ lineId, file }: { lineId: string; file: File }) => {
+      const fd = new FormData(); fd.append('file', file);
+      return { lineId, photoUrl: (await api.post(`/public/grn/${token}/lines/${lineId}/photo`, fd)).data.photoUrl as string };
+    },
+    onSuccess: ({ lineId, photoUrl }) => { setG((p: any) => ({ ...p, lineItems: p.lineItems.map((l: any) => (l.id === lineId ? { ...l, photoUrl } : l)) })); setMsg('Photo added.'); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
 
   if (grQ.isLoading) return <div className="p-10"><Spinner label="Loading goods receipt…" /></div>;
   if (grQ.isError || !g) {
@@ -73,6 +82,19 @@ export default function PublicGrn() {
   const setCell = (i: number, key: string, val: string) => { const li = [...g.lineItems]; li[i] = { ...li[i], customValues: { ...(li[i].customValues || {}), [key]: val } }; setG({ ...g, lineItems: li }); };
   const addRow = () => setG({ ...g, lineItems: [...g.lineItems, { description: '', customValues: {}, receiptQty: 0, defectQty: 0 }] });
   const delRow = (i: number) => setG({ ...g, lineItems: g.lineItems.filter((_: any, idx: number) => idx !== i) });
+  // Per-item photo cell (B5) — thumbnail + camera/gallery button. Compulsory for a
+  // received item: turns red until a photo is attached.
+  const photoCell = (l: any) => (
+    <td className="text-center align-middle">
+      {l.photoUrl && <a href={l.photoUrl} target="_blank" rel="noreferrer"><img src={l.photoUrl} alt="item" className="mx-auto mb-1 h-9 w-9 rounded border object-cover" /></a>}
+      {!locked && (l.id
+        ? <label className={`inline-block cursor-pointer text-[11px] font-medium hover:underline ${l.photoUrl ? 'text-slate-500' : (Number(l.receiptQty) > 0 ? 'text-rose-600' : 'text-navy')}`}>
+            {l.photoUrl ? 'Change' : '📷 Add'}
+            <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadLinePhoto.mutate({ lineId: l.id, file: f }); (e.currentTarget as HTMLInputElement).value = ''; }} />
+          </label>
+        : <span className="text-[10px] text-slate-400">Save first</span>)}
+    </td>
+  );
 
   return (
     <Shell>
@@ -136,6 +158,8 @@ export default function PublicGrn() {
           <Field label="Vehicle Size"><input className="input" disabled={locked} value={g.vehicleSize || ''} onChange={(e) => setG({ ...g, vehicleSize: e.target.value })} placeholder="e.g. 40 FT" /></Field>
           <Field label="Date of Invoice / Dispatch"><input className="input" type="date" disabled={locked} value={g.dispatchDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, dispatchDate: e.target.value })} /></Field>
           <Field label="Date of Delivery"><input className="input" type="date" disabled={locked} value={g.deliveryDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, deliveryDate: e.target.value })} /></Field>
+          {/* Whoever is receiving on site — their name prints on the packing list's "Site Supervisor:" line. */}
+          <Field label="Site Supervisor (your name)"><input className="input" disabled={locked} value={g.siteSupervisor || ''} onChange={(e) => setG({ ...g, siteSupervisor: e.target.value })} placeholder="Name of the person receiving on site" /></Field>
         </div>
       </div>
 
@@ -151,6 +175,7 @@ export default function PublicGrn() {
                   <th className="text-left">Description</th>
                   {cols.map((c) => <th key={c.key} className="px-1 text-center">{c.label}</th>)}
                   <th className="w-20 text-center">Qty</th>
+                  <th className="w-16 text-center" title="Photo of the delivered item (compulsory)">Photo *</th>
                   {!locked && <th className="w-8" />}
                 </tr>
               </thead>
@@ -161,6 +186,7 @@ export default function PublicGrn() {
                     <td><input className="input" disabled={locked} value={l.description || ''} onChange={(e) => setLine(i, { description: e.target.value })} /></td>
                     {cols.map((c) => <td key={c.key} className="px-1"><input className="input text-center" disabled={locked} value={l.customValues?.[c.key] ?? ''} onChange={(e) => setCell(i, c.key, e.target.value)} /></td>)}
                     <td><input className="input text-center" type="number" disabled={locked} value={l.receiptQty} onChange={(e) => setLine(i, { receiptQty: e.target.value })} /></td>
+                    {photoCell(l)}
                     {!locked && <td className="text-center"><button className="text-rose-400 hover:text-rose-600" onClick={() => delRow(i)}>✕</button></td>}
                   </tr>
                 ))}
@@ -176,6 +202,7 @@ export default function PublicGrn() {
                   <th className="w-20 text-center">Receipt</th>
                   <th className="w-16 text-center">Defect</th>
                   <th className="w-16 text-center">Accepted</th>
+                  <th className="w-16 text-center" title="Photo of the delivered item (compulsory for received items)">Photo *</th>
                 </tr>
               </thead>
               <tbody>
@@ -187,6 +214,7 @@ export default function PublicGrn() {
                     <td><input className="input text-center" type="number" disabled={locked} value={l.receiptQty} onChange={(e) => setLine(i, { receiptQty: e.target.value })} /></td>
                     <td><input className="input text-center" type="number" disabled={locked} value={l.defectQty} onChange={(e) => setLine(i, { defectQty: e.target.value })} /></td>
                     <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                    {photoCell(l)}
                   </tr>
                 ))}
               </tbody>

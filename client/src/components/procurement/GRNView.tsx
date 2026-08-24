@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -14,6 +14,11 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
   const canApprove = can('canApprove');
   const [openId, setOpenId] = useState<string | null>(focusId ?? null);
   const [raising, setRaising] = useState(false);
+  // Payments list vs the Invoices tab (payments still awaiting their tax invoice).
+  const [listTab, setListTab] = useState<'payments' | 'invoices'>('payments');
+  // When a payment is opened from the Invoices tab, the form shows the Tax Invoice
+  // block so the invoice is filled in right there on the page.
+  const [openForInvoice, setOpenForInvoice] = useState(false);
 
   const grnsQ = useQuery({ queryKey: ['grns', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/grns`)).data.grns as any[] });
   // Dedicated endpoint gated on the GRN page (not pay/po/wo) and carrying no
@@ -32,15 +37,24 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
     onError: (e) => alert(errMsg(e)),
   });
 
-  if (openId) return <GRNForm projectId={projectId} grnId={openId} canApprove={canApprove} onClose={() => { setOpenId(null); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }} />;
+  if (openId) return <GRNForm projectId={projectId} grnId={openId} canApprove={canApprove} showTaxInvoice={openForInvoice} onClose={() => { setOpenId(null); setOpenForInvoice(false); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }} />;
   if (grnsQ.isLoading) return <Spinner label="Loading GRNs…" />;
   const grns = grnsQ.data ?? [];
+  // Payments whose tax invoice hasn't been uploaded yet (same rule as the
+  // "tax invoice pending" flag) — these are what the Invoices tab collects.
+  const invoicePending = grns.filter((g) => (g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl));
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-slate-600">Payments ({grns.length})</h3>
-        {canRaise && <button className="btn-primary text-sm" onClick={() => setRaising(true)}>+ New Payment</button>}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex gap-1 rounded-lg bg-slate-100 p-1 text-sm">
+          <button onClick={() => setListTab('payments')} className={`rounded-md px-3 py-1 font-medium ${listTab === 'payments' ? 'bg-navy text-white' : 'text-slate-500 hover:text-slate-700'}`}>Payments ({grns.length})</button>
+          {/* Invoices tab: every payment still waiting for its tax invoice, with the count. */}
+          <button onClick={() => setListTab('invoices')} className={`rounded-md px-3 py-1 font-medium ${listTab === 'invoices' ? 'bg-navy text-white' : 'text-slate-500 hover:text-slate-700'}`}>
+            Invoices{invoicePending.length ? <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${listTab === 'invoices' ? 'bg-white/25 text-white' : 'bg-orange-100 text-orange-700'}`}>{invoicePending.length}</span> : ''}
+          </button>
+        </div>
+        {canRaise && listTab === 'payments' && <button className="btn-primary text-sm" onClick={() => setRaising(true)}>+ New Payment</button>}
       </div>
 
       {raising && (
@@ -67,7 +81,9 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
         </div>
       )}
 
-      {grns.length === 0 ? (
+      {listTab === 'invoices' ? (
+        <InvoicesPanel grns={invoicePending} onOpenInvoice={(id) => { setOpenId(id); setOpenForInvoice(true); }} />
+      ) : grns.length === 0 ? (
         <EmptyState title="No payments yet" hint="Raise a payment against an approved PO/WO — pick the payment term, upload the PI, and send it for approval. Physical delivery is recorded separately on the Goods Receipt (GRN) page." />
       ) : (
         <div className="card overflow-hidden">
@@ -116,11 +132,49 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
           </table>
         </div>
       )}
+
     </div>
   );
 }
 
-function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string; grnId: string; canApprove: boolean; onClose: () => void }) {
+// The "Invoices" tab — every payment still waiting for its tax invoice. Opening
+// one goes to its payment page with the Tax Invoice block shown, where the
+// invoice is filled in and uploaded (the block is hidden on the normal view).
+function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (id: string) => void }) {
+  if (grns.length === 0) {
+    return <EmptyState title="No pending invoices" hint="Every payment has its tax invoice recorded. When a payment is waiting for its invoice, it shows here." />;
+  }
+  return (
+    <div className="card overflow-hidden">
+      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} waiting for a tax invoice.</div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Date</th><th className="text-right">PI Value</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          {grns.map((g) => (
+            <tr key={g.id} className="cursor-pointer border-b border-slate-100 hover:bg-slate-50" onClick={() => onOpenInvoice(g.id)}>
+              <td className="px-4 py-2 font-medium text-navy">{g.grnNumber}</td>
+              <td className="text-slate-600">{g.doc?.docNumber}</td>
+              <td className="text-slate-600">{g.vendorName}</td>
+              <td className="text-slate-500">{fmtDate(g.grnDate)}</td>
+              <td className="text-right">{g.piValue != null ? inr(g.piValue) : '—'}</td>
+              <td>
+                {g.paymentStatus
+                  ? <span className={`badge ${g.paymentStatus === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{g.paymentStatus === 'TRIGGERED' ? 'Triggered' : g.paymentStatus === 'PAID' ? 'Paid' : 'Closed'}</span>
+                  : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
+                <span className="ml-1 text-[10px] font-medium text-orange-600">invoice pending</span>
+              </td>
+              <td className="px-2 text-right">
+                <button className="btn-primary text-xs" onClick={(e) => { e.stopPropagation(); onOpenInvoice(g.id); }}>Upload Invoice →</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false }: { projectId: string; grnId: string; canApprove: boolean; onClose: () => void; showTaxInvoice?: boolean }) {
   const qc = useQueryClient();
   const { user, canEdit, can } = useAuth();
   const canMarkPaid = can('canMarkPaid');
@@ -130,6 +184,11 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
   const [g, setG] = useState<any>(null);
   // True while piValue is just the PO's default (not typed) — a PI upload may replace it.
   const piValueFromPo = useRef(false);
+  // When opened from the Invoices tab, scroll the Tax Invoice block into view.
+  const taxInvoiceRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (showTaxInvoice && g && taxInvoiceRef.current) taxInvoiceRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [showTaxInvoice, g]);
   const [msg, setMsg] = useState('');
   const [showChain, setShowChain] = useState(false);
   const [amending, setAmending] = useState(false);
@@ -429,6 +488,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
         />
       )}
 
+      {/* Delivery + receipt are goods-receipt concerns, recorded on the Goods
+          Receipt (GRN) page — not relevant to a payment, so hidden on a payment. */}
+      {!isPaymentGrn && (
       <div className="card p-4">
         <div className="mb-3 text-sm font-semibold text-slate-600">Delivery Details</div>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -437,7 +499,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           <G label="Delivery Challan No." v={g.deliveryChallanNumber} on={(x) => setG({ ...g, deliveryChallanNumber: x })} ed={editable} />
         </div>
       </div>
+      )}
 
+      {!isPaymentGrn && (
       <div className="card p-4">
         <div className="mb-1 text-sm font-semibold text-slate-600">Receipt Line Items</div>
         {/* PO unit price / total value are only rendered for approvers (Procurement,
@@ -480,8 +544,13 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           </table>
         </div>
       </div>
+      )}
 
-      <div className="card p-4">
+      {/* On the normal payment view the tax invoice is hidden (it lives in the
+          Payments → Invoices tab). It appears here when the payment is opened FROM
+          that tab to upload the invoice, and always for a pure goods-receipt GRN. */}
+      {(!isPaymentGrn || showTaxInvoice) && (
+      <div ref={taxInvoiceRef} className={`card p-4 ${showTaxInvoice && isPaymentGrn ? 'ring-2 ring-navy/30' : ''}`}>
         <div className="mb-1 text-sm font-semibold text-slate-600">Tax Invoice {isPaymentGrn ? '(arrives later — closes the entry)' : '(mandatory before submit)'}</div>
         <p className="mb-3 text-xs text-slate-400">{isPaymentGrn ? 'The tax invoice comes AFTER payment. Uploading it on a paid GRN closes the entry and it leaves the bucket. Not required to submit — payment runs on the PI above.' : "Enter the value from the vendor's actual tax invoice — an invoice may cover only part of the PO. This is what flows into the payment pipeline as “Amount Invoiced”."}</p>
         <div className="space-y-4">
@@ -515,6 +584,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose }: { projectId: string;
           </div>
         )}
       </div>
+      )}
 
       {/* Payment sits BELOW the tax invoice and mirrors the vendor-payment (FMS)
           form field-for-field, so both payment screens read identically. The flow

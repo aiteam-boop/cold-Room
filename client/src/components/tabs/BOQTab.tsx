@@ -13,13 +13,15 @@ import BOQAnalysisView from './BOQAnalysisView';
 import BOQEnhanceView from './BOQEnhanceView';
 import BOQCostView from './BOQCostView';
 import BOQMasterView from './BOQMasterView';
+import BOQCategorizeView from './BOQCategorizeView';
+import BOQReconcileView from './BOQReconcileView';
 
 // Sub-views of the BOQ page. The same underlying rows, three different lenses
 // (DPR PRD §3.2 G9 / transcript R10-R11):
 //   master → the contracted scope, immutable, no money
 //   table  → how much of it is built  (BOQ & Progress)
 //   cost   → what it cost to buy      (BOQ & Cost)
-const SUBS = ['master', 'table', 'cost', 'models', 'analysis', 'queue', 'history'] as const;
+const SUBS = ['master', 'table', 'cost', 'models', 'categorize', 'reconcile', 'analysis', 'queue', 'history'] as const;
 type Sub = (typeof SUBS)[number];
 
 const SUB_LABEL: Record<Sub, string> = {
@@ -27,6 +29,8 @@ const SUB_LABEL: Record<Sub, string> = {
   table: 'BOQ & Progress',
   cost: 'BOQ & Cost',
   models: 'Models & Item Lists',
+  categorize: '🏷️ Categorize',
+  reconcile: '⚖️ BOQ vs Received',
   analysis: '✨ AI Analysis',
   queue: 'Approval Queue',
   history: 'History',
@@ -167,6 +171,8 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
       {sub === 'master' && <BOQMasterView items={items} locked={locked} />}
       {sub === 'cost' && <BOQCostView projectId={projectId} />}
       {sub === 'models' && <BOQEnhanceView projectId={projectId} canWrite={canWrite} />}
+      {sub === 'categorize' && <BOQCategorizeView projectId={projectId} items={items} canWrite={canWrite} />}
+      {sub === 'reconcile' && <BOQReconcileView projectId={projectId} canWrite={canWrite} />}
       {sub === 'analysis' && <BOQAnalysisView projectId={projectId} isAdmin={isAdmin} />}
       {sub === 'queue' && <ApprovalQueue projectId={projectId} canApprove={isSupervisor} />}
       {sub === 'history' && <ProgressHistory projectId={projectId} isAdmin={isSupervisor} />}

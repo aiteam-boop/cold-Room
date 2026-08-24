@@ -43,6 +43,8 @@ interface ApprovedItem {
   pis?: { term: string; piNumber: string | null; piUrl: string }[];
   // Physical goods receipts raised against this PO/WO (for the GRN action + popup).
   goodsReceipts?: { id: string; grnNumber: string; status: string; receivedDate?: string | null }[];
+  // UTR(s) backfilled from the Accounts sheet (paid via the form) — shown inline.
+  sheetPayments?: { utr: string; vrNo?: string; amount?: number | null }[];
 }
 
 // "My Approvals" — documents where the signed-in user is the current approver.
@@ -216,6 +218,9 @@ export default function ApprovalsPage() {
                       {canPipe && <button className="mr-1 text-slate-400 hover:text-navy" title={open ? 'Hide pipeline' : 'Show phases (Approval → Payment → GRN)'} onClick={() => togglePipe(key)}>{open ? '▾' : '▸'}</button>}
                       <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
+                      {(d.sheetPayments?.length ?? 0) > 0 && (
+                        <span className="ml-1 inline-block max-w-[230px] truncate align-middle rounded bg-green-50 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments!.map((s) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>💠 UTR: {d.sheetPayments!.map((s) => s.utr).join(', ')}</span>
+                      )}
                     </td>
                     <td className="text-slate-600">{d.projectName}</td>
                     <td className="text-slate-600">{d.vendorName || '—'}</td>

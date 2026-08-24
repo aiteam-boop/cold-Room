@@ -82,7 +82,7 @@ export default function GoodsReceiptView({ projectId, focusId }: { projectId: st
                     {g.createdBy ? <span title={g.createdBy.name} className="text-xs">{g.createdBy.email}</span> : <span className="text-slate-300">—</span>}
                   </td>
                   <td className="text-slate-500">{fmtDate(g.receivedDate)}</td>
-                  <td className="pl-2"><span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span></td>
+                  <td className="pl-2">{g.billingConfirmedAt ? <span className="badge bg-green-100 text-green-700" title="Signed copy uploaded & billing confirmed — closed">✓ Done</span> : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}</td>
                   <td className="px-2 text-right">
                     {canRaise && g.status === 'DRAFT' && <button className="mr-3 text-xs font-medium text-rose-500 hover:underline" onClick={() => confirm(`Delete draft ${g.grnNumber}? This can't be undone.`) && delGr.mutate(g.id)}>Delete</button>}
                     <button className="text-xs font-medium text-navy hover:underline" onClick={() => setOpenId(g.id)}>Open →</button>
@@ -113,7 +113,7 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
 
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/goods-receipts/${grId}`, {
-      vehicleNumber: g.vehicleNumber, vehicleSize: g.vehicleSize, remarks: g.remarks,
+      vehicleNumber: g.vehicleNumber, vehicleSize: g.vehicleSize, remarks: g.remarks, siteSupervisor: g.siteSupervisor,
       // Packing-list / delivery fields (Amisha 63/64).
       dispatchDate: g.dispatchDate?.slice?.(0, 10) || null, deliveryDate: g.deliveryDate?.slice?.(0, 10) || null,
       ...(g.mode === 'CUSTOM'
@@ -135,6 +135,15 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
   const uploadPhoto = useMutation({
     mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/goods-receipts/${grId}/photo`, fd); },
     onSuccess: () => { setMsg('Photo uploaded.'); grQ.refetch(); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  // Per-item delivery photo (B5) — office can view / add / replace it too.
+  const uploadLinePhoto = useMutation({
+    mutationFn: async ({ lineId, file }: { lineId: string; file: File }) => {
+      const fd = new FormData(); fd.append('file', file);
+      return { lineId, photoUrl: (await api.post(`/projects/${projectId}/procurement/goods-receipts/${grId}/lines/${lineId}/photo`, fd)).data.photoUrl as string };
+    },
+    onSuccess: ({ lineId, photoUrl }) => { setG((p: any) => ({ ...p, lineItems: p.lineItems.map((l: any) => (l.id === lineId ? { ...l, photoUrl } : l)) })); setMsg('Item photo added.'); },
     onError: (e) => setMsg(errMsg(e)),
   });
   // Assign to a site engineer → generates a no-login link + emails it.
@@ -170,7 +179,9 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
         <div className="flex items-center gap-2">
           <button className="btn-outline text-sm" onClick={onClose}>← Back</button>
           <h2 className="text-lg font-bold text-navy">{g.grnNumber}</h2>
-          <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>
+          {g.billingConfirmedAt
+            ? <span className="badge bg-green-100 text-green-700" title="Signed copy uploaded & billing confirmed — closed">✓ Done</span>
+            : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
           {isCustom && <span className="badge bg-navy-50 text-navy">Packing List</span>}
         </div>
         <div className="flex items-center gap-2">
@@ -213,6 +224,8 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
               <G label="Vehicle Size" v={g.vehicleSize} on={(x) => setG({ ...g, vehicleSize: x })} ed={editable} />
               <F label="Date of Invoice / Dispatch"><input className="input" type="date" disabled={!editable} value={g.dispatchDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, dispatchDate: e.target.value })} /></F>
               <F label="Date of Delivery"><input className="input" type="date" disabled={!editable} value={g.deliveryDate?.slice?.(0, 10) || ''} onChange={(e) => setG({ ...g, deliveryDate: e.target.value })} /></F>
+              {/* Printed on the packing list's "Site Supervisor:" line. Blank falls back to who raised the GRN. */}
+              <G label="Site Supervisor" v={g.siteSupervisor} on={(x) => setG({ ...g, siteSupervisor: x })} ed={editable} />
             </div>
           </div>
 
@@ -231,12 +244,16 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
                       <th className="w-24 text-center">Prev Recd</th>
                       <th className="w-24 text-center">Remaining</th>
                       <th className="w-24 text-center">Receipt</th>
-                      <th className="w-20 text-center">Defect</th>
+                      <th className="w-20 text-center" title="Arrived but damaged">Defect</th>
                       <th className="w-20 text-center">Accepted</th>
+                      <th className="w-20 text-center" title="Ordered but never arrived (PO Qty − Prev − Receipt)">Short</th>
+                      <th className="w-16 text-center" title="Per-item delivery photo">Photo</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {g.lineItems.map((l: any, i: number) => (
+                    {g.lineItems.map((l: any, i: number) => {
+                      const short = Math.max((Number(l.poQty) || 0) - (Number(l.previouslyReceivedQty) || 0) - (Number(l.receiptQty) || 0), 0);
+                      return (
                       <tr key={l.id} className="border-b border-slate-100">
                         <td className="py-1 text-xs">{l.description}</td>
                         <td className="text-center">{l.poQty}</td>
@@ -245,8 +262,19 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
                         <td><input className="input text-center" type="number" disabled={!editable} value={l.receiptQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], receiptQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
                         <td><input className="input text-center" type="number" disabled={!editable} value={l.defectQty} onChange={(e) => { const li = [...g.lineItems]; li[i] = { ...li[i], defectQty: e.target.value }; setG({ ...g, lineItems: li }); }} /></td>
                         <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                        <td className={`text-center font-medium ${short > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{short}</td>
+                        <td className="text-center align-middle">
+                          {l.photoUrl && <a href={l.photoUrl} target="_blank" rel="noreferrer"><img src={l.photoUrl} alt="item" className="mx-auto mb-1 h-9 w-9 rounded border object-cover" /></a>}
+                          {editable && l.id && (
+                            <label className={`inline-block cursor-pointer text-[11px] font-medium hover:underline ${l.photoUrl ? 'text-slate-500' : 'text-navy'}`}>
+                              {l.photoUrl ? 'Change' : '📷 Add'}
+                              <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadLinePhoto.mutate({ lineId: l.id, file: f }); (e.currentTarget as HTMLInputElement).value = ''; }} />
+                            </label>
+                          )}
+                        </td>
                       </tr>
-                    ))}
+                    );
+                    })}
                   </tbody>
                 </table>
               </div>

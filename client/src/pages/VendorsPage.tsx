@@ -6,8 +6,7 @@ import { EmptyState, Modal, Spinner } from '../components/ui';
 import { fmtDate } from '../lib/format';
 import VendorDetail from '../components/procurement/VendorDetail';
 import ViewToggle, { useViewMode } from '../components/ViewToggle';
-
-const KYC_DOT: Record<string, string> = { Complete: 'bg-green-500', Partial: 'bg-amber-500', Missing: 'bg-red-500' };
+import KycBadge from '../components/procurement/KycBadge';
 
 // Global vendor database (all projects). Gated by the Vendors page grant.
 export default function VendorsPage() {
@@ -65,8 +64,8 @@ export default function VendorsPage() {
                   <span className="badge bg-slate-100 text-slate-600">{v.type}</span>
                 </div>
               </div>
-              <div className="mt-1 flex items-center gap-1 text-xs text-slate-500">
-                <span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} /> KYC {v.kycStatus}
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
+                KYC <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
               </div>
               <div className="mt-2 space-y-0.5 text-xs text-slate-400">
                 {(v.contactPerson || v.phones) && <div className="truncate">Contact: {v.contactPerson}{v.phones ? ` · ${v.phones}` : ''}</div>}
@@ -92,7 +91,7 @@ export default function VendorsPage() {
                   <td className="text-slate-500">{v.gstin || '—'}</td>
                   <td className="text-slate-500">{v.siteMappings?.map((s: any) => s.project?.name).filter(Boolean).join(', ') || '—'}</td>
                   <td className="text-slate-500">{v._count?.docs ?? 0}</td>
-                  <td><span className="inline-flex items-center gap-1 text-xs"><span className={`h-2 w-2 rounded-full ${KYC_DOT[v.kycStatus]}`} />{v.kycStatus}</span></td>
+                  <td><KycBadge kyc={v.kyc} kycStatus={v.kycStatus} /></td>
                   <td className="text-slate-400">{fmtDate(v.createdAt)}</td>
                   {canManage && <td className="px-2 text-right"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
                 </tr>

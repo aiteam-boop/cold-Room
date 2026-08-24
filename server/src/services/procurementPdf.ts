@@ -37,7 +37,7 @@ interface DocForPdf {
   promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
-  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; gstPct?: number | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; gstPct?: number | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null; boqHead?: string | null; boqItemName?: string | null }[];
   customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
   // Approval trail printed under the signature once the document is e-signed:
@@ -55,8 +55,15 @@ const BORDER = '#000000';
 const HEAD_BG = '#0f2942';
 
 // Renders a PO/WO into the exact Quatre Agro bordered grid format.
-export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStream) {
+// `opts.internal` prints the INTERNAL copy: each line also shows its BOQ head +
+// linked BOQ item (under the description). The vendor copy (default) is unchanged.
+// `opts.internalMarker` (default true) prints the red "INTERNAL COPY" banner — the
+// approver-review copy sets it false (internal content, but no vendor-warning
+// marker, since it's a review not a distribution).
+export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStream, opts: { internal?: boolean; internalMarker?: boolean } = {}) {
   const isWO = doc.type === 'WO';
+  const internal = !!opts.internal;
+  const internalMarker = internal && opts.internalMarker !== false;
   const pdf = new PDFDocument({ size: 'A4', margin: 24 });
   pdf.pipe(stream);
   const L = 24, R = pdf.page.width - 24, W = R - L;
@@ -91,6 +98,9 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   const titleH = 16;
   pdf.rect(L, y, W, titleH).fillAndStroke('#e9eef5', BORDER);
   pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text(isWO ? 'Work Order' : 'Purchase Order', L, y + 4, { width: W, align: 'center' });
+  // Internal DOWNLOAD copy gets a clear red marker so it can never be mistaken for
+  // the vendor copy. The approver-review copy skips it (internalMarker=false).
+  if (internalMarker) pdf.font('Helvetica-Bold').fontSize(7).fillColor('#b91c1c').text('INTERNAL COPY — NOT FOR VENDOR', R - 168, y + 5.5, { width: 160, align: 'right' });
   y += titleH;
 
   // ── To (vendor) + Date / No / Against Quotation ──
@@ -169,7 +179,16 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
       cell(colX(1), y, W - cols[0].w, `Lead Time: ${it.leadTimeText || ''}`, { size: 7.5, color: '#6d28d9', font: 'Helvetica-Oblique' });
       y += h; continue;
     }
-    const descH = textH(it.description, cols[1].w, 7.5);
+    // Full description text: base + GST suffix + (internal copy only) the BOQ
+    // head/item mapping on its own line, so row height auto-grows to fit it.
+    let descText = it.description;
+    if (it.gstExempt) descText = `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})`;
+    else if (uniformRate == null && doc.gstEnabled) descText = `${it.description}  (GST ${it.gstPct != null ? it.gstPct : doc.gstPct}%)`;
+    if (internal) {
+      const meta = [`Head: ${it.boqHead || '—'}`, it.boqItemName ? `BOQ Item: ${it.boqItemName}` : null].filter(Boolean).join('     ·     ');
+      descText += `\n▸ ${meta}`;
+    }
+    const descH = textH(descText, cols[1].w, 7.5);
     const rowH = Math.max(descH + 6, 18);
     if (y + rowH > PAGE_BOTTOM) { pdf.addPage(); y = L; drawHead(); }
     rect(L, y, W, rowH);
@@ -178,11 +197,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     cols.forEach((c, i) => {
       let v = '';
       if (c.k === 'sr') v = String(it.srNo);
-      else if (c.k === 'desc') {
-        if (it.gstExempt) v = `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})`;
-        else if (uniformRate == null && doc.gstEnabled) v = `${it.description}  (GST ${it.gstPct != null ? it.gstPct : doc.gstPct}%)`;
-        else v = it.description;
-      }
+      else if (c.k === 'desc') v = descText;
       else if (c.k === 'uom') v = it.uom || '';
       else if (c.k === 'qty') v = it.qty ? it.qty.toLocaleString('en-IN') : '';
       else if (c.k === 'rate') v = it.unitPrice ? INR(it.unitPrice) : '';
@@ -363,7 +378,9 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
   pdf.text(`Site Address: ${grn.siteAddress || '-'}`, { width: tableW });
   pdf.text(`Vehicle: ${grn.vehicleNumber || '-'}    Driver: ${grn.driverName || '-'}    DC No.: ${grn.deliveryChallanNumber || '-'}`);
   pdf.moveDown(0.5);
-  const cols = [{ t: 'Sr', w: 22 }, { t: 'Description', w: 198 }, { t: 'UOM', w: 38 }, { t: 'PO Qty', w: 46 }, { t: 'Prev', w: 44 }, { t: 'Receipt', w: 48 }, { t: 'Defect', w: 44 }, { t: 'Accepted', w: 55 }];
+  // Short = ordered − delivered (never arrived) — kept DISTINCT from Defect
+  // (arrived but damaged). Amisha/Akash B2: "Defect aur short dono alag-alag."
+  const cols = [{ t: 'Sr', w: 22 }, { t: 'Description', w: 210 }, { t: 'UOM', w: 36 }, { t: 'PO Qty', w: 44 }, { t: 'Prev', w: 40 }, { t: 'Receipt', w: 46 }, { t: 'Defect', w: 42 }, { t: 'Accepted', w: 52 }, { t: 'Short', w: 47 }];
   let yy = pdf.y;
   // Quantity columns are centre-aligned — AA sir asked for this explicitly
   // (Sprint PRD §7.3). Sr / Description stay left, everything numeric centres.
@@ -375,7 +392,8 @@ export function renderGRNPdf(grn: GRNForPdf, stream: NodeJS.WritableStream) {
     // Keep the row on the page — the GRN table used to run off the bottom.
     if (pdf.y + 20 > pdf.page.height - 40) { pdf.addPage(); pdf.y = 40; }
     const yr = pdf.y + 2; x = L;
-    const vals = [String(it.srNo), it.description, it.uom || '', String(it.poQty), String(it.previouslyReceivedQty), String(it.receiptQty), String(it.defectQty), String(it.acceptedQty)];
+    const short = Math.max(0, (Number(it.poQty) || 0) - (Number(it.previouslyReceivedQty) || 0) - (Number(it.receiptQty) || 0));
+    const vals = [String(it.srNo), it.description, it.uom || '', String(it.poQty), String(it.previouslyReceivedQty), String(it.receiptQty), String(it.defectQty), String(it.acceptedQty), String(short)];
     const dH = pdf.heightOfString(it.description, { width: cols[1].w - 4 });
     cols.forEach((c, i) => { pdf.text(vals[i], x + 2, yr, { width: c.w - 4, align: align(i) }); x += c.w; });
     pdf.y = yr + Math.max(dH + 3, 13);
@@ -494,14 +512,18 @@ interface PackingListForPdf {
   customerName?: string | null;
   customerAddress?: string | null;
   clientPoNumber?: string | null;
+  // The internal PO/WO this GRN is raised against (e.g. PO-IN833 / WO-QAS-007).
+  againstNumber?: string | null;
+  againstType?: string | null;
   invoiceNumber?: string | null;
   dispatchDate?: Date | null;
   deliveryDate?: Date | null;
   vehicleNumber?: string | null;
   vehicleSize?: string | null;
   ewayBillNumber?: string | null;
+  siteSupervisor?: string | null;
   customColumns?: { key: string; label: string }[] | null;
-  lineItems: { srNo: number; description: string; receiptQty: number; customValues?: Record<string, string> | null }[];
+  lineItems: { srNo: number; description: string; receiptQty: number; defectQty?: number; customValues?: Record<string, string> | null }[];
 }
 export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.WritableStream) {
   const pdf = new PDFDocument({ size: 'A4', margin: 28 });
@@ -527,7 +549,7 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
 
   // ── Title bar ──
   box(L, y, TW, 20, HEAD_BG);
-  put(L, y + 5, TW, 'MANIFEST CUM FINAL PACKING LIST', { font: 'Helvetica-Bold', size: 11, align: 'center', color: '#ffffff' });
+  put(L, y + 5, TW, 'FINAL PACKING LIST', { font: 'Helvetica-Bold', size: 11, align: 'center', color: '#ffffff' });
   y += 20;
 
   // ── Info grid — two label/value pairs per row, height auto-sized to content ──
@@ -548,18 +570,19 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
     y += rowH;
   };
   drawRow([{ label: 'Customer Name & Address', value: customerBlock, span: true }]);
-  drawRow([{ label: 'PO No.', value: pl.clientPoNumber || '—' }, { label: 'Packing List No.', value: pl.packingListNo != null ? String(pl.packingListNo) : '—' }]);
+  drawRow([{ label: 'PO No.', value: pl.clientPoNumber || '—' }, { label: `${pl.againstType === 'WO' ? 'WO' : 'PO'} No.`, value: pl.againstNumber || '—' }]);
   drawRow([{ label: 'Vehicle No.', value: pl.vehicleNumber || '—' }, { label: 'Vehicle Size', value: pl.vehicleSize || '—' }]);
   drawRow([{ label: 'Date of Invoice / Dispatch', value: dt(pl.dispatchDate) || '—' }, { label: 'Date of Delivery', value: dt(pl.deliveryDate) || '—' }]);
 
-  // ── Item table — S.No | Description | [custom cols…] | Qty (Nos) ──
-  const snoW = 34, qtyW = 58;
-  const restW = TW - snoW - qtyW;
+  // ── Item table — S.No | Description | [custom cols…] | Qty (Nos) | Damage ──
+  // Damage (defect) shown alongside received so "20 received, 1 damage" is explicit.
+  const snoW = 30, qtyW = 46, dmgW = 46;
+  const restW = TW - snoW - qtyW - dmgW;
   const descW = cols.length ? Math.max(restW * 0.34, 120) : restW;
   const colW = cols.length ? (restW - descW) / cols.length : 0;
-  const heads = ['S.No.', 'Description', ...cols.map((c) => c.label), 'Qty (Nos)'];
-  const widths = [snoW, descW, ...cols.map(() => colW), qtyW];
-  const aligns: ('left' | 'center')[] = ['center', 'left', ...cols.map(() => 'center' as const), 'center'];
+  const heads = ['S.No.', 'Description', ...cols.map((c) => c.label), 'Qty (Nos)', 'Damage'];
+  const widths = [snoW, descW, ...cols.map(() => colW), qtyW, dmgW];
+  const aligns: ('left' | 'center')[] = ['center', 'left', ...cols.map(() => 'center' as const), 'center', 'center'];
 
   const headH = 18;
   box(L, y, TW, headH, HEAD_BG);
@@ -567,9 +590,9 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
   { let x = L; for (let i = 0; i < widths.length - 1; i++) { x += widths[i]; line(x, y, x, y + headH); } }
   y += headH;
 
-  let total = 0;
+  let total = 0, totalDmg = 0;
   for (const it of pl.lineItems) {
-    const vals = [String(it.srNo), it.description || '', ...cols.map((c) => it.customValues?.[c.key] ?? ''), String(it.receiptQty ?? '')];
+    const vals = [String(it.srNo), it.description || '', ...cols.map((c) => it.customValues?.[c.key] ?? ''), String(it.receiptQty ?? ''), String(it.defectQty ?? 0)];
     const rowH = Math.max(16, ...widths.map((w, i) => measure(vals[i], w) + 6));
     if (y + rowH > pdf.page.height - 70) { pdf.addPage(); y = 40; }
     box(L, y, TW, rowH);
@@ -577,25 +600,48 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
     vals.forEach((v, i) => { put(x, y + 2, widths[i], v, { size: 8, align: aligns[i] === 'center' ? 'center' : 'left' }); x += widths[i]; });
     x = L; for (let i = 0; i < widths.length - 1; i++) { x += widths[i]; line(x, y, x, y + rowH); }
     total += Number(it.receiptQty) || 0;
+    totalDmg += Number(it.defectQty) || 0;
     y += rowH;
   }
   if (!pl.lineItems.length) { const rh = 20; box(L, y, TW, rh); put(L, y + 4, TW, 'No items.', { size: 8, align: 'center', color: '#94a3b8' }); y += rh; }
 
-  // Total row
+  // Total row — totals for both the received qty and the damage columns.
   const totH = 18;
   box(L, y, TW, totH);
-  put(L, y + 4, TW - qtyW, 'TOTAL', { font: 'Helvetica-Bold', size: 8, align: 'right' });
-  put(L + TW - qtyW, y + 4, qtyW, String(total), { font: 'Helvetica-Bold', size: 8, align: 'center' });
-  line(L + TW - qtyW, y, L + TW - qtyW, y + totH);
+  put(L, y + 4, TW - qtyW - dmgW, 'TOTAL', { font: 'Helvetica-Bold', size: 8, align: 'right' });
+  put(L + TW - qtyW - dmgW, y + 4, qtyW, String(total), { font: 'Helvetica-Bold', size: 8, align: 'center' });
+  put(L + TW - dmgW, y + 4, dmgW, String(totalDmg), { font: 'Helvetica-Bold', size: 8, align: 'center' });
+  line(L + TW - qtyW - dmgW, y, L + TW - qtyW - dmgW, y + totH);
+  line(L + TW - dmgW, y, L + TW - dmgW, y + totH);
   y += totH;
 
-  // ── Received-by footer ──
-  y += 26;
-  if (y > pdf.page.height - 80) { pdf.addPage(); y = 60; }
-  const sigW = 200;
-  line(R - sigW, y, R, y);
-  put(R - sigW, y + 3, sigW, 'RECEIVED BY (Name / Sign / Date)', { size: 7.5, align: 'center', color: '#475569' });
-  put(L, y + 3, sigW, `Packing List: ${pl.grnNumber}`, { size: 7.5, color: '#94a3b8' });
+  // ── Signature blocks — Crystal Corporate team + Client team (2–3 names each,
+  //    received-by name & sign). Amisha/Akash B3: two signature columns. ──
+  y += 16;
+  const blockH = 90;   // tall enough that the Name / Sign / Date lines all sit inside the box
+  if (y + blockH + 40 > pdf.page.height - 30) { pdf.addPage(); y = 40; }
+  const gap2 = 12, halfSig = (TW - gap2) / 2;
+  const sigBlock = (bx: number, title: string) => {
+    box(bx, y, halfSig, blockH);
+    box(bx, y, halfSig, 16, '#eef2f7');
+    put(bx, y + 4, halfSig, title, { font: 'Helvetica-Bold', size: 8, align: 'center', color: HEAD_BG });
+    let ry = y + 26;
+    for (const label of ['Name', 'Sign', 'Date']) {   // one line each
+      line(bx + 8, ry + 10, bx + halfSig - 8, ry + 10);
+      put(bx + 8, ry + 11, halfSig - 16, label, { size: 6, color: '#94a3b8' });
+      ry += 17;
+    }
+  };
+  sigBlock(L, 'CRYSTAL CORPORATE TEAM');
+  sigBlock(L + halfSig + gap2, 'CLIENT TEAM (Received By)');
+  y += blockH;
+
+  // ── Site supervisor + system-generated timestamp footer ──
+  y += 8;
+  put(L, y, TW, `Site Supervisor: ${pl.siteSupervisor || '__________________________'}     Packing List: ${pl.grnNumber}`, { size: 7.5, color: '#475569' });
+  y += 13;
+  const genAt = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  put(L, y, TW, `System-generated on ${genAt} (IST) — computer-generated copy.`, { size: 6.5, color: '#94a3b8' });
 
   pdf.end();
 }

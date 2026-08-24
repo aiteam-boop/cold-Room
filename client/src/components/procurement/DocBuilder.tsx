@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { Spinner } from '../ui';
+import { Modal, Spinner } from '../ui';
 import { docStatusPill, inr, titleize } from '../../lib/format';
 import DocPaper, { vendorBlock } from './DocPaper';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
+import { VendorModal } from './VendorsView';
 import { DeliveryBadge, isoDay } from '../DeliveryBadge';
 
 // Common units of measure for Work Order line items. The line's existing value
@@ -34,6 +35,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   const [msg, setMsg] = useState<{ ok: boolean; t: string } | null>(null);
   const [view, setView] = useState<'document' | 'form'>('document');
   const [showChain, setShowChain] = useState(false);
+  // A vendor picked from the list whose mandatory KYC is incomplete — it can't go
+  // on a PO/WO until KYC is completed; the popup offers to fix it right here.
+  const [blockedVendor, setBlockedVendor] = useState<any | null>(null);
+  const [kycEditVendor, setKycEditVendor] = useState<any | null>(null);
   const [bulkHead, setBulkHead] = useState(''); // "head then many items" quick-assign
   // Post-approval amendment: an approved doc is locked until the editor opts to
   // amend it, which then requires a written reason on save.
@@ -46,6 +51,8 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   const { data, isLoading } = useQuery({ queryKey: ['proc-doc', docId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/docs/${docId}`)).data as { doc: any; approval?: any } });
   const vendorsQ = useQuery({ queryKey: ['proc-vendors', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/procurement/vendors`)).data.vendors as any[] });
+  // Vendor meta drives the KYC-completion modal opened from the "incomplete KYC" popup.
+  const metaQ = useQuery({ queryKey: ['vendor-meta'], queryFn: async () => (await api.get('/vendors/meta')).data });
   // Same queryKey + shape as BOQTab so the React Query cache isn't corrupted.
   const boqQ = useQuery({ queryKey: ['boq', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/boq`)).data });
   const boqItems: any[] = (boqQ.data?.items ?? []).filter((i: any) => !i.isGroup);
@@ -60,6 +67,17 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
     // (sub-item) dropdown, not here. "Miscellaneous" is the genuine catch-all head.
     return [...set].sort((a, b) => a.localeCompare(b));
   })();
+  // "Head then item" (D2): once a line has a head, its BOQ Item dropdown lists only
+  // that head's items (+ the already-linked item, kept visible) so the pick is fast.
+  // No head → all items, as before.
+  const itemsForLine = (l: any) => {
+    let list = l.boqHead ? boqItems.filter((b) => b.category === l.boqHead) : boqItems;
+    if (l.boqItemId && !list.some((b) => b.id === l.boqItemId)) {
+      const cur = boqItems.find((b) => b.id === l.boqItemId);
+      if (cur) list = [cur, ...list];
+    }
+    return list;
+  };
   useEffect(() => { if (data?.doc) setD(structuredClone(data.doc)); }, [data]);
 
   const save = useMutation({
@@ -178,6 +196,10 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   function selectVendor(id: string) {
     const v = vendorsQ.data?.find((x) => x.id === id);
+    // Block picking a vendor whose mandatory KYC (GST Certificate, PAN Card,
+    // Cancelled Cheque, Bank Account, Email ID) is incomplete — it can't be put on
+    // a PO/WO. The popup lists what's missing and opens its KYC upload.
+    if (v && v.kyc && v.kyc.usable === false) { setBlockedVendor(v); return; }
     // Fill the "To," block from the same builder the document view uses, so both
     // vendor pickers produce the identical letterhead (name, address, Tel/Fax,
     // Website, GSTIN, CIN) — this one used to drop in the bare address only.
@@ -219,6 +241,9 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             <button onClick={() => setView('form')} className={`rounded px-2 py-1 font-medium ${view === 'form' ? 'bg-white text-navy shadow-sm' : 'text-slate-500'}`}>Form</button>
           </div>
           <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf`, `${d.docNumber || 'document'}.pdf`)}>📄 Download PDF</button>
+          {/* Internal copy: same PDF plus each line's BOQ head + linked BOQ item
+              (under the description). Marked "INTERNAL — NOT FOR VENDOR". */}
+          <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf?internal=1`, `${d.docNumber || 'document'} - Internal.pdf`)}>📋 With Internal</button>
           {/* Internal copy: same PDF plus the FINAL APPROVAL stamp (who approved,
               when, remark). Only for approved docs — the clean one goes to the supplier. */}
           {approved && <button className="btn-outline text-sm" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${docId}/pdf?approvals=1`, `${d.docNumber || 'document'} - Approved.pdf`)}>🕒 With Approval</button>}
@@ -286,6 +311,37 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
           }}
         />
       )}
+
+      {/* Picked a vendor with incomplete mandatory KYC — can't go on a PO/WO. */}
+      {blockedVendor && (
+        <Modal title="Vendor KYC incomplete" onClose={() => setBlockedVendor(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-slate-600">
+              <strong>{blockedVendor.name}</strong> can't be added to this {isWO ? 'WO' : 'PO'} yet — its mandatory KYC is incomplete.
+            </p>
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              Missing: {(blockedVendor.kyc?.mandatoryMissing ?? []).join(', ') || 'mandatory KYC documents'}
+            </div>
+            <p className="text-xs text-slate-500">Upload these on the vendor's <strong>KYC Documents</strong> tab, then pick the vendor again.</p>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button className="btn-outline" onClick={() => setBlockedVendor(null)}>Cancel</button>
+              <button className="btn-primary" disabled={!canEdit('vendors')} title={!canEdit('vendors') ? 'You do not have permission to edit vendors' : undefined}
+                onClick={() => { setKycEditVendor(blockedVendor); setBlockedVendor(null); }}>Complete KYC</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {/* The vendor's own edit modal, opened straight on the KYC Documents tab. */}
+      {kycEditVendor && metaQ.data && (
+        <VendorModal
+          projectId={projectId}
+          vendor={kycEditVendor}
+          meta={metaQ.data}
+          initialTab="kyc"
+          onClose={() => setKycEditVendor(null)}
+          onDone={() => { setKycEditVendor(null); qc.invalidateQueries({ queryKey: ['proc-vendors', projectId] }); qc.invalidateQueries({ queryKey: ['proc-vendors', projectId, 'all'] }); qc.invalidateQueries({ queryKey: ['all-vendors'] }); }}
+        />
+      )}
       {d.rejectionReason && d.status !== 'APPROVED' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">Last rejection: {d.rejectionReason}</div>}
       {locked && (
         <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
@@ -344,7 +400,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
       )}
 
-      {view === 'document' && <DocPaper d={d} setD={setD} editable={editable} vendors={vendorsQ.data ?? []} boqHeads={boqHeads} />}
+      {view === 'document' && <DocPaper d={d} setD={setD} editable={editable} vendors={vendorsQ.data ?? []} boqHeads={boqHeads} boqItems={boqItems} onSelectVendor={selectVendor} />}
 
       {view === 'form' && <>
       {/* Vendor + header */}
@@ -462,8 +518,9 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                         never reaches the BOQ Cost sheet and shows up as "unlinked". */}
                     <select className="input text-xs" disabled={!editable} value={l.boqItemId || ''} onChange={(e) => selectBoqItem(i, e.target.value)}>
                       <option value="">Other (no specific BOQ item)</option>
-                      {boqItems.map((b) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
+                      {itemsForLine(l).map((b) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
                     </select>
+                    {l.boqHead && itemsForLine(l).length === 0 && <div className="mt-0.5 text-[10px] text-slate-400">No items under “{l.boqHead}” — pick Other.</div>}
                     {!l.boqItemId && !!l.description?.trim() && <div className="mt-0.5 text-[10px] text-amber-600">Other — cost won’t appear in BOQ Cost</div>}
                   </td>
                   {/* BOQ head (D2) — mandatory to issue, internal only (never on vendor PDF). */}

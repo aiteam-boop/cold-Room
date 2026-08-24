@@ -261,6 +261,12 @@ model ProcurementDoc {
   // the term key (advance | beforeDelivery | running | postDelivery |
   // postCompletion | retention): { [termKey]: { piNumber, piDate, piValue, piPdfUrl } }.
   termPis String?
+  // UTR(s) fetched from the external Accounts/FMS sheet for POs paid via the
+  // Accounts FORM before the in-app payment flow existed (Procurement §A · FMS
+  // backfill). JSON array: [{ utr, vrNo, amount, invoice, matchedBy, fetchedAt }].
+  // Read-only mirror of the sheet — shown in the pipeline, never used to compute
+  // in-app payment status. See services/fmsUtr.ts + [[fms-utr-sheet]] memory.
+  sheetPayments String?
 
   createdById   String?
   approvedById  String?
@@ -393,6 +399,22 @@ model BOQCostAnnotation {
 
   @@unique([projectId, boqItemId])
   @@index([projectId])
+}
+
+// BOQ-vs-Received reconciliation remark LOG (Procurement PRD §8 · G2). Unlike the
+// single `remarks` on BOQCostAnnotation, this is APPEND-ONLY: each note about a
+// reconciliation row (a shortfall, a follow-up) is a new row, so the issue is
+// tracked over time and never overwritten. No Prisma relations — purely additive.
+model BOQReconRemark {
+  id            String   @id @default(cuid()) @map("_id")
+  projectId     String
+  boqItemId     String
+  text          String
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+
+  @@index([projectId, boqItemId])
 }
 
 model ProcurementLineItem {
@@ -630,6 +652,9 @@ model GoodsReceipt {
   siteEngineerEmail String?
   linkToken   String?
   packingListNo Int?
+  // Site supervisor name typed by whoever fills the GRN form on site — printed on
+  // the packing list's "Site Supervisor:" line (blank prints a blank line).
+  siteSupervisor String?
   photoUrl    String?
   remarks     String?
   status      String  @default("DRAFT")  // DRAFT | RECEIVED
@@ -664,6 +689,10 @@ model GoodsReceiptLine {
   defectQty     Float   @default(0)
   acceptedQty   Float   @default(0)
   remarks       String?
+  // Per-item delivery photo (Procurement PRD §3 · B5). Moves the GRN from one
+  // material photo to a photo PER LINE — the proof that this specific item arrived.
+  // Captured on the mobile site-engineer form (camera or gallery). /uploads/<file>.
+  photoUrl      String?
   // Mode 2 (custom packing list) — values for the GR's configurable columns
   // (JSON keyed by column key, e.g. { panelType, width, length, sqmtr, bundleNo }).
   customValues  String?

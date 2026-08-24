@@ -4,6 +4,25 @@ import { useAuth } from '../../lib/auth';
 import { Spinner } from '../ui';
 import { inr, fmtDate, titleize } from '../../lib/format';
 
+// Spread the PO's Accounts-sheet payments across its still-PENDING terms (greedy, in
+// order) so each covered term SHOWS as paid-via-sheet. Display mirror only — the
+// in-app records are untouched (payment was made outside the app). Keyed by term index.
+function computeSheetAlloc(payment: any): { byIdx: Record<number, { paid: number; full: boolean }>; total: number } {
+  const byIdx: Record<number, { paid: number; full: boolean }> = {};
+  const pool = (payment?.sheetPayments || []).map((s: any) => ({ left: Number(s.amount) || 0 }));
+  let total = 0;
+  if (!pool.length) return { byIdx, total };
+  (payment.terms || []).forEach((t: any, idx: number) => {
+    if (t.status !== 'PENDING') return;
+    let need = (t.inrAmount || 0) - (t.amountPaid || 0);
+    if (need <= 0.01) return;
+    let paid = 0;
+    for (const p of pool) { if (need <= 0.01) break; if (p.left <= 0.01) continue; const take = Math.min(p.left, need); paid += take; need -= take; p.left -= take; }
+    if (paid > 0.01) { byIdx[idx] = { paid, full: need <= 0.01 }; total += paid; }
+  });
+  return { byIdx, total };
+}
+
 // Phase timeline for one PO/WO: Approval → Payment → Goods Receipt. Read-only,
 // lazy-loaded on expand — shown in the Approvals "Approved" tab and the project
 // dashboard. Mirrors the Spares-IMS style: a 3-step header + detail cards.
@@ -18,9 +37,13 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
   if (isLoading) return <div className="py-6"><Spinner label="Loading pipeline…" /></div>;
   if (isError || !data) return <div className="py-4 text-sm text-slate-400">Could not load the pipeline for this document.</div>;
 
-  const { approval, payment, goodsReceipt } = data;
+  const { doc, approval, payment, goodsReceipt } = data;
+  // Fold Accounts-sheet payments into the paid/pending shown here (display only).
+  const sheetAlloc = computeSheetAlloc(payment);
+  const effPaid = (payment.paidAmount || 0) + sheetAlloc.total;
+  const effPending = Math.max((payment.pendingAmount || 0) - sheetAlloc.total, 0);
   const approvalState: Phase = approval.total > 0 && approval.approved >= approval.total ? 'complete' : approval.approved > 0 ? 'partial' : 'pending';
-  const paymentState: Phase = payment.termsTotal === 0 ? 'pending' : payment.pendingAmount <= 0.01 ? 'complete' : payment.paidAmount > 0.01 ? 'partial' : 'pending';
+  const paymentState: Phase = payment.termsTotal === 0 ? 'pending' : effPending <= 0.01 ? 'complete' : effPaid > 0.01 ? 'partial' : 'pending';
   const grState: Phase = goodsReceipt.totalPoQty <= 0 ? 'pending' : goodsReceipt.remainingQty <= 0.01 && goodsReceipt.totalReceivedQty > 0 ? 'complete' : goodsReceipt.totalReceivedQty > 0 ? 'partial' : 'pending';
 
   return (
@@ -29,7 +52,7 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
       <div className="flex items-center">
         <Step label="Approval" icon="📝" state={approvalState} sub={`${approval.approved}/${approval.total} signed`} />
         <Connector state={approvalState} />
-        <Step label="Payment" icon="💳" state={paymentState} sub={payment.termsTotal ? `${money(payment.paidAmount)} paid` : 'no terms'} />
+        <Step label="Payment" icon="💳" state={paymentState} sub={payment.termsTotal ? `${money(effPaid)} paid` : 'no terms'} />
         <Connector state={paymentState} />
         <Step label="Goods Receipt" icon="📦" state={grState} sub={goodsReceipt.count ? `${goodsReceipt.totalReceivedQty}/${goodsReceipt.totalPoQty} qty` : 'none yet'} last />
       </div>
@@ -60,7 +83,17 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
         {/* Payment */}
         <div className="rounded-lg border border-slate-200 bg-white p-3">
           <CardHead title="Payment" state={paymentState} />
-          <div className="mt-1 text-[11px] text-slate-400">{money(payment.paidAmount)} paid · <span className={payment.pendingAmount > 0.01 ? 'font-medium text-rose-600' : ''}>{money(payment.pendingAmount)} pending</span></div>
+          {/* What the payment terms are calculated on — GST-inclusive or basic —
+              mirroring the PO's "Payment amount includes" choice. */}
+          {doc?.gstEnabled && (
+            <div className="mt-1 text-[11px] text-slate-500">
+              Payment amount includes:{' '}
+              {doc.payGstInclusive
+                ? <span>GST ({doc.gstPct ?? 18}% inclusive) — <span className="font-medium text-slate-700">{money(doc.finalAmount)}</span></span>
+                : <span>Basic only — <span className="font-medium text-slate-700">{money(doc.basicAmount)}</span></span>}
+            </div>
+          )}
+          <div className="mt-1 text-[11px] text-slate-400">{money(effPaid)} paid · <span className={effPending > 0.01 ? 'font-medium text-rose-600' : ''}>{money(effPending)} pending</span></div>
           {payment.terms.length === 0 ? (
             <div className="mt-2 text-xs text-slate-400">No payment terms.</div>
           ) : (
@@ -73,8 +106,10 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
                     <div>
                       <span className="font-medium text-slate-700">{t.name}</span>
                       {t.percentage ? <span className="text-slate-400"> ({t.percentage}%)</span> : null}
-                      <span className="text-slate-500"> — {money(t.amountPaid)} / {money(t.inrAmount)}</span>
-                      <span className={`ml-1 rounded px-1 text-[10px] ${t.status === 'PAID' ? 'bg-green-100 text-green-700' : t.status === 'PARTIALLY_PAID' ? 'bg-orange-100 text-orange-700' : t.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{t.status === 'PARTIALLY_PAID' ? 'PARTLY PAID' : titleize(t.status)}</span>
+                      <span className="text-slate-500"> — {money(t.amountPaid + (sheetAlloc.byIdx[i]?.paid || 0))} / {money(t.inrAmount)}</span>
+                      {sheetAlloc.byIdx[i]
+                        ? <span className="ml-1 rounded bg-green-100 px-1 text-[10px] text-green-700">✓ PAID{sheetAlloc.byIdx[i].full ? '' : ' (PART)'} · sheet</span>
+                        : <span className={`ml-1 rounded px-1 text-[10px] ${t.status === 'PAID' ? 'bg-green-100 text-green-700' : t.status === 'PARTIALLY_PAID' ? 'bg-orange-100 text-orange-700' : t.status === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{t.status === 'PARTIALLY_PAID' ? 'PARTLY PAID' : titleize(t.status)}</span>}
                     </div>
                     {partial && <div className="text-[11px] font-medium text-rose-600">{money(t.remaining)} remaining ({pctLeft}% of this term left)</div>}
                     {/* Payment record(s) raised for this term: number, trigger date, release decision. */}
@@ -94,6 +129,24 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
                 );
               })}
             </ul>
+          )}
+          {/* UTR(s) backfilled from the Accounts sheet for POs paid via the form
+              before the in-app flow. Read-only — not part of paid/pending above. */}
+          {(payment.sheetPayments?.length ?? 0) > 0 && (
+            <div className="mt-2 rounded border border-emerald-200 bg-emerald-50/70 p-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">✓ Paid via Accounts sheet</div>
+                <div className="text-[11px] font-semibold text-emerald-700">{money(payment.sheetPayments.reduce((s: number, x: any) => s + (Number(x.amount) || 0), 0))}</div>
+              </div>
+              {payment.sheetPayments.map((s: any, i: number) => (
+                <div key={i} className="mt-0.5 text-[11px] text-slate-600">
+                  <span className="text-slate-400">UTR:</span> <span className="font-mono font-medium text-slate-700">{s.utr}</span>
+                  {s.vrNo && <span className="text-slate-400"> · {s.vrNo}</span>}
+                  {s.amount != null && <span className="text-slate-500"> · {money(s.amount)}</span>}
+                </div>
+              ))}
+              <div className="mt-0.5 text-[9px] text-slate-400">Paid outside the app via the FMS Accounts form — not counted in the in-app paid/pending above.</div>
+            </div>
           )}
         </div>
 
