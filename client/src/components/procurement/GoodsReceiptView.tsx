@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, openAuthedFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, Spinner } from '../ui';
+import { FileViewerModal, type ViewFile } from '../FileViewer';
 import { docStatusPill, fmtDate, titleize } from '../../lib/format';
 
 // The physical goods-receipt register: material/spares/machines arriving on site
@@ -146,6 +147,12 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
     onSuccess: ({ lineId, photoUrl }) => { setG((p: any) => ({ ...p, lineItems: p.lineItems.map((l: any) => (l.id === lineId ? { ...l, photoUrl } : l)) })); setMsg('Item photo added.'); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Open all this GR's item photos in the in-app viewer, starting at the clicked one.
+  const [photoViewer, setPhotoViewer] = useState<{ items: ViewFile[]; start: number } | null>(null);
+  const openLinePhotos = (clickedUrl: string) => {
+    const photos: ViewFile[] = (g?.lineItems ?? []).filter((l: any) => l.photoUrl).map((l: any) => ({ url: l.photoUrl, name: `${((l.description || 'item').split('\n')[0])}.jpg`, label: (l.description || '').split('\n')[0]?.slice(0, 16) }));
+    setPhotoViewer({ items: photos, start: Math.max(photos.findIndex((p) => p.url === clickedUrl), 0) });
+  };
   // Assign to a site engineer → generates a no-login link + emails it.
   const [copied, setCopied] = useState('');
   // Custom packing lists get a Document/Form toggle, just like PO/WO.
@@ -264,7 +271,7 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
                         <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
                         <td className={`text-center font-medium ${short > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{short}</td>
                         <td className="text-center align-middle">
-                          {l.photoUrl && <a href={l.photoUrl} target="_blank" rel="noreferrer"><img src={l.photoUrl} alt="item" className="mx-auto mb-1 h-9 w-9 rounded border object-cover" /></a>}
+                          {l.photoUrl && <button type="button" onClick={() => openLinePhotos(l.photoUrl)} title="View photo"><img src={l.photoUrl} alt="item" className="mx-auto mb-1 h-9 w-9 rounded border object-cover" /></button>}
                           {editable && l.id && (
                             <label className={`inline-block cursor-pointer text-[11px] font-medium hover:underline ${l.photoUrl ? 'text-slate-500' : 'text-navy'}`}>
                               {l.photoUrl ? 'Change' : '📷 Add'}
@@ -338,12 +345,13 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
           <F label="Remarks"><textarea className="input" rows={2} disabled={!editable} value={g.remarks || ''} onChange={(e) => setG({ ...g, remarks: e.target.value })} placeholder="e.g. 2 cartons damaged in transit, noted on challan" /></F>
           <F label="Material Photo">
             {g.photoUrl
-              ? <a className="text-sm text-navy hover:underline" href={g.photoUrl} target="_blank" rel="noreferrer">🖼 View photo</a>
+              ? <button className="text-sm text-navy hover:underline" onClick={() => setPhotoViewer({ items: [{ url: g.photoUrl, name: 'GRN photo.jpg' }], start: 0 })}>🖼 View photo</button>
               : <span className="text-xs text-slate-400">Not uploaded</span>}
             {editable && <input className="input mt-1 text-xs" type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && uploadPhoto.mutate(e.target.files[0])} />}
           </F>
         </div>
       </div>
+      {photoViewer && <FileViewerModal items={photoViewer.items} startIndex={photoViewer.start} title="Delivery photo" onClose={() => setPhotoViewer(null)} />}
     </div>
   );
 }

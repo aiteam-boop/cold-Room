@@ -72,18 +72,47 @@ export function vendorBlock(v: {
   ].filter(Boolean).join('\n');
 }
 
+// Shared label for the PO "To" vendor dropdown — name + KYC detail (status,
+// items done, and which mandatory items are still missing). Plain text (an
+// <option> can't be rich), used by both DocPaper and DocBuilder's picker.
+const KYC_SHORT: Record<string, string> = {
+  'GST Certificate': 'GST cert', 'PAN Card': 'PAN', 'Cancelled Cheque': 'Cheque',
+  'Bank Account': 'Bank', 'Email ID': 'Email', 'GST Number': 'GSTIN',
+};
+export function vendorKycLabel(v: any): string {
+  const status = v.kycStatus || 'Missing';
+  const k = v.kyc;
+  // Wide (non-collapsing) em-space gap so the vendor NAME is clearly separated
+  // from the KYC info — a plain <option> can't be styled, so we space it out.
+  const GAP = '  '; // small em-space cushion each side of the line
+  const SEP = GAP + '—'.repeat(6) + GAP; // a drawn line: run of em-dashes between the name and KYC info
+  if (!k) return `${v.name}${SEP}${status}`;
+  const missing = (k.mandatoryMissing || []).map((m: string) => KYC_SHORT[m] || m).join(', ');
+  return `${v.name}${SEP}${status} ${k.completed}/${k.total}${missing ? ` · missing ${missing}` : ''}`;
+}
+
 // Inline-editable, PDF-styled document with the company's bordered grid layout.
 export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], boqItems = [], onSelectVendor }: { d: any; setD: (x: any) => void; editable: boolean; vendors: any[]; boqHeads?: string[]; boqItems?: any[]; onSelectVendor?: (id: string) => void }) {
   const isWO = d.type === 'WO';
   const basic = d.lineItems.filter((l: any) => !l.isLeadTime).reduce((s: number, l: any) => s + (Number(l.qty) * Number(l.unitPrice) || 0), 0);
   // GST charged PER LINE at that line's own rate (l.gstPct, else doc default);
   // exempt lines bear none but still sit in Basic/Final.
-  const gst = d.gstEnabled ? Math.round(d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => {
+  // GST keeps its true decimal value (shown to 2 dp); only the Final Amount is
+  // rounded to a whole rupee for a clean total.
+  const gst = d.gstEnabled ? d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).reduce((s: number, l: any) => {
     const rate = l.gstPct != null ? Number(l.gstPct) : Number(d.gstPct);
     return s + (Number(l.qty) * Number(l.unitPrice) || 0) * (rate / 100);
-  }, 0)) : 0;
-  const final = basic + gst;
+  }, 0) : 0;
+  const final = Math.round(basic + gst);
   const gstRateOptions = [...new Set([5, 12, 18, 28, Number(d.gstPct) > 0 ? Number(d.gstPct) : 18])].sort((a: number, b: number) => a - b);
+  // Per-line GST: if taxable lines use more than one rate, this PO carries
+  // "individual" GST — so the flat gstPct label (e.g. 18%) would be misleading.
+  // We flag it and show the actual blended rate instead. Purely derived, no schema.
+  const taxRateSet = new Set<number>(d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).map((l: any) => (l.gstPct != null ? Number(l.gstPct) : Number(d.gstPct))));
+  const mixedGst = !!d.gstEnabled && taxRateSet.size > 1;
+  const uniformGstRate = taxRateSet.size === 1 ? [...taxRateSet][0] : null;
+  const effGstPct = basic > 0 ? Math.round((gst / basic) * 1000) / 10 : Number(d.gstPct);
+  const gstLabel = mixedGst ? `individual rates · ~${effGstPct}%` : `${uniformGstRate ?? d.gstPct}%`;
   // The base each payment-term % is taken from — final (incl. GST) or basic.
   const payBase = d.payGstInclusive ? final : basic;
   // GST-inclusive advance-on-basic split (advance carries no GST unless it's 100%);
@@ -207,7 +236,7 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
           {editable && (
             <select className={`mb-1 mt-1 w-full rounded border ${B} px-1 py-0.5 text-[10px] text-slate-500`} value={d.vendorId || ''} onChange={(e) => selectVendor(e.target.value)}>
               <option value="">— choose vendor / type manually —</option>
-              {vendors.map((v) => <option key={v.id} value={v.id}>{v.name} ({v.kycStatus})</option>)}
+              {vendors.map((v) => <option key={v.id} value={v.id}>{vendorKycLabel(v)}</option>)}
             </select>
           )}
           <TA value={d.vendorAddress} onChange={setVendorBlock} rows={6} className="font-medium" placeholder="Vendor name&#10;Address&#10;Tel / Fax&#10;Website&#10;GSTN.NO&#10;CIN" />
@@ -357,7 +386,7 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
               {isWO && <input type="checkbox" className="mr-1" disabled={!editable} checked={d.gstEnabled} onChange={(e) => setD({ ...d, gstEnabled: e.target.checked })} />}
               GST {d.gstEnabled && <select className={`rounded border ${B} text-[9px]`} disabled={!editable} value={d.gstPct} onChange={(e) => setD({ ...d, gstPct: Number(e.target.value) })}>{[0, 5, 12, 18, 28].map((g) => <option key={g} value={g}>{g}%</option>)}</select>}
             </td>
-            <td className={`border ${B} p-1 text-right`}>{d.gstEnabled ? gst.toLocaleString('en-IN') : '—'}</td>
+            <td className={`border ${B} p-1 text-right`}>{d.gstEnabled ? gst.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}</td>
             {editable && <td></td>}
           </tr>
           <tr>
@@ -381,9 +410,15 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
             milestones (Payment Pipeline) follow the same choice. */}
         <div className="mb-2 flex flex-wrap items-center gap-3 rounded bg-slate-50 px-2 py-1 text-[10px]">
           <span className="font-semibold text-slate-600">Payment amount includes:</span>
-          <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: true })} />GST ({d.gstEnabled ? `${d.gstPct}% ` : ''}inclusive) — {inr(final)}</label>
+          <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: true })} />GST ({d.gstEnabled ? `${gstLabel} ` : ''}inclusive) — {inr(final)}</label>
           <label className="flex items-center gap-1"><input type="radio" disabled={!editable} checked={!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: false })} />Basic only — {inr(basic)}</label>
         </div>
+        {/* Flag when the PO carries per-line (individual) GST — the flat rate no longer applies. */}
+        {mixedGst && (
+          <div className="mb-2 rounded bg-amber-50 px-2 py-1 text-[10px] text-amber-700">
+            ⓘ Individual GST rates on this PO ({[...taxRateSet].sort((a, b) => a - b).map((r) => `${r}%`).join(', ')}) — total GST {inr(gst)} (~{effGstPct}% overall, not a flat {d.gstPct}%).
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-2">
           {PAY.map(([k, label, mk]) => {
             const pct = Number(d[k]) || 0;

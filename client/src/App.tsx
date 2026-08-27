@@ -6,6 +6,7 @@ import Login from './pages/Login';
 import ProjectsList from './pages/ProjectsList';
 import ProjectWorkspace from './pages/ProjectWorkspace';
 import VendorsPage from './pages/VendorsPage';
+import PettyCashPage from './pages/PettyCashPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import MasterReports from './pages/MasterReports';
 import UsersAdmin from './pages/UsersAdmin';
@@ -66,6 +67,7 @@ export default function App() {
         <Route path="/" element={<ProjectsList />} />
         <Route path="/projects/:projectId" element={<ProjectWorkspace />} />
         <Route path="/vendors" element={<RequirePage page="vendors"><VendorsPage /></RequirePage>} />
+        <Route path="/petty-cash" element={<RequirePage page="pettycash"><PettyCashPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
         <Route path="/reports" element={<RequirePage page="reports"><MasterReports /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />

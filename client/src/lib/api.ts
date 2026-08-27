@@ -60,6 +60,14 @@ export async function openAuthedFile(path: string) {
   }
 }
 
+// Fetch an authenticated file (path WITHOUT /api) as a blob and return an object
+// URL — so it can be shown inline in an <iframe>/<img> (which can't send the bearer
+// token). Caller MUST URL.revokeObjectURL() it when done to free memory.
+export async function fetchAuthedBlobUrl(path: string): Promise<string> {
+  const res = await api.get(path, { responseType: 'blob' });
+  return URL.createObjectURL(res.data as Blob);
+}
+
 // Pull a human-friendly error message out of an axios error.
 export function errMsg(err: unknown): string {
   const e = err as { response?: { data?: { error?: string; details?: unknown } }; message?: string };

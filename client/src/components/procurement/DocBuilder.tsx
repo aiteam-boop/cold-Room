@@ -4,7 +4,7 @@ import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Modal, Spinner } from '../ui';
 import { docStatusPill, inr, titleize } from '../../lib/format';
-import DocPaper, { vendorBlock } from './DocPaper';
+import DocPaper, { vendorBlock, vendorKycLabel } from './DocPaper';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
 import { VendorModal } from './VendorsView';
@@ -165,6 +165,13 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
     return s + (Number(l.qty) * Number(l.unitPrice) || 0) * (rate / 100);
   }, 0)) : 0;
   const finalAmt = basic + gstAmt;
+  // Per-line GST: >1 rate across taxable lines ⇒ "individual" GST, so the flat
+  // gstPct label would mislead. Flag it + show the blended rate. Purely derived.
+  const taxRateSet = new Set<number>(d.lineItems.filter((l: any) => !l.isLeadTime && !l.gstExempt).map((l: any) => (l.gstPct != null ? Number(l.gstPct) : Number(d.gstPct))));
+  const mixedGst = !!d.gstEnabled && taxRateSet.size > 1;
+  const uniformGstRate = taxRateSet.size === 1 ? [...taxRateSet][0] : null;
+  const effGstPct = basic > 0 ? Math.round((gstAmt / basic) * 1000) / 10 : Number(d.gstPct);
+  const gstLabel = mixedGst ? `individual rates · ~${effGstPct}%` : `${uniformGstRate ?? d.gstPct}%`;
   // Selectable per-line GST rates — the standard slabs plus the doc's default, so
   // the current value always has a matching option.
   const gstRateOptions = [...new Set([5, 12, 18, 28, Number(d.gstPct) > 0 ? Number(d.gstPct) : 18])].sort((a, b) => a - b);
@@ -411,7 +418,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             <label className="label">Select vendor (site-filtered)</label>
             <select className="input" disabled={!editable} value={d.vendorId || ''} onChange={(e) => selectVendor(e.target.value)}>
               <option value="">— choose / manual —</option>
-              {vendorsQ.data?.map((v) => <option key={v.id} value={v.id}>{v.name} ({v.kycStatus})</option>)}
+              {vendorsQ.data?.map((v) => <option key={v.id} value={v.id}>{vendorKycLabel(v)}</option>)}
             </select>
           </div>
           <F label="Against Quotation" v={d.againstQuotation} on={(x) => setD({ ...d, againstQuotation: x })} ed={editable} />
@@ -584,17 +591,23 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         </div>
         {/* Which amount the % is taken from: FINAL (incl. GST) or BASIC. The
             milestones (Payment Pipeline) follow the same choice. */}
-        <div className="mb-3 flex flex-wrap items-center gap-4 rounded-lg bg-slate-50 px-3 py-2">
+        <div className="mb-2 flex flex-wrap items-center gap-4 rounded-lg bg-slate-50 px-3 py-2">
           <span className="text-xs font-medium text-slate-600">Payment amount includes:</span>
           <label className="flex items-center gap-1.5 text-sm">
             <input type="radio" disabled={!editable} checked={!!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: true })} />
-            GST ({d.gstEnabled ? `${d.gstPct}% ` : ''}inclusive) — of {inr(finalAmt)}
+            GST ({d.gstEnabled ? `${gstLabel} ` : ''}inclusive) — of {inr(finalAmt)}
           </label>
           <label className="flex items-center gap-1.5 text-sm">
             <input type="radio" disabled={!editable} checked={!d.payGstInclusive} onChange={() => setD({ ...d, payGstInclusive: false })} />
             Basic value only — of {inr(basic)}
           </label>
         </div>
+        {/* Flag per-line (individual) GST — the flat rate no longer applies. */}
+        {mixedGst && (
+          <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            ⓘ Individual GST rates on this PO ({[...taxRateSet].sort((a, b) => a - b).map((r) => `${r}%`).join(', ')}) — total GST {inr(gstAmt)} (~{effGstPct}% overall, not a flat {d.gstPct}%).
+          </div>
+        )}
         <div className="grid gap-3 sm:grid-cols-3">
           {PAY.map((p) => (
             <div key={p.key} className="rounded-lg bg-slate-50 p-2">

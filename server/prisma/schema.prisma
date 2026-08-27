@@ -77,6 +77,8 @@ model Project {
   targetCompletionDate DateTime?
   status               String          @default("DRAFT")
   boqLocked            Boolean         @default(false)
+  // Test/sandbox project — hidden from everyone except the super-admin.
+  testOnly             Boolean         @default(false)
   boqLockedAt          DateTime?
   createdById          String
   createdBy            User            @relation("CreatedProjects", fields: [createdById], references: [id])
@@ -1456,4 +1458,73 @@ model ApiKeyCall {
   at     DateTime @default(now())
 
   @@index([keyId, at])
+}
+
+// ── Petty Cash (site-manager float) ──────────────────────────────────────────
+// A custodian (the site manager) holds a cash float that Accounts tops up, and
+// records expenses against it. Each expense flows: RECORDED → SUBMITTED (to
+// Accounts) → CONFIRMED / REJECTED (sent back to correct). A TOPUP just adds to
+// the float. Company-wide by default; an entry may be tagged to a project so the
+// same ledger can also be viewed per project.
+model PettyCashEntry {
+  id             String    @id @default(cuid()) @map("_id")
+  entryNumber    String    @unique              // PETTY-#####
+  type           String    @default("EXPENSE")  // EXPENSE | TOPUP
+  date           DateTime  @default(now())
+
+  // Expense fields
+  category       String?                         // ledger head / expense category
+  amount         Float     @default(0)           // always positive; `type` gives the sign
+  technician     String?                         // "for whom"
+  paidTo         String?                         // vendor / person
+  projectId      String?                         // optional project tag
+  jobOrder       String?                         // free-text JO / client
+  description    String?
+
+  // Top-up fields
+  reason         String?                         // top-up reason (e.g. "Float")
+  utrNumber      String?                         // top-up bank ref
+
+  // Files (expense): supporting invoice, budget-approval copy, payment screenshot
+  invoiceUrl     String?
+  budgetUrl      String?
+  paymentUrl     String?
+  // Any number of extra documents added later via the "+" — JSON array of
+  // { kind, fileName, fileUrl, at }. The three fields above seed it on create.
+  documents      String?
+
+  // Lifecycle
+  status         String    @default("RECORDED")  // RECORDED | SUBMITTED | CONFIRMED | REJECTED | VOID
+  sanctionedAmount Float?                         // Accounts may sanction a different amount
+  decisionRemark String?
+  decidedBy      String?
+  decidedAt      DateTime?
+
+  custodianName  String?
+  custodianEmail String?
+  recordedById   String?
+  recordedByName String?
+
+  // Append-only JSON arrays: trail = [{ at, action, byName, remark }],
+  // comments = [{ at, byName, text }].
+  trail          String?
+  comments       String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([type, status])
+  @@index([projectId])
+}
+
+// Who holds the float. projectId null = the company-wide custodian; a row with a
+// projectId set overrides it for that project.
+model PettyCashConfig {
+  id             String    @id @default(cuid()) @map("_id")
+  projectId      String?                         // null = company-wide
+  custodianName  String?
+  custodianEmail String?
+  updatedAt      DateTime  @updatedAt
+
+  @@index([projectId])
 }

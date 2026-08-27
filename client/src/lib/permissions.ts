@@ -13,6 +13,8 @@ export const PAGE_KEYS = [
   'reports',
   // FMS — vendor payment entry (finance).
   'fms',
+  // Petty Cash — site-manager cash float + expense ledger (finance).
+  'pettycash',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -35,6 +37,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   dpr: 'DPR (Room-wise)',
   reports: 'Reports & Registers',
   fms: 'FMS — Vendor Payments',
+  pettycash: 'Petty Cash',
 };
 
 export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget'] as const;

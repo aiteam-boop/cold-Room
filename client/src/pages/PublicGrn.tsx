@@ -12,6 +12,10 @@ export default function PublicGrn() {
   const { token } = useParams<{ token: string }>();
   const [g, setG] = useState<any>(null);
   const [msg, setMsg] = useState('');
+  // Per-line "100% received?" choice: 'full' auto-fills the full remaining qty
+  // (photo required), 'partial' reveals the Receipt/Defect inputs. UI-only — the
+  // saved receiptQty/defectQty are what actually persist, exactly as before.
+  const [recvMode, setRecvMode] = useState<Record<string, 'full' | 'partial'>>({});
 
   const grQ = useQuery({
     queryKey: ['public-grn', token],
@@ -79,6 +83,17 @@ export default function PublicGrn() {
   const pdfUrl = `/api/public/grn/${token}/pdf`;
   const cols: { key: string; label: string }[] = g.customColumns || [];
   const setLine = (i: number, patch: any) => { const li = [...g.lineItems]; li[i] = { ...li[i], ...patch }; setG({ ...g, lineItems: li }); };
+  // Which entry mode a received line is in — explicit choice wins, else inferred
+  // from any already-saved quantities (so a reopened form shows the right state).
+  const modeOf = (l: any): 'full' | 'partial' | undefined => {
+    if (recvMode[l.id]) return recvMode[l.id];
+    const r = Number(l.receiptQty) || 0, d = Number(l.defectQty) || 0, rem = Number(l.remainingToReceive) || 0;
+    if (r > 0 && rem > 0 && r >= rem && d === 0) return 'full';
+    if (r > 0 || d > 0) return 'partial';
+    return undefined;
+  };
+  const markFull = (i: number, l: any) => { setLine(i, { receiptQty: l.remainingToReceive, defectQty: 0 }); setRecvMode((m) => ({ ...m, [l.id]: 'full' })); };
+  const markPartial = (l: any) => setRecvMode((m) => ({ ...m, [l.id]: 'partial' }));
   const setCell = (i: number, key: string, val: string) => { const li = [...g.lineItems]; li[i] = { ...li[i], customValues: { ...(li[i].customValues || {}), [key]: val } }; setG({ ...g, lineItems: li }); };
   const addRow = () => setG({ ...g, lineItems: [...g.lineItems, { description: '', customValues: {}, receiptQty: 0, defectQty: 0 }] });
   const delRow = (i: number) => setG({ ...g, lineItems: g.lineItems.filter((_: any, idx: number) => idx !== i) });
@@ -211,9 +226,35 @@ export default function PublicGrn() {
                     <td className="py-1 text-xs">{l.description}</td>
                     <td className="text-center">{l.poQty}</td>
                     <td className="text-center text-slate-500">{l.remainingToReceive}</td>
-                    <td><input className="input text-center" type="number" disabled={locked} value={l.receiptQty} onChange={(e) => setLine(i, { receiptQty: e.target.value })} /></td>
-                    <td><input className="input text-center" type="number" disabled={locked} value={l.defectQty} onChange={(e) => setLine(i, { defectQty: e.target.value })} /></td>
-                    <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                    {/* Step 1: 100% received? Yes → full qty auto-filled + photo required.
+                        No → the usual Receipt / Defect / Accepted entry (unchanged). */}
+                    {locked ? (
+                      <>
+                        <td className="text-center">{l.receiptQty}</td>
+                        <td className="text-center">{l.defectQty}</td>
+                        <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}</td>
+                      </>
+                    ) : modeOf(l) === undefined ? (
+                      <td colSpan={3} className="text-center">
+                        <div className="text-[11px] text-slate-500">100% received?</div>
+                        <div className="mt-1 flex justify-center gap-1.5">
+                          <button className="rounded border border-green-300 bg-green-50 px-2.5 py-0.5 text-[11px] font-semibold text-green-700 hover:bg-green-100" onClick={() => markFull(i, l)}>Yes</button>
+                          <button className="rounded border border-slate-300 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-100" onClick={() => markPartial(l)}>No</button>
+                        </div>
+                      </td>
+                    ) : modeOf(l) === 'full' ? (
+                      <>
+                        <td className="text-center font-semibold text-green-700">{l.remainingToReceive}<div className="text-[9px] font-normal text-green-600">100% · photo needed</div></td>
+                        <td className="text-center text-slate-400">0</td>
+                        <td className="text-center font-medium">{l.remainingToReceive}<div><button className="text-[9px] font-medium text-navy hover:underline" onClick={() => markPartial(l)}>not full?</button></div></td>
+                      </>
+                    ) : (
+                      <>
+                        <td><input className="input text-center" type="number" disabled={locked} value={l.receiptQty} onChange={(e) => setLine(i, { receiptQty: e.target.value })} /></td>
+                        <td><input className="input text-center" type="number" disabled={locked} value={l.defectQty} onChange={(e) => setLine(i, { defectQty: e.target.value })} /></td>
+                        <td className="text-center font-medium">{Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0)}<div><button className="text-[9px] font-medium text-navy hover:underline" onClick={() => markFull(i, l)}>100%?</button></div></td>
+                      </>
+                    )}
                     {photoCell(l)}
                   </tr>
                 ))}
@@ -234,7 +275,12 @@ export default function PublicGrn() {
         <div className="sticky bottom-0 mt-4 rounded-t-xl bg-white/80 py-3 backdrop-blur">
           <div className="flex gap-2">
             <button className="btn-outline flex-1" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save Progress'}</button>
-            <button className="btn-primary flex-1" disabled={submit.isPending} onClick={() => { if (confirm('Mark this goods receipt as completed? Once submitted it is locked and cannot be edited.')) submit.mutate(); }}>{submit.isPending ? 'Submitting…' : '✓ Mark Completed'}</button>
+            <button className="btn-primary flex-1" disabled={submit.isPending} onClick={() => {
+              // A 100%-received item must carry a photo before submitting.
+              const noPhoto = (g.lineItems || []).filter((l: any) => modeOf(l) === 'full' && !l.photoUrl);
+              if (noPhoto.length) { setMsg(`Add a photo for each 100%-received item first (${noPhoto.length} still missing).`); return; }
+              if (confirm('Mark this goods receipt as completed? Once submitted it is locked and cannot be edited.')) submit.mutate();
+            }}>{submit.isPending ? 'Submitting…' : '✓ Mark Completed'}</button>
           </div>
           <div className="mt-2 text-center"><a href={pdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 Preview Packing List PDF (save first to see latest)</a></div>
         </div>

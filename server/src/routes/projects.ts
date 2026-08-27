@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
-import { requireAuth, requireProjectMember, requireAdmin, requireEdit } from '../middleware/authMiddleware';
+import { requireAuth, requireProjectMember, requireAdmin, requireEdit, isSuperAdmin } from '../middleware/authMiddleware';
 import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
 import { PROJECT_STATUSES, PROJECT_ROLES, DRAWING_APPROVAL_TYPES, DRAWING_APPROVAL_STATUSES, isAdmin } from '../lib/enums';
@@ -35,11 +35,16 @@ router.get(
   '/',
   asyncHandler(async (req, res) => {
     const scope = await visibleProjectIds(req.account!.id, req.account!.role);
-    const projects = await prisma.project.findMany({
+    const allProjects = await prisma.project.findMany({
       where: scope === 'ALL' ? {} : { id: { in: scope } },
       orderBy: { createdAt: 'desc' },
       include: { _count: { select: { boqItems: true, entries: true, members: true } } },
     });
+    // Test/sandbox projects are visible only to the super-admin. Filtered in JS
+    // (not the query) because Prisma+Mongo won't match rows where testOnly is
+    // still missing — only super-admins should ever see them anyway.
+    const superAdmin = isSuperAdmin(req.user?.email);
+    const projects = superAdmin ? allProjects : allProjects.filter((p) => !p.testOnly);
 
     // One query for every project's activities rather than one per project.
     const acts = await prisma.ganttActivity.findMany({
@@ -164,6 +169,8 @@ router.get(
       },
     });
     if (!project) throw notFound('Project not found');
+    // A test/sandbox project can't be opened by anyone but the super-admin.
+    if (project.testOnly && !isSuperAdmin(req.user?.email)) throw notFound('Project not found');
     const prog = await loadProjectProgress(project.id);
     const drawingApproval = summarizeDrawingApprovals(normalizeDrawingApprovals(project.drawingApprovals));
     res.json({ project, progress: prog.overall, risk: prog.risk, role: req.projectRole, drawingApproval });

@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errMsg, openAuthedFile } from '../lib/api';
+import { api, errMsg } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Spinner, Modal } from '../components/ui';
+import { FileViewerModal, type ViewFile } from '../components/FileViewer';
 import { fmtDate, inr } from '../lib/format';
 import ProcurementPipeline from '../components/procurement/ProcurementPipeline';
 
@@ -55,6 +56,8 @@ export default function ApprovalsPage() {
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
 
   const [tab, setTab] = useState<'pending' | 'approved'>('pending');
+  const [search, setSearch] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
   // Which Approved rows have their phase pipeline expanded (lazy-loaded on open).
   const [openPipe, setOpenPipe] = useState<Set<string>>(new Set());
   const togglePipe = (key: string) => setOpenPipe((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
@@ -96,15 +99,34 @@ export default function ApprovalsPage() {
     act.mutate({ item, verb, remarks: remarks ?? undefined });
   };
 
-  // The document itself — the approver reviews it before deciding.
-  const viewDoc = (item: Item) => {
+  // Every PO/WO/GRN/PI/photo opens in this in-app viewer (no new tab).
+  const [viewer, setViewer] = useState<{ items: ViewFile[]; title?: string; start?: number } | null>(null);
+  const viewDocPdf = (item: { kind: string; projectId: string; docId: string; number?: string; label?: string }) => {
     const seg = item.kind === 'GRN' ? 'grns' : 'docs';
-    openAuthedFile(`/projects/${item.projectId}/procurement/${seg}/${item.docId}/pdf`);
+    setViewer({ items: [{ url: `/projects/${item.projectId}/procurement/${seg}/${item.docId}/pdf`, name: `${item.number || item.kind}.pdf`, authed: true }], title: `${item.label ?? item.kind} ${item.number || ''}` });
   };
+  const viewGrn = (projectId: string, grId: string, grnNumber: string) => setViewer({ items: [{ url: `/projects/${projectId}/procurement/goods-receipts/${grId}/pdf`, name: `${grnNumber}.pdf`, authed: true }], title: grnNumber });
+  const viewPis = (pis: { term: string; piNumber: string | null; piUrl: string }[], start = 0) => setViewer({ items: pis.map((p) => ({ url: p.piUrl, name: `PI ${p.piNumber || p.term}.pdf`, label: p.term })), title: 'Proforma Invoice', start });
+  // The document itself — the approver reviews it before deciding.
+  const viewDoc = (item: Item) => viewDocPdf(item);
 
   if (isLoading) return <Spinner label="Loading approvals…" />;
   if (error) return <div className="card p-6 text-red-600">Could not load your approvals.</div>;
   const items = data ?? [];
+  // Project options are derived from the loaded documents (pending + approved),
+  // so the dropdown only lists projects that actually have documents here.
+  const projectOptions = (() => {
+    const m = new Map<string, string>();
+    [...items, ...(approvedQ.data ?? [])].forEach((x: any) => { if (x.projectId) m.set(x.projectId, x.projectName || x.projectId); });
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  })();
+  // Search (document number / vendor / project) + project filter — both tabs.
+  const needle = search.toLowerCase().trim();
+  const matches = (x: { number?: string; vendorName?: string | null; projectName?: string | null; projectId?: string }) =>
+    (!needle || [x.number, x.vendorName, x.projectName].filter(Boolean).some((s) => String(s).toLowerCase().includes(needle)))
+    && (!projectFilter || x.projectId === projectFilter);
+  const pendingItems = items.filter(matches);
+  const approvedItems = (approvedQ.data ?? []).filter(matches);
 
   return (
     <div className="space-y-4">
@@ -121,23 +143,33 @@ export default function ApprovalsPage() {
         <button onClick={() => setTab('approved')} className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${tab === 'approved' ? 'border-navy text-navy' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>Approved{approvedQ.data ? ` (${approvedQ.data.length})` : ''}</button>
       </div>
 
-      {tab === 'pending' && (items.length === 0 ? (
-        <EmptyState title="Nothing pending" hint="You have no documents waiting for your approval right now." />
+      <div className="flex flex-wrap items-center gap-2">
+        <input className="input w-full max-w-xs text-sm" placeholder="Search PO/WO, vendor, project…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select className="input w-56 text-sm" value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
+          <option value="">All projects ({projectOptions.length})</option>
+          {projectOptions.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        {(needle || projectFilter) && <span className="whitespace-nowrap text-xs text-slate-400">{(tab === 'pending' ? pendingItems.length : approvedItems.length)} match{(tab === 'pending' ? pendingItems.length : approvedItems.length) === 1 ? '' : 'es'}</span>}
+      </div>
+
+      {tab === 'pending' && (pendingItems.length === 0 ? (
+        <EmptyState title={needle || projectFilter ? 'No matches' : 'Nothing pending'} hint={needle || projectFilter ? 'No pending document matches your filter.' : 'You have no documents waiting for your approval right now.'} />
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-              <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Submitted</th><th className="text-right">Action</th></tr>
+              <tr><th className="px-4 py-2">Submitted</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th className="text-right">Action</th></tr>
             </thead>
             <tbody>
-              {items.map((d) => {
+              {pendingItems.map((d) => {
                 const amendments = d.amendments ?? [];
                 const latest = amendments.length ? amendments[amendments.length - 1] : null;
                 const earlier = amendments.slice(0, -1).reverse();
                 return (
                   <Fragment key={`${d.kind}-${d.docId}`}>
                     <tr className={`hover:bg-slate-50 ${latest ? '' : 'border-b border-slate-100'}`}>
-                      <td className="px-4 py-2">
+                      <td className="whitespace-nowrap px-4 py-2 align-top text-slate-500">{fmtDate(d.submittedAt)}</td>
+                      <td className="py-2 pr-2">
                         <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                         {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
                         {/* Who this document is currently waiting on (current pending approver). */}
@@ -157,13 +189,12 @@ export default function ApprovalsPage() {
                       <td className="text-slate-600">{d.projectName}</td>
                       <td className="text-slate-600">{d.vendorName || '—'}</td>
                       <td className="text-right font-medium">{money(d.finalAmount)}</td>
-                      <td className="text-slate-500">{fmtDate(d.submittedAt)}</td>
                       <td className="px-2 text-right">
                         <div className="flex flex-wrap justify-end gap-2">
                           {/* PI(s) uploaded on the PO — sit right beside View PO so the
                               approver can open them before deciding. */}
                           {d.pis?.map((p, i) => (
-                            <a key={i} href={p.piUrl} target="_blank" rel="noreferrer" title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</a>
+                            <button key={i} onClick={() => viewPis(d.pis!, i)} title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</button>
                           ))}
                           <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewDoc(d)}>📄 View {d.kind}</button>
                           <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
@@ -199,24 +230,25 @@ export default function ApprovalsPage() {
 
       {tab === 'approved' && (
         approvedQ.isLoading ? <Spinner label="Loading approved…" />
-        : (approvedQ.data ?? []).length === 0 ? <EmptyState title="Nothing approved yet" hint="Approved PO/WO/GRN will appear here." />
+        : approvedItems.length === 0 ? <EmptyState title={needle || projectFilter ? 'No matches' : 'Nothing approved yet'} hint={needle || projectFilter ? 'No approved document matches your filter.' : 'Approved PO/WO/GRN will appear here.'} />
         : (
           <div className="card overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-                <tr><th className="px-4 py-2">Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th>Approved</th><th>Approved by</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>
+                <tr><th className="w-8 pl-4 py-2"></th><th className="py-2">Approved</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right pr-6">Amount</th><th className="pl-2">Approved by</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>
               </thead>
               <tbody>
-                {(approvedQ.data ?? []).map((d) => {
+                {approvedItems.map((d) => {
                   const key = `${d.kind}-${d.docId}`;
                   const canPipe = d.kind === 'PO' || d.kind === 'WO'; // pipeline is for PO/WO docs
                   const open = openPipe.has(key);
                   return (
                   <Fragment key={key}>
-                  <tr className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="px-4 py-2">
-                      {canPipe && <button className="mr-1 text-slate-400 hover:text-navy" title={open ? 'Hide pipeline' : 'Show phases (Approval → Payment → GRN)'} onClick={() => togglePipe(key)}>{open ? '▾' : '▸'}</button>}
-                      <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
+                  <tr className={`border-b border-slate-100 hover:bg-slate-50 ${canPipe ? 'cursor-pointer' : ''}`} onClick={() => { if (canPipe) togglePipe(key); }}>
+                    <td className="w-8 pl-4 py-2 align-top">{canPipe && <button className="text-slate-400 hover:text-navy" title={open ? 'Hide pipeline' : 'Show phases (Approval → Payment → GRN)'} onClick={(e) => { e.stopPropagation(); togglePipe(key); }}>{open ? '▾' : '▸'}</button>}</td>
+                    <td className="whitespace-nowrap py-2 pr-4 align-top text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
+                    <td className="py-2 pr-2">
+                      <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} onClick={(e) => e.stopPropagation()} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
                       {(d.sheetPayments?.length ?? 0) > 0 && (
                         <span className="ml-1 inline-block max-w-[230px] truncate align-middle rounded bg-green-50 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments!.map((s) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>💠 UTR: {d.sheetPayments!.map((s) => s.utr).join(', ')}</span>
@@ -224,29 +256,28 @@ export default function ApprovalsPage() {
                     </td>
                     <td className="text-slate-600">{d.projectName}</td>
                     <td className="text-slate-600">{d.vendorName || '—'}</td>
-                    <td className="text-right font-medium">{money(d.finalAmount)}</td>
-                    <td className="text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
-                    <td className="text-slate-500">{d.approvedBy || '—'}</td>
+                    <td className="text-right font-medium pr-6">{money(d.finalAmount)}</td>
+                    <td className="pl-2 text-slate-500">{d.approvedBy || '—'}</td>
                     {/* Goods receipts against this PO/WO — one opens directly, several open a popup. */}
                     <td className="text-slate-500">
                       {(d.goodsReceipts?.length ?? 0) === 0 ? <span className="text-slate-300">—</span>
                         : d.goodsReceipts!.length === 1
-                          ? <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/goods-receipts/${d.goodsReceipts![0].id}/pdf`)}>📦 {d.goodsReceipts![0].grnNumber}</button>
-                          : <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => setGrnPopup(d)}>📦 {d.goodsReceipts!.length} GRNs</button>}
+                          ? <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={(e) => { e.stopPropagation(); viewGrn(d.projectId, d.goodsReceipts![0].id, d.goodsReceipts![0].grnNumber); }}>📦 {d.goodsReceipts![0].grnNumber}</button>
+                          : <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={(e) => { e.stopPropagation(); setGrnPopup(d); }}>📦 {d.goodsReceipts!.length} GRNs</button>}
                     </td>
                     <td className="px-2 text-right">
                       <div className="flex flex-wrap justify-end gap-2">
                         {/* PI(s) uploaded on the PO — beside View PO. */}
                         {d.pis?.map((p, i) => (
-                          <a key={i} href={p.piUrl} target="_blank" rel="noreferrer" title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</a>
+                          <button key={i} onClick={(e) => { e.stopPropagation(); viewPis(d.pis!, i); }} title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</button>
                         ))}
-                        <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${d.projectId}/procurement/${d.kind === 'GRN' ? 'grns' : 'docs'}/${d.docId}/pdf`)}>📄 View {d.label ?? d.kind}</button>
+                        <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={(e) => { e.stopPropagation(); viewDocPdf(d); }}>📄 View {d.label ?? d.kind}</button>
                       </div>
                     </td>
                   </tr>
                   {canPipe && open && (
                     <tr className="border-b border-slate-100 bg-slate-50/50">
-                      <td colSpan={8} className="px-4 py-3"><ProcurementPipeline projectId={d.projectId} docId={d.docId} /></td>
+                      <td colSpan={9} className="px-4 py-3"><ProcurementPipeline projectId={d.projectId} docId={d.docId} /></td>
                     </tr>
                   )}
                   </Fragment>
@@ -269,12 +300,14 @@ export default function ApprovalsPage() {
                   <span className={`badge ml-2 ${g.status === 'RECEIVED' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{g.status === 'RECEIVED' ? 'Received' : 'Draft'}</span>
                   {g.receivedDate && <span className="ml-2 text-xs text-slate-400">{fmtDate(g.receivedDate)}</span>}
                 </span>
-                <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAuthedFile(`/projects/${grnPopup.projectId}/procurement/goods-receipts/${g.id}/pdf`)}>📄 View</button>
+                <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewGrn(grnPopup.projectId, g.id, g.grnNumber)}>📄 View</button>
               </div>
             ))}
           </div>
         </Modal>
       )}
+
+      {viewer && <FileViewerModal items={viewer.items} startIndex={viewer.start ?? 0} title={viewer.title} onClose={() => setViewer(null)} />}
     </div>
   );
 }

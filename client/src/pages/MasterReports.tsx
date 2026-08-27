@@ -9,6 +9,7 @@ import { docStatusPill, fmtDate, inr } from '../lib/format';
 interface Milestone {
   id: string; name: string; percentage: number; inrAmount: number;
   status: string; expectedDate: string | null; paymentDate: string | null; utrNumber: string | null;
+  sheetPaid?: number; sheetUtrs?: { utr: string; vrNo?: string | null }[];
 }
 interface RegGRN {
   id: string; grnNumber: string; grnDate: string; status: string;
@@ -178,8 +179,10 @@ export default function MasterReports() {
                                         <td className="text-right">{mm.percentage}%</td>
                                         <td className="text-right">{money(mm.inrAmount)}</td>
                                         <td className="text-slate-500">{fmtDate(mm.expectedDate)}</td>
-                                        <td><span className={`badge ${PAY_PILL[mm.status] ?? 'bg-slate-100 text-slate-600'}`}>{mm.status}</span></td>
-                                        <td>{mm.status === 'PAID' ? <div><div className="text-slate-600">{fmtDate(mm.paymentDate)}</div>{mm.utrNumber && <div className="text-[10px] text-slate-400">UTR {mm.utrNumber}</div>}</div> : <span className="text-slate-400">—</span>}</td>
+                                        <td>{mm.status === 'PAID' ? <span className="badge bg-green-100 text-green-700">PAID</span> : (mm.sheetPaid ?? 0) > 0.01 ? <span className="badge bg-green-100 text-green-700" title="Paid via the Accounts sheet">✓ PAID · sheet</span> : <span className={`badge ${PAY_PILL[mm.status] ?? 'bg-slate-100 text-slate-600'}`}>{mm.status}</span>}</td>
+                                        <td>{mm.status === 'PAID' ? <div><div className="text-slate-600">{fmtDate(mm.paymentDate)}</div>{mm.utrNumber && <div className="text-[10px] text-slate-400">UTR {mm.utrNumber}</div>}</div>
+                                          : (mm.sheetPaid ?? 0) > 0.01 ? <div>{(mm.sheetUtrs ?? []).map((u, i) => <div key={i} className="text-[10px] text-slate-500">UTR {u.utr}{u.vrNo ? <span className="text-slate-400"> ({u.vrNo})</span> : ''}</div>)}<div className="text-[10px] text-slate-400">via Accounts sheet · {money(mm.sheetPaid)}</div></div>
+                                          : <span className="text-slate-400">—</span>}</td>
                                       </tr>
                                     ))}
                                   </tbody>

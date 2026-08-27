@@ -29,6 +29,10 @@ export interface RegisterMilestone {
   utrNumber: string | null;
   punctuality: PaymentPunctuality;
   punctualityDelayDays: number | null;
+  // Amount settled against this term via the Accounts sheet (mirror; the term's
+  // own status stays PENDING/TRIGGERED) and the UTR(s) that paid it.
+  sheetPaid: number;
+  sheetUtrs: { utr: string; vrNo?: string | null }[];
 }
 
 export interface RegisterGRN {
@@ -115,17 +119,46 @@ export async function buildProcurementRegister(projectId: string | string[], now
     // Only an APPROVED GRN's invoice is a liability.
     const invoicedValue = r2(grns.filter((g) => g.status === 'APPROVED').reduce((s, g) => s + (g.invoiceValue ?? 0), 0));
 
+    // Greedily allocate this doc's Accounts-sheet payments across its terms that
+    // aren't already fully paid in-app, in order — so a PENDING/TRIGGERED term
+    // settled via the sheet shows as paid with its UTR in the expanded view.
+    const sheetPool: { utr: string; vrNo?: string | null; left: number }[] = (() => {
+      try { return (d.sheetPayments ? JSON.parse(d.sheetPayments) : []).map((s: any) => ({ utr: s.utr, vrNo: s.vrNo ?? null, left: Number(s.amount) || 0 })); } catch { return []; }
+    })();
+
     const milestones: RegisterMilestone[] = d.milestones.map((m) => {
       const p = paymentPunctuality(m, now);
+      const inAppPaidM = m.status === 'PAID' ? m.inrAmount : (m.status === 'PARTIALLY_PAID' ? (m.amountPaid || 0) : 0);
+      let need = Math.max((m.inrAmount || 0) - inAppPaidM, 0);
+      let sheetPaidM = 0;
+      const sheetUtrs: { utr: string; vrNo?: string | null }[] = [];
+      for (const s of sheetPool) {
+        if (need <= 0.01) break;
+        if (s.left <= 0.01) continue;
+        const take = Math.min(s.left, need);
+        sheetPaidM += take; need -= take; s.left -= take;
+        sheetUtrs.push({ utr: s.utr, vrNo: s.vrNo });
+      }
       return {
         id: m.id, name: m.name, fieldKey: m.fieldKey, percentage: m.percentage, inrAmount: m.inrAmount,
         status: m.status, expectedDate: m.expectedDate, paymentDate: m.paymentDate, utrNumber: m.utrNumber,
         punctuality: p.status, punctualityDelayDays: p.delayDays,
+        sheetPaid: r2(sheetPaidM), sheetUtrs,
       };
     });
 
-    const amountPaid = r2(milestones.filter((m) => m.status === 'PAID').reduce((s, m) => s + m.inrAmount, 0));
-    const amountDueNow = r2(milestones.filter((m) => m.status === 'TRIGGERED').reduce((s, m) => s + m.inrAmount, 0));
+    // Paid = in-app milestone payments (full PAID + partial amountPaid) PLUS money
+    // paid via the Accounts sheet (fetch-UTR), which is real cash out but leaves the
+    // milestone PENDING. Ignoring the sheet made fully-paid POs read "Outstanding".
+    const inAppPaid = d.milestones.reduce((s, m) => s + (m.status === 'PAID' ? m.inrAmount : (m.status === 'PARTIALLY_PAID' ? (m.amountPaid || 0) : 0)), 0);
+    let sheetPaid = 0;
+    try { for (const x of (d.sheetPayments ? JSON.parse(d.sheetPayments) : [])) sheetPaid += Number(x.amount) || 0; } catch { /* ignore */ }
+    const amountPaid = r2(Math.min(inAppPaid + sheetPaid, d.finalAmount));
+    const amountPending = r2(Math.max(d.finalAmount - amountPaid, 0));
+    // "Due now" = triggered-but-unpaid, but never more than what is still outstanding
+    // (a term paid via the sheet is no longer due).
+    const triggeredTotal = d.milestones.filter((m) => m.status === 'TRIGGERED').reduce((s, m) => s + m.inrAmount, 0);
+    const amountDueNow = r2(Math.max(0, Math.min(triggeredTotal, amountPending)));
 
     return {
       docId: d.id, docNumber: d.docNumber, docType: d.type, status: d.status, docDate: d.docDate,
@@ -134,7 +167,7 @@ export async function buildProcurementRegister(projectId: string | string[], now
       basicAmount: d.basicAmount, finalAmount: d.finalAmount,
       delivery, grns, invoicedValue, milestones,
       amountPaid,
-      amountPending: r2(d.finalAmount - amountPaid),
+      amountPending,
       amountDueNow,
       overdueMilestones: milestones.filter((m) => m.punctuality === 'OVERDUE').length,
     };
