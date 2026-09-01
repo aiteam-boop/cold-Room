@@ -39,7 +39,7 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
   const reqPath = req.originalUrl.split('?')[0];
   if (
     req.method === 'GET' &&
-    (reqPath.endsWith('/pdf') || reqPath.endsWith('/kyc-view')) &&
+    (reqPath.endsWith('/pdf') || reqPath.endsWith('/kyc-view') || reqPath.endsWith('/kyc-download')) &&
     verifyPathSignature(reqPath, req.query.sig as string | undefined)
   ) {
     req.user = { sub: 'signed-link', email: '', role: 'ADMIN' as Role, name: 'Signed link' };

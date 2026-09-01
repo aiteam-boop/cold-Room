@@ -1,11 +1,16 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import fs from 'fs';
+import path from 'path';
+import JSZip from 'jszip';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, notFound, forbidden } from '../lib/errors';
 import { requireAuth, requirePage, requireEdit } from '../middleware/authMiddleware';
 import { maskFinancials } from '../lib/financial';
 import { audit } from '../lib/audit';
 import { appBaseUrl } from '../services/email';
+import { readFromDb } from '../lib/fileStore';
+import { signApiPath } from '../lib/signedUrl';
 import {
   BANK_ACCOUNT_TYPES, BOQ_CATEGORIES, CONTACT_AUTHORITY_LEVELS, KYC_KINDS,
   MAX_CONTACT_PHONES, MAX_VENDOR_CONTACTS, VENDOR_TYPES, WORK_CATEGORIES,
@@ -197,12 +202,25 @@ router.get(
   })
 );
 
+// Reject a second vendor with the same name so duplicates can't be created.
+// Compared case-insensitively with whitespace collapsed ("A  ONE " == "a one"),
+// in JS rather than a DB query because a few legacy names carry stray spaces a
+// plain equals query would miss. `excludeId` lets an edit keep its own name.
+const normVendorName = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+export async function duplicateVendorName(name: string, excludeId?: string): Promise<boolean> {
+  const target = normVendorName(name);
+  if (!target) return false;
+  const existing = await prisma.vendor.findMany({ select: { id: true, name: true } });
+  return existing.some((v) => v.id !== excludeId && normVendorName(v.name || '') === target);
+}
+
 // POST /api/vendors — create a vendor (+ optional site mappings).
 router.post(
   '/',
   requireEdit('vendors'),
   asyncHandler(async (req, res) => {
     const body = vendorSchema.parse(req.body);
+    if (await duplicateVendorName(body.name)) throw badRequest(`A vendor named “${body.name.trim()}” already exists. Use the existing vendor, or choose a different name.`);
     const vendor = await prisma.vendor.create({
       data: {
         ...(toVendorData(body) as { name: string }),
@@ -236,11 +254,59 @@ router.get(
       return `<li><a href="${esc(url)}" target="_blank" rel="noreferrer">📄 ${esc(label)}</a>${d.fileName ? ` <span class="f">— ${esc(d.fileName)}</span>` : ''}</li>`;
     }).join('');
     const name = esc(vendor?.name || 'Vendor');
+    // "Download all" → the zip endpoint, reached with the SAME signed-link scheme.
+    const dlUrl = docs.length ? base + signApiPath(`/api/vendors/${req.params.id}/kyc-download`) : null;
+    const dlBtn = dlUrl ? `<p style="margin:6px 0 18px"><a class="dl" href="${esc(dlUrl)}">⬇ Download all KYC (${docs.length})</a></p>` : '';
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KYC — ${name}</title>
-<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 18px;color:#0f172a}h1{font-size:18px;color:#052379}ul{line-height:2.2;padding-left:18px}a{color:#1d4ed8;text-decoration:none}a:hover{text-decoration:underline}.f{color:#94a3b8;font-size:13px}.n{color:#64748b}</style></head>
-<body><h1>KYC documents — ${name}</h1>${docs.length ? `<ul>${items}</ul>` : '<p class="n">No KYC documents on file for this vendor.</p>'}</body></html>`;
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 18px;color:#0f172a}h1{font-size:18px;color:#052379}ul{line-height:2.2;padding-left:18px}a{color:#1d4ed8;text-decoration:none}a:hover{text-decoration:underline}.f{color:#94a3b8;font-size:13px}.n{color:#64748b}.dl{display:inline-block;background:#052379;color:#fff;padding:8px 14px;border-radius:8px;font-weight:600;font-size:14px}.dl:hover{background:#08307f;text-decoration:none}</style></head>
+<body><h1>KYC documents — ${name}</h1>${dlBtn}${docs.length ? `<ul>${items}</ul>` : '<p class="n">No KYC documents on file for this vendor.</p>'}</body></html>`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
+  })
+);
+
+// Read an uploaded file's bytes — disk first (uploads/), then GridFS/legacy store.
+async function readUploadBuffer(fileUrl: string): Promise<Buffer | null> {
+  const filename = path.basename(String(fileUrl).split('?')[0]);
+  if (!filename) return null;
+  const diskPath = path.resolve(process.cwd(), 'uploads', filename);
+  try { if (fs.existsSync(diskPath)) return fs.readFileSync(diskPath); } catch { /* fall through to DB */ }
+  return await readFromDb(filename);
+}
+
+// GET /api/vendors/:id/kyc-download — ALL of this vendor's KYC documents zipped
+// into one file. Reached via the SAME signed link the kyc-view page uses (the
+// "Download all" button), so Accounts (not logged in) can grab the whole set.
+router.get(
+  '/:id/kyc-download',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const vendor = await prisma.vendor.findUnique({ where: { id: req.params.id }, select: { name: true } });
+    const docs = await prisma.procurementDocument.findMany({
+      where: { vendorId: req.params.id, type: 'KYC' },
+      orderBy: { uploadedAt: 'desc' },
+      select: { kycKind: true, fileName: true, fileUrl: true },
+    });
+    if (!docs.length) { res.status(404).type('text').send('No KYC documents on file for this vendor.'); return; }
+    const safe = (s: string) => s.replace(/[\\/:*?"<>|\r\n]+/g, '_').trim() || 'file';
+    const zip = new JSZip();
+    const used = new Set<string>();
+    for (const d of docs) {
+      if (!d.fileUrl) continue;
+      const buf = await readUploadBuffer(String(d.fileUrl));
+      if (!buf) continue; // skip a file we can't read rather than failing the whole zip
+      const ext = path.extname(d.fileName || path.basename(String(d.fileUrl).split('?')[0])) || '';
+      const label = d.kycKind ? d.kycKind.replace(/_/g, ' ') : 'KYC document';
+      let entry = `${safe(label)}${ext}`;
+      let n = 1;
+      while (used.has(entry.toLowerCase())) entry = `${safe(label)} (${++n})${ext}`;
+      used.add(entry.toLowerCase());
+      zip.file(entry, buf);
+    }
+    const out = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="KYC - ${safe(vendor?.name || 'Vendor')}.zip"`);
+    res.send(out);
   })
 );
 
@@ -267,6 +333,7 @@ router.patch(
   requireEdit('vendors'),
   asyncHandler(async (req, res) => {
     const body = vendorSchema.partial().parse(req.body);
+    if (body.name && await duplicateVendorName(body.name, req.params.id)) throw badRequest(`Another vendor named “${body.name.trim()}” already exists.`);
     const vendor = await prisma.vendor.update({
       where: { id: req.params.id },
       data: toVendorData(body as z.infer<typeof vendorSchema>),

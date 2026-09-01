@@ -33,7 +33,7 @@ export const PAY_FIELDS = [
 
 // ── Document numbering (company-wide sequential) ────────────────────────────
 // PO-IN###, WO-QAS-###, GRN-QAS-###, PAY-QAS-###. Continues from the highest existing.
-async function nextSeq(kind: 'PO' | 'WO' | 'GRN' | 'PAY' | 'GR'): Promise<string> {
+async function nextSeq(kind: 'PO' | 'WO' | 'TO' | 'GRN' | 'PAY' | 'GR'): Promise<string> {
   // Payment register (the old "GRN" record, now surfaced as Payment) and its
   // legacy GRN-numbered rows share the gRN table. Each series counts only its own
   // prefix, so PAY-QAS-### starts fresh while old GRN-QAS-### rows keep their id.
@@ -53,6 +53,7 @@ async function nextSeq(kind: 'PO' | 'WO' | 'GRN' | 'PAY' | 'GR'): Promise<string
   const docs = await prisma.procurementDoc.findMany({ where: { type: kind }, select: { docNumber: true } });
   const max = docs.reduce((m, d) => Math.max(m, parseInt((d.docNumber.match(/(\d+)$/) || [])[1] || '0', 10) || 0), 0);
   if (kind === 'PO') return `PO-IN${Math.max(max, 783) + 1}`;       // continue after sample PO-IN783
+  if (kind === 'TO') return `TO-IN${Math.max(max, 100) + 1}`;       // Transport Orders start at TO-IN101
   return `WO-QAS-${String(Math.max(max, 1) + 1).padStart(3, '0')}`; // continue after sample WO-QAS-001
 }
 export const nextDocNumber = nextSeq;
@@ -251,10 +252,11 @@ export function strikeOffFootnote(sections: TermsSection[]): string | null {
 // ── Default Terms & Conditions ──────────────────────────────────────────────
 export const defaultPOSections = (): TermsSection[] => asSections(defaultPOTerms());
 export const defaultWOSections = (): TermsSection[] => asSections(defaultWOTerms());
+export const defaultTOSections = (): TermsSection[] => asSections(defaultTOTerms());
 
 export function defaultPOTerms(): { title: string; text: string }[] {
   return [
-    { title: 'Delivery Schedule', text: 'Material should be delivered on site in good condition within 3 weeks after PO and advance received by purchaser. Risk of loss / title to goods shall not shift to the Purchaser until the Goods have been delivered to and accepted at the Purchaser\'s applicable facility.' },
+    { title: 'Delivery Schedule', text: 'Material should be dispatched in good condition immediately after the PO and the advance is received by the supplier. Risk of loss/title to goods shall not shift to the Purchaser until the Goods have been delivered to and accepted at the Purchaser\'s applicable facility.' },
     { title: 'Drawing', text: 'Items will be taken into manufacturing after drawing approval by purchaser via email.' },
     { title: 'BOQ', text: 'Mentioned items should match the BOQ and approved unit data selection sheet without which it is subject to rejection without any pay.' },
     { title: 'Liquidated Damages Clause', text: 'In the event of failure to deliver materials as per the agreed delivery schedule, a penalty of 5% per week shall be applicable for each day of delay.' },
@@ -263,15 +265,39 @@ export function defaultPOTerms(): { title: string; text: string }[] {
     { title: 'Packing & Transportation', text: 'Materials shall be adequately packed to prevent damage during loading, transit, unloading, and storage. Transit insurance will be taken by the supplier at its own cost. Any damage arising due to improper packing shall be the Supplier\'s responsibility and will not be accepted at site.' },
     { title: 'Invoice & Documentation', text: 'The following documents shall accompany each delivery: Tax Invoice; Delivery Challan with Packing List; Test / Quality Certificates (where applicable); E-Way Bill (where applicable). The Invoice must clearly mention the Purchase Order Number and Date.' },
     { title: 'Installation', text: 'Installation is in supplier scope and should be done on immediate basis once formally informed via email or call.' },
-    { title: 'Payment Terms', text: '25% Advance of basic amount against acceptance of Purchase Order. Balance 75% payment of basic amount before dispatch against Tax Invoice and photographic/video evidence confirming readiness of materials for dispatch. TDS shall be deducted as applicable under prevailing Income Tax laws.' },
+    { title: 'Payment Terms', text: '100% against PO. TDS shall be deducted as applicable under prevailing Income Tax laws.' },
     { title: 'Taxes & Duties', text: 'GST shall be separately indicated in the invoice under specific HSN Code. The Supplier shall comply with all applicable tax laws, regulations, and statutory requirements.' },
     { title: 'Inspection', text: 'Purchaser reserves the right to inspect materials at the Supplier\'s works before dispatch. Dispatch shall be made only after mail approval.' },
     { title: 'Rejection & Replacement', text: 'Rejected materials shall be lifted by the Supplier within 7 days from notification. Replacement materials shall be supplied within the mutually agreed delivery period at no additional cost to the Purchaser.' },
-    { title: 'Warranty', text: 'The product above will be under warranty for twelve months from the date of installation or fifteen months from the date of invoice, whichever is earlier.' },
+    { title: 'Warranty', text: 'The product above will be under warranty for twelve months from the date of invoice.' },
     { title: 'Cancellation', text: 'Purchaser reserves the right to cancel the Purchase Order, partially or fully, due to delay, non-compliance with specifications, quality issues, or breach of any terms and conditions. Any advance will be immediately refunded to the seller for the non-obligation.' },
     { title: 'Bank Guarantee (BG)', text: 'Seller will issue a BG equivalent to the advance value for buyer to release advance amount. BG validity: 60 days from date of acceptance of final delivery at the site. The original BG will be returned immediately upon completion of successful delivery.' },
     { title: 'Force Majeure', text: 'Neither party shall be liable for failure or delay in performance arising from events beyond reasonable control, including natural disasters, strikes, lockouts, government restrictions, war, pandemic, or acts of God.' },
     { title: 'Jurisdiction', text: 'All disputes arising out of this Purchase Order shall be subject to the exclusive jurisdiction of courts located in Mumbai, Maharashtra.' },
+  ];
+}
+
+// Transport Order (transporter PO) — freight/logistics-specific clauses.
+export function defaultTOTerms(): { title: string; text: string }[] {
+  return [
+    { title: 'Delivery Schedule', text: 'Material should be delivered on site in good condition within standard time after PO and advance received by transporter. Risk of loss/title to goods shall not shift to the Purchaser until the Goods have been delivered to and accepted at the Purchaser\'s applicable facility.' },
+    { title: 'Vehicle Arrangement & Timely Placement', text: 'The transporter shall arrange the required vehicle(s) as per the agreed schedule and ensure timely placement at the loading point.' },
+    { title: 'BOQ', text: 'Mentioned items should match the packing list and tax invoice, without which it is subject to rejection without any pay.' },
+    { title: 'Liquidated Damages Clause', text: 'In the event of failure to deliver materials as per the agreed delivery schedule, a penalty of 5% per week shall be applicable for each day of delay.' },
+    { title: 'Product Pricing', text: 'The prices mentioned above are final and are not subject to any revision.' },
+    { title: 'Handling, Loading & Unloading Responsibility', text: 'The transporter shall be responsible for the safe handling, loading (if included), transit, and unloading (if included) of the material. The transporter shall provide the vehicle number, driver\'s name, and driver\'s contact number before dispatch.' },
+    { title: 'Material Protection & Safe Lashing', text: 'The transporter shall ensure proper lashing, padding, and protection to prevent bending, denting, scratching, or any other damage during transit.' },
+    { title: 'Invoice & Documentation', text: 'The transporter shall share the LR (Lorry Receipt), E-Way Bill acknowledgment (where applicable), and proof of dispatch immediately after loading.' },
+    { title: 'Responsibility for Damage, Shortage or Loss', text: 'Any damage, shortage, or loss of material due to negligence during transportation shall be the sole responsibility of the transporter. The cost of damaged or missing material shall be recovered from the transporter.' },
+    { title: 'Payment Terms', text: '100% After delivery of goods in good condition. TDS shall be deducted as applicable under prevailing Income Tax laws. Payment shall be released only after successful delivery of the material, submission of the original LR, invoice, POD (Proof of Delivery), and any other required documents.' },
+    { title: 'Freight Charges & Additional Charges', text: 'Freight charges shall be as mutually agreed. No additional charges such as detention, waiting, toll, loading/unloading, or any other charges shall be payable unless approved in writing by the purchaser. The transporter shall comply with all applicable road transport laws, safety regulations, and statutory requirements.' },
+    { title: 'Waterproof Covering & Weather Protection', text: 'The transporter shall ensure that the vehicle is covered with a waterproof tarpaulin during transit to protect the material from rain, dust, and adverse weather conditions.' },
+    { title: 'Responsibility for Transit Delay', text: 'Any delay in delivery due to reasons attributable to the transporter shall be the transporter\'s responsibility. Any consequential losses, if applicable under the contract, may be recovered from the transporter.' },
+    { title: 'Responsibility for Concealed Transit Damage', text: 'The consignee\'s acknowledgment of receipt shall not automatically relieve the transporter of responsibility for concealed transit damage identified during unloading or inspection.' },
+    { title: 'Vehicle Suitability & Statutory Compliance', text: 'The transporter shall ensure that the vehicle is suitable for carrying the material and complies with all statutory requirements.' },
+    { title: 'Designated Delivery Location & Unloading Hours', text: 'Delivery shall be made strictly at the designated project site during the permitted unloading hours.' },
+    { title: 'Force Majeure', text: 'Neither party shall be liable for failure or delay in performance arising from events beyond reasonable control, including natural disasters, strikes, lockouts, government restrictions, war, pandemic, or acts of God.' },
+    { title: 'Jurisdiction', text: 'All disputes arising out of this Transport Order shall be subject to the exclusive jurisdiction of courts located in Mumbai, Maharashtra.' },
   ];
 }
 

@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, forbidden, notFound } from '../lib/errors';
 import { requireAuth, requireProjectMember, requireEdit, requirePage, requireSection } from '../middleware/authMiddleware';
-import { upload } from '../middleware/upload';
+import { upload, uploadPdf } from '../middleware/upload';
 import { audit } from '../lib/audit';
 import { vendorKycDocs } from './procurement';
 import { extractPiFields } from '../services/piExtract';
@@ -144,11 +144,13 @@ router.get('/:id', requireProjectMember, requirePage('fms'), asyncHandler(async 
  *  via the PO it is against (older POs may only carry the vendor's name). */
 async function paymentKycDocs(vendorId: string | null, docId: string | null) {
   let vid = vendorId;
+  let vname: string | null = null;
   if (!vid && docId) {
-    const doc = await prisma.procurementDoc.findUnique({ where: { id: docId }, select: { vendorId: true } });
+    const doc = await prisma.procurementDoc.findUnique({ where: { id: docId }, select: { vendorId: true, vendorName: true } });
     vid = doc?.vendorId ?? null;
+    vname = doc?.vendorName ?? null; // last-ditch: resolve KYC by the PO's vendor name
   }
-  return vendorKycDocs(vid);
+  return vendorKycDocs(vid, vname);
 }
 
 // ── Create / edit ──────────────────────────────────────────────────────────────
@@ -251,8 +253,8 @@ router.delete('/:id', requireProjectMember, requireEdit('fms'), asyncHandler(asy
 }));
 
 // ── Attachments (PI + KYC) ───────────────────────────────────────────────────
-router.post('/:id/pi', requireProjectMember, requireEdit('fms'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+router.post('/:id/pi', requireProjectMember, requireEdit('fms'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the PI — please upload a PDF (images / JPEG are not accepted).');
   const payment = await prisma.vendorPayment.update({ where: { id: req.params.id }, data: { piPdfUrl: `/uploads/${req.file.filename}` } });
   // Read the PI so the number / date / value fill themselves. Best-effort: a
   // reader failure must never block the upload, so it is returned as a suggestion.
@@ -260,16 +262,16 @@ router.post('/:id/pi', requireProjectMember, requireEdit('fms'), upload.single('
   scheduleSheetSync();
   res.json({ ok: true, piPdfUrl: payment.piPdfUrl, extracted });
 }));
-router.post('/:id/kyc', requireProjectMember, requireEdit('fms'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+router.post('/:id/kyc', requireProjectMember, requireEdit('fms'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for KYC documents — please upload a PDF (images / JPEG are not accepted).');
   const payment = await prisma.vendorPayment.update({ where: { id: req.params.id }, data: { kycPdfUrl: `/uploads/${req.file.filename}` } });
   res.json({ ok: true, kycPdfUrl: payment.kycPdfUrl });
 }));
 
 // Tax invoice — arrives after payment. Uploading it CLOSES a PAID entry so it
 // leaves Amisha's bucket (PRD v3 §6). If not yet paid it just attaches.
-router.post('/:id/tax-invoice', requireProjectMember, requireEdit('fms'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+router.post('/:id/tax-invoice', requireProjectMember, requireEdit('fms'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the tax invoice — please upload a PDF (images / JPEG are not accepted).');
   const p = await prisma.vendorPayment.findFirst({ where: { id: req.params.id, projectId: req.params.projectId } });
   if (!p) throw notFound();
   const shouldClose = p.status === 'PAID';

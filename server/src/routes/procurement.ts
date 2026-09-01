@@ -20,7 +20,7 @@ import { extractPiFields } from '../services/piExtract';
 import { scheduleSheetSync } from '../services/sheetsSync';
 import {
   COMPANY, nextDocNumber, computeTotals, paymentTotalPct,
-  defaultPOSections, defaultWOSections,
+  defaultPOSections, defaultWOSections, defaultTOSections,
   normalizeTermsSections, assertTermsMutationsAllowed,
   milestonePaidAmount, milestoneRemaining,
 } from '../services/procurement';
@@ -29,13 +29,16 @@ import { notifyUser, notifyProjectRoles } from '../services/notify';
 import { hasSection, shouldHideFinancials } from '../lib/permissions';
 import { KYC_KINDS, VENDOR_TYPES, BOQ_CATEGORIES } from '../lib/enums';
 import { kycScore, kycStatus, normalizeRateChart, rateFor } from '../services/vendorProfile';
+import { duplicateVendorName } from './vendors';
 import { fetchUtrRows, matchPaymentUtr, matchDocUtrs } from '../services/fmsUtr';
+import { fetchFmsStageRows, matchPaymentStages, type FmsStages } from '../services/fmsStages';
 import { extractKycFields } from '../services/kycExtract';
 import { readFromDb } from '../lib/fileStore';
 import { deliveryInfo } from '../services/delivery';
 import { chainForAmount, validateChain, type MatrixDocType } from '../services/approvalMatrix';
 import { resolveAutoChain } from '../services/fixedChain';
 import { buildPaymentSteps, ensurePaymentSteps, notifyCurrentPaymentStep } from '../services/paymentChain';
+import { buildInvoiceSteps, ensureInvoiceSteps, notifyCurrentInvoiceStep } from '../services/invoiceChain';
 import {
   buildChain, recordDecision, remindCurrent, finalizeApproval, markDocOnHold,
   getChainState, resolveActor, type DocType,
@@ -47,7 +50,7 @@ const router = Router({ mergeParams: true });
 router.use(requireAuth);
 
 // Pages that share the procurement docs endpoints (Payment Pipeline / PO / WO).
-const DOC_PAGES = ['pay', 'po', 'wo'] as const;
+const DOC_PAGES = ['pay', 'po', 'wo', 'to'] as const;
 
 // ── Vendor list ─────────────────────────────────────────────────────────────
 // The vendor database is company-wide: every project sees all vendors, so a
@@ -96,6 +99,7 @@ router.post('/vendors', requireProjectMember, requireEdit('vendors'), asyncHandl
     gstin: z.string().optional(), cin: z.string().optional(), pan: z.string().optional(),
     bankAccount: z.string().optional(), ifsc: z.string().optional(),
   }).parse(req.body);
+  if (await duplicateVendorName(b.name)) throw badRequest(`A vendor named “${b.name.trim()}” already exists. Pick it from the list instead of adding a duplicate.`);
   const vendor = await prisma.vendor.create({ data: { ...b, createdById: req.user!.sub, siteMappings: { create: { projectId: req.params.projectId } } } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'VENDOR_CREATE_INLINE', entity: 'Vendor', entityId: vendor.id });
   res.status(201).json({ vendor });
@@ -150,7 +154,7 @@ async function creatorsById(ids: (string | null | undefined)[]): Promise<Map<str
 }
 
 router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHandler(async (req, res) => {
-  const type = req.query.type === 'WO' ? 'WO' : req.query.type === 'PO' ? 'PO' : undefined;
+  const type = req.query.type === 'WO' ? 'WO' : req.query.type === 'TO' ? 'TO' : req.query.type === 'PO' ? 'PO' : undefined;
   const docs = await prisma.procurementDoc.findMany({
     where: { projectId: req.params.projectId, ...(type ? { type } : {}) },
     orderBy: { createdAt: 'desc' },
@@ -195,7 +199,7 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
 
 // POST .../docs — create a PO or WO with company defaults.
 router.post('/docs', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHandler(async (req, res) => {
-  const b = z.object({ type: z.enum(['PO', 'WO']), vendorId: z.string().optional() }).parse(req.body);
+  const b = z.object({ type: z.enum(['PO', 'WO', 'TO']), vendorId: z.string().optional() }).parse(req.body);
   const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
   const docNumber = await nextDocNumber(b.type);
   let vendor = null as any;
@@ -207,10 +211,10 @@ router.post('/docs', requireProjectMember, requireAnyEdit(...DOC_PAGES), asyncHa
       vendorId: vendor?.id, vendorName: vendor?.name, vendorAddress: vendor?.address, vendorGstin: vendor?.gstin,
       vendorContact: vendor?.contactPerson, vendorPhone: vendor?.phones,
       invoiceTo: COMPANY.invoiceTo,
-      shipTo: b.type === 'PO' ? (project?.siteLocation ?? '') : null,
+      shipTo: b.type === 'WO' ? null : (project?.siteLocation ?? ''),
       siteAddress: b.type === 'WO' ? (project?.siteLocation ?? '') : null,
-      gstEnabled: b.type === 'PO',
-      termsSections: JSON.stringify(b.type === 'PO' ? defaultPOSections() : defaultWOSections()),
+      gstEnabled: b.type !== 'WO',
+      termsSections: JSON.stringify(b.type === 'WO' ? defaultWOSections() : b.type === 'TO' ? defaultTOSections() : defaultPOSections()),
       createdById: req.user!.sub,
       lineItems: { create: { srNo: 1, description: '', qty: 0, unitPrice: 0, totalPrice: 0, sortOrder: 0 } },
     },
@@ -328,12 +332,30 @@ router.get('/docs/:docId/pipeline', requireProjectMember, requireAnyPage(...DOC_
   }));
   const totalReceivedQty = Math.round(receipts.reduce((s, r) => s + r.receivedQty, 0) * 100) / 100;
 
+  // ── Accounts-processing STAGES from the external FMS sheet (Option B) ──
+  // Read-only display of where this PO stands in Accounts after CRMCTS approval:
+  // BILL PROCESSED BY AP (Shivani) → Approved By Alok → BILL PAID BY FINANCE (Taraji),
+  // each with its Actual timestamp + status, plus the overall A/C Status + VR No.
+  // Best-effort: the external sheet may be unavailable / rate-limited — the pipeline
+  // still works without it. Matched by vendor + amount, unique-only (like the UTR).
+  let fmsStages: FmsStages | null = null;
+  try {
+    const stageRows = await fetchFmsStageRows();
+    // Match on the payment (milestone) amounts only — never the PO total, which would
+    // false-match a different bill of the same vendor.
+    const amts = [...doc.milestones.map((m) => m.inrAmount)].filter((n): n is number => typeof n === 'number' && n > 0);
+    for (const amt of amts) {
+      const r = matchPaymentStages({ vendorName: doc.vendorName, amount: amt }, stageRows);
+      if (r.stages) { fmsStages = r.stages; break; }
+    }
+  } catch { /* external sheet best-effort */ }
+
   const payload = {
     doc: { docNumber: doc.docNumber, type: doc.type, vendorName: doc.vendorName, finalAmount: doc.finalAmount, basicAmount: doc.basicAmount, gstEnabled: doc.gstEnabled, gstPct: doc.gstPct, payGstInclusive: doc.payGstInclusive, status: doc.status, projectName: doc.project?.name ?? null },
     approval: { approved: chain.approved, total: chain.total, steps },
     // sheetPayments: UTR(s) backfilled from the Accounts sheet for POs paid via the
     // form before the in-app flow (read-only mirror — not counted in paid/pending).
-    payment: { paidAmount, pendingAmount, termsTotal: terms.length, terms, sheetPayments: parseJson(doc.sheetPayments, []) },
+    payment: { paidAmount, pendingAmount, termsTotal: terms.length, terms, sheetPayments: parseJson(doc.sheetPayments, []), fmsStages },
     goodsReceipt: { count: grs.length, totalPoQty, totalReceivedQty, remainingQty: Math.round(Math.max(totalPoQty - totalReceivedQty, 0) * 100) / 100, receipts },
   };
   res.json({ pipeline: maskFinancials(payload, req.account) });
@@ -716,6 +738,10 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
   // caller asks with ?approvals=1 do we print the internal FINAL APPROVAL stamp
   // (who approved, when, with what remark) under the signature.
   const withApprovals = req.query.approvals === '1';
+  // Finance/Accounts copy (?approvals=1) shows the internal BOQ Item + Head TOO —
+  // Finance asked for BOTH the BOQ mapping AND the approval trail on the one PDF.
+  // The red "INTERNAL COPY" banner stays only on the pure ?internal=1 copy.
+  const showBoqInternal = internal || withApprovals;
   let approvals: { name: string; role: string | null; at: Date | null; remarks: string | null }[] | undefined;
   if (withApprovals) {
     const chain = await getChainState(doc.type as DocType, doc.id);
@@ -725,20 +751,20 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
       .map((s) => ({ name: s.approverName, role: s.approverRole, at: s.actedAt, remarks: s.remarks }));
   }
   // Attach the linked BOQ item's description as boqItemName (internal copy only).
-  const lineItems = doc.lineItems.map(({ boqItem, ...l }: any) => ({ ...l, boqItemName: internal ? (boqItem?.description ?? null) : null }));
+  const lineItems = doc.lineItems.map(({ boqItem, ...l }: any) => ({ ...l, boqItemName: showBoqInternal ? (boqItem?.description ?? null) : null }));
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, internal ? 'Internal' : withApprovals ? 'Approved' : undefined)}"`);
-  renderProcurementPdf({ ...doc, lineItems, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res, { internal, internalMarker });
+  renderProcurementPdf({ ...doc, lineItems, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res, { internal: showBoqInternal, internalMarker: internal && internalMarker });
 }));
 
 // POST .../docs/:docId/term-pi/:termKey — upload the Proforma Invoice for ONE
 // payment term (advance | beforeDelivery | …). Stored on the PO under termPis so
 // the approver sees each term's PI and a GRN raised for that term auto-fetches it.
 const TERM_KEYS = ['advance', 'beforeDelivery', 'running', 'postDelivery', 'postCompletion', 'retention'];
-router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdit(...DOC_PAGES), upload.single('file'), asyncHandler(async (req, res) => {
+router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdit(...DOC_PAGES), uploadPdf.single('file'), asyncHandler(async (req, res) => {
   const termKey = req.params.termKey;
   if (!TERM_KEYS.includes(termKey)) throw badRequest('Unknown payment term.');
-  if (!req.file) throw badRequest('No file uploaded (field: file)');
+  if (!req.file) throw badRequest('Only PDF files are allowed for the PI — please upload a PDF (images / JPEG are not accepted).');
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound('Document not found');
   const fileUrl = `/uploads/${req.file.filename}`;
@@ -1064,16 +1090,46 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
   });
   // The vendor's KYC already lives on the vendor master, so the payment section
   // shows it rather than asking for it again — read-only, never re-uploaded here.
-  const kycDocs = await vendorKycDocs(grn.doc?.vendorId ?? null);
-  res.json({ grn: serializeGrn(grn, req.account), approval, milestones: milestonesWithPi, advanceOnPo, kycDocs });
+  const kycDocs = await vendorKycDocs(grn.doc?.vendorId ?? null, grn.vendorName);
+  // Accounts-side stage timeline (Option B) for THIS payment — where it stands in
+  // the FMS workflow (AP → Alok → Finance + VR). Read-only, best-effort, matched by
+  // vendor + amount (unique-only, like the UTR fetch) so it never shows a wrong bill.
+  let fmsStages: FmsStages | null = null;
+  try {
+    const stageRows = await fetchFmsStageRows();
+    // Match ONLY on the actual payment amount (what this entry pays) — never the PO
+    // total (finalAmount), which would false-match a different bill of the same vendor.
+    const amts = [grn.amountToPay, grn.piValue].filter((n): n is number => typeof n === 'number' && n > 0);
+    for (const amt of amts) {
+      const r = matchPaymentStages({ vendorName: grn.vendorName, invoiceNumber: grn.invoiceNumber, amount: amt }, stageRows);
+      if (r.stages) { fmsStages = r.stages; break; }
+    }
+  } catch { /* external sheet best-effort */ }
+  res.json({ grn: serializeGrn(grn, req.account), approval, milestones: milestonesWithPi, advanceOnPo, kycDocs, fmsStages });
 }));
 
 /** EVERY KYC document on file for a vendor (GST certificate, PAN, cancelled
- *  cheque, …) — the whole set, not just the newest one. */
-export async function vendorKycDocs(vendorId: string | null) {
-  if (!vendorId) return [];
+ *  cheque, …) — the whole set, not just the newest one.
+ *
+ *  KYC is keyed by vendorId, but some POs were raised with the vendor typed as
+ *  free text (no master link, so vendorId is null). In that case we fall back to
+ *  an EXACT, case-insensitive match on the vendor NAME — but ONLY when it is
+ *  unambiguous (exactly one master carries that name), so the wrong vendor's KYC
+ *  can never be attached. (Same safe rule as the vendorId backfill.) This is a
+ *  read-only display convenience; it does not link the PO — that stays a data fix. */
+export async function vendorKycDocs(vendorId: string | null, vendorName?: string | null) {
+  let vid = vendorId;
+  if (!vid && vendorName && vendorName.trim()) {
+    const matches = await prisma.vendor.findMany({
+      where: { name: { equals: vendorName.trim(), mode: 'insensitive' } },
+      select: { id: true },
+      take: 2, // fetch 2 so we can tell "unique" from "ambiguous"
+    });
+    if (matches.length === 1) vid = matches[0].id;
+  }
+  if (!vid) return [];
   const docs = await prisma.procurementDocument.findMany({
-    where: { vendorId, type: 'KYC' },
+    where: { vendorId: vid, type: 'KYC' },
     orderBy: { uploadedAt: 'desc' },
     select: { id: true, kycKind: true, fileName: true, fileUrl: true },
   });
@@ -1148,28 +1204,26 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
   res.json({ grn: serializeGrn(updated, req.account) });
 }));
 
-// Upload the Tax Invoice PDF. It arrives AFTER payment (§6): uploading it on a
-// PAID GRN CLOSES the payment entry so it leaves Amisha's bucket. If payment has
-// not happened yet it just attaches — the GRN can be "paid but still open".
-router.post('/grns/:grnId/invoice', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+// Upload the Tax Invoice PDF. It arrives AFTER payment (§6). Uploading it only
+// ATTACHES the invoice — it no longer closes the payment. The entry CLOSES only
+// when the invoice is APPROVED by Finance (invoice-approval flow). The invoice PDF
+// still flows into Documents.
+router.post('/grns/:grnId/invoice', requireProjectMember, requireEdit('grn'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the tax invoice — please upload a PDF (images / JPEG are not accepted).');
   const fileUrl = `/uploads/${req.file.filename}`;
-  const existing = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, select: { paymentStatus: true } });
-  const closeNow = existing?.paymentStatus === 'PAID';
   const grn = await prisma.gRN.update({
     where: { id: req.params.grnId },
-    data: { invoicePdfUrl: fileUrl, ...(closeNow && { paymentStatus: 'CLOSED', paymentClosedAt: new Date() }) },
+    data: { invoicePdfUrl: fileUrl },
   });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'TAX_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
-  if (closeNow) await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_PAYMENT_CLOSE', entity: 'GRN', entityId: grn.id, details: { via: 'tax-invoice' } });
   res.json({ ok: true, invoicePdfUrl: grn.invoicePdfUrl, paymentStatus: grn.paymentStatus });
 }));
 
 // Upload the Proforma Invoice (PI) — drives the payment and comes BEFORE the tax
 // invoice (§3.1, §3.6). Stored under piPdfUrl on the GRN; PI number/date are
 // entered/auto-captured on the form and saved via PATCH.
-router.post('/grns/:grnId/pi', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+router.post('/grns/:grnId/pi', requireProjectMember, requireEdit('grn'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the PI — please upload a PDF (images / JPEG are not accepted).');
   const fileUrl = `/uploads/${req.file.filename}`;
   const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { piPdfUrl: fileUrl } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
@@ -1205,18 +1259,25 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
   if (!grn) throw notFound();
   if (grn.status === 'OPEN') throw badRequest('Already awaiting approval.');
-  // §1/§6: a payment GRN is submitted against the PI (the tax invoice arrives
-  // later and closes it). A pure goods-receipt GRN still needs its tax invoice.
-  if (grn.milestoneId) {
+  // This (GRN) collection is the Vendor Payment entity (PAY-QAS-###) — the real
+  // goods-receipt register is separate now. Recognise a payment even when its
+  // term wasn't captured, so it can't slip into the legacy goods-receipt path.
+  const isPayment = !!grn.milestoneId || grn.piValue != null || !!grn.piNumber || /^PAY-/i.test(grn.grnNumber || '');
+  // §1/§6: a payment is submitted against the PI (the tax invoice arrives later
+  // and closes it). It MUST name which term it pays, so the amount and approval
+  // chain are unambiguous — without a term it used to approve silently with no
+  // email. A legacy pure goods-receipt GRN still needs its tax invoice instead.
+  if (isPayment) {
+    if (!grn.milestoneId) throw badRequest('Select which payment term you are paying (the “Which payment” dropdown) before submitting.');
     if (!grn.piPdfUrl) throw badRequest('Upload the Proforma Invoice (PI) before submitting — payment is made against the PI.');
     if (grn.amountToPay == null || grn.amountToPay <= 0) throw badRequest('Enter the amount to pay before submitting.');
   } else if (!grn.invoiceNumber || !grn.invoiceDate || grn.invoiceValue == null || !grn.invoicePdfUrl) {
     throw badRequest('Invoice number, date, value and PDF are mandatory before submitting a GRN.');
   }
-  // Approval flow removed for payments (user request): submitting finalises the
-  // payment directly — NO approval chain, NO approval emails. It goes straight to
-  // APPROVED, its payment term triggers (PENDING → TRIGGERED), the payment ladder
-  // advances, and it flows onto the FMS sheet. Approval can be re-added later.
+  // Submitting finalises the payment record (status → APPROVED, locked), triggers
+  // its term (PENDING → TRIGGERED), advances the payment ladder and pushes to the
+  // FMS sheet. The Vendor-Payments SIGN-OFF is separate: a sequential approval
+  // chain (releaseStatus) built + emailed below.
   const updated = await prisma.gRN.update({
     where: { id: grn.id },
     data: { status: 'APPROVED', approvedById: req.user!.sub, approvedAt: new Date() },
@@ -1226,9 +1287,9 @@ router.post('/grns/:grnId/submit', requireProjectMember, requireEdit('grn'), asy
   await onGrnApproved(updated);
   scheduleSheetSync();
   // Build the sequential Vendor-Payments step chain and email ONLY the first
-  // step (any one of them approves → the next step is mailed, and so on). Only
-  // for payment GRNs (a pure goods-receipt GRN has no payment to sign off).
-  if (updated.milestoneId) { await buildPaymentSteps(updated); await notifyCurrentPaymentStep(updated); }
+  // step (any one of them approves → the next step is mailed, and so on). For a
+  // payment (a legacy pure goods-receipt GRN has no payment to sign off).
+  if (isPayment) { await buildPaymentSteps(updated); await notifyCurrentPaymentStep(updated); }
   res.json({ grn: updated });
 }));
 
@@ -1275,6 +1336,43 @@ router.post('/grns/:grnId/remind-approval', requireProjectMember, requireEdit('g
   await ensurePaymentSteps(grn);
   await notifyCurrentPaymentStep(grn);
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'PAYMENT_APPROVAL_REMIND', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber } });
+  res.json({ ok: true });
+}));
+
+// POST /grns/:grnId/submit-invoice-approval — the tax invoice is uploaded; mail the
+// SAME payment approval chain a no-login page to Approve / Hold the INVOICE (mirrors
+// the payment submit). Runs ALONGSIDE the payment release; never changes the payment.
+router.post('/grns/:grnId/submit-invoice-approval', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (!grn.invoicePdfUrl) throw badRequest('Upload the tax invoice PDF first, then submit it for approval.');
+  if (!isEmailEnabled()) throw badRequest('Email is not configured, so the invoice cannot be sent for approval.');
+  // Clear any previous hold so it reads as pending again, then (re)start the chain.
+  if (grn.invoiceReleaseStatus === 'ON_HOLD') await prisma.gRN.update({ where: { id: grn.id }, data: { invoiceReleaseStatus: null } });
+  await buildInvoiceSteps(grn);
+  await notifyCurrentInvoiceStep(grn);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'INVOICE_APPROVAL_SUBMIT', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber, invoiceNumber: grn.invoiceNumber } });
+  const full = await prisma.gRN.findFirst({
+    where: { id: grn.id, projectId: req.params.projectId },
+    include: {
+      lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
+    },
+  });
+  res.json({ grn: serializeGrn(full, req.account) });
+}));
+
+// POST /grns/:grnId/remind-invoice-approval — resend the Invoice Approval email to
+// the current step's approver(s) (same as submit, no restart of progress).
+router.post('/grns/:grnId/remind-invoice-approval', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId } });
+  if (!grn) throw notFound();
+  if (!grn.invoicePdfUrl) throw badRequest('Upload the tax invoice PDF first.');
+  if (grn.invoiceReleaseStatus === 'APPROVED') throw badRequest('This invoice is already approved.');
+  if (!isEmailEnabled()) throw badRequest('Email is not configured, so a reminder cannot be sent.');
+  await ensureInvoiceSteps(grn);
+  await notifyCurrentInvoiceStep(grn);
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'INVOICE_APPROVAL_REMIND', entity: 'GRN', entityId: grn.id, details: { grnNumber: grn.grnNumber } });
   res.json({ ok: true });
 }));
 
@@ -1336,14 +1434,14 @@ router.post('/grns/:grnId/mark-paid', requireProjectMember, requireSection('canM
   if (grn.paymentStatus === 'PAID' || grn.paymentStatus === 'CLOSED') throw badRequest('This payment is already marked paid.');
   const b = z.object({ utrNumber: z.string().trim().min(1, 'A UTR / payment reference is required.'), paidAt: z.string().optional() }).parse(req.body ?? {});
   const paidAt = b.paidAt ? new Date(b.paidAt) : new Date();
-  // Paid, but only CLOSE once the tax invoice is on file (§6).
-  const closeNow = !!grn.invoicePdfUrl;
+  // Marking paid sets PAID. The entry CLOSES only when the tax invoice is APPROVED
+  // by Finance (invoice-approval flow) — no longer on mere upload/payment.
   const updated = await prisma.gRN.update({
     where: { id: grn.id },
-    data: { paymentStatus: closeNow ? 'CLOSED' : 'PAID', utrNumber: b.utrNumber, paidAt, ...(closeNow && { paymentClosedAt: new Date() }) },
+    data: { paymentStatus: 'PAID', utrNumber: b.utrNumber, paidAt },
   });
   await payGrnMilestone(grn, b.utrNumber, paidAt);
-  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_MARK_PAID', entity: 'GRN', entityId: grn.id, details: { utr: b.utrNumber, closed: closeNow } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_MARK_PAID', entity: 'GRN', entityId: grn.id, details: { utr: b.utrNumber } });
   res.json({ grn: updated });
 }));
 
@@ -1756,8 +1854,8 @@ router.post('/documents', requireProjectMember, requireEdit('documents'), upload
 
 // If vendor KYC: allow uploading against a vendor. `kycKind` drives the KYC
 // status badge — COMPLETE needs GST certificate + PAN card + cancelled cheque.
-router.post('/vendors/:vendorId/kyc', requireProjectMember, requireEdit('vendors'), upload.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) throw badRequest('No file uploaded');
+router.post('/vendors/:vendorId/kyc', requireProjectMember, requireEdit('vendors'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for KYC documents — please upload a PDF (images / JPEG are not accepted).');
   const { kycKind } = z.object({ kycKind: z.enum(KYC_KINDS).default('OTHER') }).parse(req.body ?? {});
   const vendor = await prisma.vendor.findUnique({ where: { id: req.params.vendorId } });
   if (!vendor) throw notFound('Vendor not found');
@@ -1816,12 +1914,18 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
     // PI, so the pipeline must show its number/value and link its PDF (§3/§6).
     include: {
       milestones: { include: { installments: { orderBy: { createdAt: 'asc' } } } },
-      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneId: true, milestoneName: true, amountToPay: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true } },
+      grns: { where: { status: 'APPROVED' }, select: { id: true, grnNumber: true, milestoneId: true, milestoneName: true, amountToPay: true, invoiceNumber: true, invoiceValue: true, invoicePdfUrl: true, piNumber: true, piValue: true, piPdfUrl: true, releaseStatus: true } },
       // Physical goods receipts raised against this PO/WO — shown in the pipeline
       // regardless of status or milestone match (a PO can have several).
       goodsReceipts: { orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, receivedDate: true, vehicleNumber: true, driverName: true, deliveryChallanNumber: true } },
     },
   });
+  // Accounts-side stage timeline (Option B): read the FMS sheet ONCE (cached 5 min,
+  // best-effort — never blocks the dashboard) so each row can show where its payment
+  // stands in Accounts (AP → Alok → Finance + VR). Matched per-row by vendor+amount.
+  let fmsStageRows: Awaited<ReturnType<typeof fetchFmsStageRows>> | null = null;
+  try { fmsStageRows = await fetchFmsStageRows(); } catch { fmsStageRows = null; }
+
   const rows = docs.map((d) => {
     const invoiced = d.grns.reduce((s, g) => s + (g.invoiceValue ?? 0), 0);
     // Actual rupees paid — cumulative amountPaid (part-payments), legacy PAID rows
@@ -1853,7 +1957,21 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       const committed = committedByTerm.get(mid) ?? 0;
       return committed > 0 ? Math.round(Math.max(inr - committed, 0) * 100) / 100 : 0;
     };
+    // Match this PO's payment to its Accounts stage row (unique vendor+amount, like
+    // the UTR fetch) so the pipeline dropdown can show AP → Alok → Finance + VR.
+    let fmsStages: FmsStages | null = null;
+    if (fmsStageRows) {
+      // Match on the payment (milestone) amounts only — never the PO total, which
+      // would false-match a different bill of the same vendor.
+      const amts = [...d.milestones.map((m) => m.inrAmount), ...d.milestones.map((m) => milestonePaidAmount(m))]
+        .filter((a): a is number => typeof a === 'number' && a > 0);
+      for (const amt of amts) {
+        const r = matchPaymentStages({ vendorName: d.vendorName, amount: amt }, fmsStageRows);
+        if (r.stages) { fmsStages = r.stages; break; }
+      }
+    }
     return {
+      fmsStages,
       docId: d.id, type: d.type, docNumber: d.docNumber, vendorName: d.vendorName,
       // UTR(s) backfilled from the Accounts sheet (paid via the form before the
       // in-app flow) — shown in the pipeline, not part of the in-app paid/pending.
@@ -1865,7 +1983,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
       grnStatus: payStatusLabel, delayed,
       grns: d.grns.map((g) => {
         const term = d.milestones.find((m) => m.id === g.milestoneId);
-        return { id: g.id, grnNumber: g.grnNumber, milestoneId: g.milestoneId, milestoneName: g.milestoneName, amountToPay: g.amountToPay, termPending: term ? termPending(g.milestoneId, term.inrAmount) : 0, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl };
+        return { id: g.id, grnNumber: g.grnNumber, milestoneId: g.milestoneId, milestoneName: g.milestoneName, amountToPay: g.amountToPay, termPending: term ? termPending(g.milestoneId, term.inrAmount) : 0, invoiceNumber: g.invoiceNumber, invoiceValue: g.invoiceValue, invoicePdfUrl: g.invoicePdfUrl, piNumber: g.piNumber, piValue: g.piValue, piPdfUrl: g.piPdfUrl, releaseStatus: g.releaseStatus };
       }),
       goodsReceipts: d.goodsReceipts.map((g) => ({ id: g.id, grnNumber: g.grnNumber, status: g.status, receivedDate: g.receivedDate, vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber })),
       milestones: d.milestones.sort((a, b) => a.sortOrder - b.sortOrder).map((m) => ({
@@ -1887,6 +2005,7 @@ router.get('/payment-dashboard', requireProjectMember, requireAnyPage('pay', 'fi
   const summary = {
     totalPO: rows.filter((r) => r.type === 'PO').reduce((s, r) => s + r.totalWithGst, 0),
     totalWO: rows.filter((r) => r.type === 'WO').reduce((s, r) => s + r.totalWithGst, 0),
+    totalTO: rows.filter((r) => r.type === 'TO').reduce((s, r) => s + r.totalWithGst, 0),
     totalInvoiced: rows.reduce((s, r) => s + r.amountInvoiced, 0),
     totalPaid: rows.reduce((s, r) => s + r.amountPaid, 0),
     totalPending: rows.reduce((s, r) => s + r.amountPending, 0),

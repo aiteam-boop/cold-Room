@@ -65,17 +65,20 @@ const MENU: { group: string; items: Item[] }[] = [
     { key: 'vendors', label: '1. Vendors', icon: 'users' },
     { key: 'po', label: '2. Purchase Orders', icon: 'doc' },
     { key: 'wo', label: '3. Work Orders', icon: 'wrench' },
+    // Transport Order (transporter PO) — same builder/approval flow as a PO, with
+    // freight-specific T&C. Its own 'to' grant, told apart from PO by the page key.
+    { key: 'to', label: '4. Transport Orders', icon: 'truck' },
     // The old "GRN" record was really the payment engine (PI, milestone, UTR) —
     // it is surfaced as Payment. The physical goods-receipt register is a separate
     // page below, sharing the same 'grn' grant (told apart by view: 'receipt').
-    { key: 'grn', label: '4. Payment', icon: 'wallet' },
-    { key: 'grn', label: '5. Goods Receipt (GRN)', icon: 'truck', view: 'receipt' },
-    { key: 'pay', label: '6. Payment Pipeline', icon: 'wallet' },
-    { key: 'fms', label: '7. FMS — Vendor Payments', icon: 'wallet' },
-    { key: 'documents', label: '8. Documents', icon: 'folder' },
+    { key: 'grn', label: '5. Payment', icon: 'wallet' },
+    { key: 'grn', label: '6. Goods Receipt (GRN)', icon: 'truck', view: 'receipt' },
+    { key: 'pay', label: '7. Payment Pipeline', icon: 'wallet' },
+    { key: 'fms', label: '8. FMS — Vendor Payments', icon: 'wallet' },
+    { key: 'documents', label: '9. Documents', icon: 'folder' },
     // The registers above stay flat; the PO → GRN → invoice → payment drill-down
     // and vendor outstanding live here (transcript R14/R15).
-    { key: 'reports', label: '9. Reports & Registers', icon: 'chart' },
+    { key: 'reports', label: '10. Reports & Registers', icon: 'chart' },
   ] },
   { group: 'Team', items: [
     { key: 'team', label: 'Team', icon: 'people' },
@@ -102,7 +105,7 @@ export default function ProjectWorkspace() {
     // Every entity the public API deep-links to → the tab that shows it. Some
     // share a PageKey and are told apart by `view` (e.g. BOQ progress vs budget).
     const KEY: Record<string, { key: PageKey; view?: string }> = {
-      po: { key: 'po' }, wo: { key: 'wo' }, grn: { key: 'grn' }, payment: { key: 'fms' },
+      po: { key: 'po' }, wo: { key: 'wo' }, to: { key: 'to' }, grn: { key: 'grn' }, payment: { key: 'fms' },
       task: { key: 'gantt' }, boq: { key: 'boq' }, progress: { key: 'boq' },
       budget: { key: 'boq', view: 'budget' },
       changeorder: { key: 'changeorders' }, drawing: { key: 'drawing' }, quotation: { key: 'boq' },
@@ -276,6 +279,7 @@ export default function ProjectWorkspace() {
         {current.key === 'fms' && <FMSView projectId={projectId!} focusId={focusFor('fms')} />}
         {current.key === 'po' && <DocList projectId={projectId!} role={role} type="PO" focusId={focusFor('po')} />}
         {current.key === 'wo' && <DocList projectId={projectId!} role={role} type="WO" focusId={focusFor('wo')} />}
+        {current.key === 'to' && <DocList projectId={projectId!} role={role} type="TO" focusId={focusFor('to')} />}
         {current.key === 'grn' && current.view === 'receipt' && <GoodsReceiptView projectId={projectId!} role={role} />}
         {current.key === 'grn' && current.view !== 'receipt' && <GRNView projectId={projectId!} role={role} focusId={focusFor('grn')} />}
         {current.key === 'vendors' && <VendorsView projectId={projectId!} role={role} />}

@@ -53,9 +53,13 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
-export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+// `persistent` protects a data-entry modal from an accidental backdrop click:
+// with it set, clicking the dimmed area does NOT close the modal (only the ✕ or
+// a Cancel button does), so a half-filled form is never discarded by a stray
+// click. Left off, the modal keeps its original click-outside-to-close behaviour.
+export function Modal({ title, onClose, children, wide, persistent }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; persistent?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-8" style={{ background: 'var(--scrim, rgba(5,35,121,.34))', backdropFilter: 'blur(2px)' }} onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-8" style={{ background: 'var(--scrim, rgba(5,35,121,.34))', backdropFilter: 'blur(2px)' }} onClick={persistent ? undefined : onClose}>
       <div className={`w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} my-auto overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg`} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
           <h3 className="font-display text-[15px] font-extrabold text-navy">{title}</h3>

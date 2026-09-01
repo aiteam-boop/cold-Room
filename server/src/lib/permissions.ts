@@ -15,7 +15,7 @@ import type { Role } from './enums';
 export const PAGE_KEYS = [
   'dashboard', 'boq', 'drawing',
   'gantt', 'changeorders',
-  'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
+  'pay', 'po', 'wo', 'to', 'grn', 'vendors', 'documents',
   'machinemodels',
   'team', 'approvals', 'financials',
   // Room-wise DPR — one grant covers all of its tabs (dashboard, daily entry,
@@ -39,6 +39,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   pay: 'Payment Pipeline',
   po: 'Purchase Orders',
   wo: 'Work Orders',
+  to: 'Transport Orders',
   grn: 'Payment & Goods Receipt (GRN)',
   vendors: 'Vendors',
   documents: 'Documents',
@@ -77,7 +78,7 @@ export type SectionPerms = Partial<Record<SectionKey, boolean>>;
 // but a custom role string is allowed. Types gate which document kinds an
 // approver may be placed on ('ALL' = any).
 export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'] as const;
-export const APPROVAL_TYPES = ['PO', 'WO', 'GRN', 'VENDOR_PAYMENT'] as const;
+export const APPROVAL_TYPES = ['PO', 'WO', 'TO', 'GRN', 'VENDOR_PAYMENT'] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
 
 // Document types are named PAYMENT in the matrix/chain tables but VENDOR_PAYMENT

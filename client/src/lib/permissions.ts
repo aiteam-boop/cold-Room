@@ -4,7 +4,7 @@
 export const PAGE_KEYS = [
   'dashboard', 'boq', 'drawing',
   'gantt', 'changeorders',
-  'pay', 'po', 'wo', 'grn', 'vendors', 'documents',
+  'pay', 'po', 'wo', 'to', 'grn', 'vendors', 'documents',
   'machinemodels',
   'team', 'approvals', 'financials',
   // Room-wise DPR — one grant covers all of its tabs.
@@ -27,6 +27,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   pay: 'Payment Pipeline',
   po: 'Purchase Orders',
   wo: 'Work Orders',
+  to: 'Transport Orders',
   grn: 'Payment & Goods Receipt (GRN)',
   vendors: 'Vendors',
   documents: 'Documents',
@@ -65,10 +66,10 @@ export type SectionPerms = Partial<Record<SectionKey, boolean>>;
 
 // Approver registry (mirror of server/lib/permissions.ts).
 export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'] as const;
-export const APPROVAL_TYPES = ['PO', 'WO', 'GRN', 'VENDOR_PAYMENT'] as const;
+export const APPROVAL_TYPES = ['PO', 'WO', 'TO', 'GRN', 'VENDOR_PAYMENT'] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
 export const APPROVAL_TYPE_LABELS: Record<string, string> = {
-  PO: 'Purchase Orders', WO: 'Work Orders', GRN: 'GRNs', VENDOR_PAYMENT: 'Vendor Payments', ALL: 'All',
+  PO: 'Purchase Orders', WO: 'Work Orders', TO: 'Transport Orders', GRN: 'GRNs', VENDOR_PAYMENT: 'Vendor Payments', ALL: 'All',
 };
 export interface ApproverProfile {
   canApprove: boolean;

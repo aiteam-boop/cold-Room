@@ -9,10 +9,11 @@ import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
 interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; pendingWith?: string | null; pendingWithRole?: string | null; }
 
-export default function DocList({ projectId, role, type, focusId }: { projectId: string; role: string; type: 'PO' | 'WO'; focusId?: string }) {
+export default function DocList({ projectId, role, type, focusId }: { projectId: string; role: string; type: 'PO' | 'WO' | 'TO'; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit, hideFinancials } = useAuth();
-  const isAdmin = canEdit(type === 'PO' ? 'po' : 'wo');
+  const isAdmin = canEdit(type === 'PO' ? 'po' : type === 'TO' ? 'to' : 'wo');
+  const label = type === 'PO' ? 'Purchase Orders' : type === 'TO' ? 'Transport Orders' : 'Work Orders';
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
   const [openId, setOpenId] = useState<string | null>(focusId ?? null);
 
@@ -40,11 +41,11 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-slate-600">{type === 'PO' ? 'Purchase Orders' : 'Work Orders'} ({docs.length})</h3>
+        <h3 className="text-sm font-medium text-slate-600">{label} ({docs.length})</h3>
         {isAdmin && <button className="btn-primary text-sm" disabled={create.isPending} onClick={() => create.mutate()}>+ New {type}</button>}
       </div>
       {docs.length === 0 ? (
-        <EmptyState title={`No ${type === 'PO' ? 'Purchase Orders' : 'Work Orders'} yet`} hint={isAdmin ? `Create a ${type} with the company's exact format — vendor auto-fill, line items, 6-field payment terms and T&C.` : 'None created yet.'} action={isAdmin ? <button className="btn-primary mt-2" onClick={() => create.mutate()}>+ New {type}</button> : undefined} />
+        <EmptyState title={`No ${label} yet`} hint={isAdmin ? `Create a ${type} with the company's exact format — vendor auto-fill, line items, 6-field payment terms and T&C.` : 'None created yet.'} action={isAdmin ? <button className="btn-primary mt-2" onClick={() => create.mutate()}>+ New {type}</button> : undefined} />
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">

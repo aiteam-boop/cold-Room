@@ -13,6 +13,7 @@ import { api, errMsg } from '../lib/api';
 const DOC_TYPES = [
   { key: 'PO', label: 'PO' },
   { key: 'WO', label: 'WO' },
+  { key: 'TO', label: 'TO' },
   { key: 'GRN', label: 'GRN' },
   { key: 'PAYMENT', label: 'Vendor Payments' },
 ] as const;

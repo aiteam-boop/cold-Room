@@ -6,6 +6,7 @@ import { EmptyState, Spinner } from '../ui';
 import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
+import FmsTimeline from './FmsTimeline';
 
 export default function GRNView({ projectId, focusId }: { projectId: string; role: string; focusId?: string }) {
   const qc = useQueryClient();
@@ -40,9 +41,14 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
   if (openId) return <GRNForm projectId={projectId} grnId={openId} canApprove={canApprove} showTaxInvoice={openForInvoice} onClose={() => { setOpenId(null); setOpenForInvoice(false); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }} />;
   if (grnsQ.isLoading) return <Spinner label="Loading GRNs…" />;
   const grns = grnsQ.data ?? [];
-  // Payments whose tax invoice hasn't been uploaded yet (same rule as the
-  // "tax invoice pending" flag) — these are what the Invoices tab collects.
-  const invoicePending = grns.filter((g) => (g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl));
+  // Payments needing invoice ACTION — either the tax invoice isn't uploaded yet,
+  // OR it's uploaded but its approval isn't done (so it can be submitted / reviewed
+  // here). A payment drops off once its invoice is APPROVED.
+  const invoicePending = grns.filter((g) => {
+    if (!(g.milestoneId || g.piValue != null)) return false;
+    const hasInvoice = !!(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl);
+    return !hasInvoice || (!!g.invoicePdfUrl && g.invoiceReleaseStatus !== 'APPROVED');
+  });
 
   return (
     <div className="space-y-3">
@@ -117,7 +123,9 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
                       : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
                     {/* Management release decision from the FMS "Approval Form" link,
                         shown right next to the payment status (Approved / On Hold). */}
-                    {g.releaseStatus && <span className={`badge ml-1 ${g.releaseStatus === 'APPROVED' ? 'bg-green-100 text-green-700' : g.releaseStatus === 'RESUBMITTED' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>{g.releaseStatus === 'APPROVED' ? '✓ Approved' : g.releaseStatus === 'RESUBMITTED' ? '↻ Re-submitted' : '⏸ On Hold'}</span>}
+                    {g.releaseStatus
+                      ? <span className={`badge ml-1 ${g.releaseStatus === 'APPROVED' ? 'bg-green-100 text-green-700' : g.releaseStatus === 'RESUBMITTED' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>{g.releaseStatus === 'APPROVED' ? '✓ Approved' : g.releaseStatus === 'RESUBMITTED' ? '↻ Re-submitted' : '⏸ On Hold'}</span>
+                      : g.status === 'APPROVED' && (g.milestoneId || g.piValue != null) && <span className="badge ml-1 bg-amber-100 text-amber-700">⏳ Awaiting approval</span>}
                     {(g.milestoneId || g.piValue != null) && !(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl) && (
                       <div className="mt-0.5 text-[10px] leading-tight text-orange-600">tax invoice pending</div>
                     )}
@@ -142,15 +150,30 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
 // invoice is filled in and uploaded (the block is hidden on the normal view).
 function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (id: string) => void }) {
   if (grns.length === 0) {
-    return <EmptyState title="No pending invoices" hint="Every payment has its tax invoice recorded. When a payment is waiting for its invoice, it shows here." />;
+    return <EmptyState title="No pending invoices" hint="Every payment has its tax invoice uploaded and approved. A payment shows here while its invoice still needs uploading or approval." />;
   }
   return (
     <div className="card overflow-hidden">
-      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} waiting for a tax invoice.</div>
+      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} whose tax invoice needs uploading or approval.</div>
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Date</th><th className="text-right">PI Value</th><th>Status</th><th></th></tr></thead>
         <tbody>
-          {grns.map((g) => (
+          {grns.map((g) => {
+            // What this payment needs on the invoice side:
+            // 'upload'   — no tax invoice PDF yet.
+            // 'ready'    — invoice uploaded, not yet submitted for approval.
+            // 'awaiting' — invoice submitted, decision still pending.
+            // 'hold'     — invoice approval was put on hold.
+            const stage = !g.invoicePdfUrl ? 'upload'
+              : g.invoiceReleaseStatus === 'ON_HOLD' ? 'hold'
+              : g.invoiceReleaseToken ? 'awaiting'
+              : 'ready';
+            const stageBadge = stage === 'upload' ? <span className="ml-1 text-[10px] font-medium text-orange-600">invoice pending</span>
+              : stage === 'ready' ? <span className="ml-1 rounded bg-blue-50 px-1 text-[10px] font-medium text-blue-700">ready to submit</span>
+              : stage === 'awaiting' ? <span className="ml-1 rounded bg-amber-50 px-1 text-[10px] font-medium text-amber-700">approval pending</span>
+              : <span className="ml-1 rounded bg-orange-50 px-1 text-[10px] font-medium text-orange-700">invoice on hold</span>;
+            const actionLabel = stage === 'upload' ? 'Upload Invoice →' : stage === 'ready' ? 'Submit for Approval →' : 'Review →';
+            return (
             <tr key={g.id} className="cursor-pointer border-b border-slate-100 hover:bg-slate-50" onClick={() => onOpenInvoice(g.id)}>
               <td className="px-4 py-2 font-medium text-navy">{g.grnNumber}</td>
               <td className="text-slate-600">{g.doc?.docNumber}</td>
@@ -161,13 +184,14 @@ function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (i
                 {g.paymentStatus
                   ? <span className={`badge ${g.paymentStatus === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{g.paymentStatus === 'TRIGGERED' ? 'Triggered' : g.paymentStatus === 'PAID' ? 'Paid' : 'Closed'}</span>
                   : <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
-                <span className="ml-1 text-[10px] font-medium text-orange-600">invoice pending</span>
+                {stageBadge}
               </td>
               <td className="px-2 text-right">
-                <button className="btn-primary text-xs" onClick={(e) => { e.stopPropagation(); onOpenInvoice(g.id); }}>Upload Invoice →</button>
+                <button className="btn-primary text-xs" onClick={(e) => { e.stopPropagation(); onOpenInvoice(g.id); }}>{actionLabel}</button>
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -289,6 +313,19 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
     onSuccess: () => setMsg('Approval reminder email sent to the payment approver(s).'),
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Submit the uploaded TAX INVOICE for approval — mails the SAME payment approval
+  // chain a no-login page to Approve / Hold the invoice (with invoice PDF + payment
+  // status + UTR). Runs alongside the payment release; never changes the payment.
+  const submitInvoiceApproval = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/grns/${grnId}/submit-invoice-approval`, {})).data.grn,
+    onSuccess: (grn) => { setG(structuredClone(grn)); setMsg('Invoice sent for approval — the payment approver(s) got the email.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  const remindInvoiceApproval = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/grns/${grnId}/remind-invoice-approval`, {})).data,
+    onSuccess: () => setMsg('Invoice approval reminder email sent.'),
+    onError: (e) => setMsg(errMsg(e)),
+  });
   // The tax invoice arrives AFTER approval on a payment GRN (§6), so recording its
   // number/date/value is the closing step — not an amendment. This patches ONLY
   // those fields, which the server accepts without an amendment reason.
@@ -341,6 +378,8 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
   // The vendor's KYC set (GST certificate, PAN, cancelled cheque, …), resolved
   // from the vendor master — shown here, never uploaded here.
   const kycDocs: { id: string; kind: string; fileName: string; fileUrl: string }[] = (grnQ.data as any)?.kycDocs ?? [];
+  // Accounts (FMS) stage timeline for this payment — read-only, may be null (no match).
+  const fmsStages = (grnQ.data as any)?.fmsStages ?? null;
   const piValueNum = Number(g.piValue) || 0;
   // Live balance, same formula as the vendor-payment (FMS) form:
   // PI value − (advance already on the PO + what this entry pays).
@@ -351,7 +390,12 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
   // Payment lifecycle (§6): TRIGGERED → PAID → CLOSED, running alongside the
   // goods/approval status. A GRN can be PAID but still OPEN (tax invoice pending).
   const payStatus: string | null = g.paymentStatus ?? null;
-  const isPaymentGrn = !!g.milestoneId;
+  // Every record in this (GRN) collection is a Vendor Payment (PAY-QAS-###) — the
+  // real goods-receipt register is a separate entity now. So a payment must be
+  // recognised even when its term (milestoneId) wasn't captured; keying only off
+  // milestoneId used to misfire and fall back to the old goods-receipt layout
+  // (Delivery Details / Receipt Line Items) and skip the payment approval chain.
+  const isPaymentGrn = !!g.milestoneId || g.piValue != null || !!g.piNumber || /^PAY-/i.test(g.grnNumber || '');
   const canRecordPaid = canMarkPaid && approved && payStatus === 'TRIGGERED';
   const paidButOpen = payStatus === 'PAID';
   const paymentClosed = payStatus === 'CLOSED';
@@ -379,10 +423,24 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2"><button className="btn-outline text-sm" onClick={onClose}>← Back</button><h2 className="text-lg font-bold text-navy">{g.grnNumber}</h2>
-          {/* Hide the internal "Approved" pill for a payment that has a lifecycle
-              status — the payment badge (Triggered → Paid → Closed) says it all. */}
-          {!payStatus && <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
-          {payStatus && <span className={`badge ${paymentClosed ? 'bg-slate-100 text-slate-600' : paidButOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{paymentClosed ? 'Payment Closed' : paidButOpen ? 'Paid · tax invoice pending' : 'Payment Triggered'}</span>}
+          {/* For a payment we DON'T show the record's own green "Approved" pill —
+              it confuses (the record locks on submit, but the vendor-payment
+              sign-off is still pending). We show the sign-off state instead. The
+              plain doc pill stays for a Draft payment and for non-payment GRNs. */}
+          {!payStatus && !(isPaymentGrn && approved) && <span className={`badge ${docStatusPill(g.status)}`}>{titleize(g.status)}</span>}
+          {payStatus && <span className={`badge ${paymentClosed ? 'bg-slate-100 text-slate-600' : paidButOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{paymentClosed ? 'Payment Closed' : paidButOpen ? (g.invoicePdfUrl ? 'Paid · invoice awaiting approval' : 'Paid · tax invoice pending') : 'Payment Triggered'}</span>}
+          {/* Vendor-payment approval sign-off — the decision the email drives. A
+              submitted payment reads "Awaiting approval" until an approver signs
+              off (then "Approved"), or "On Hold" / "Re-submitted" in between. */}
+          {isPaymentGrn && approved && (
+            g.releaseStatus === 'APPROVED'
+              ? <span className="badge bg-emerald-100 text-emerald-700">✓ Approved</span>
+              : g.releaseStatus === 'ON_HOLD'
+                ? <span className="badge bg-orange-100 text-orange-700">⏸ On Hold</span>
+                : g.releaseStatus === 'RESUBMITTED'
+                  ? <span className="badge bg-blue-100 text-blue-700">↻ Re-submitted</span>
+                  : <span className="badge bg-amber-100 text-amber-700">⏳ Awaiting approval</span>
+          )}
         </div>
         <div className="flex gap-2">
           {canRecordPaid && <button className="btn-primary text-sm" disabled={markPaid.isPending} onClick={doMarkPaid}>💳 Mark Paid</button>}
@@ -409,9 +467,29 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
       </div>
       {msg && <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{msg}</div>}
 
+      {/* Where this payment stands in Accounts (FMS) — a horizontal progress timeline:
+          Payment raised → Approved → Processed by AP (Shivani) → Approved by Alok Ji
+          → Paid by Finance (Taraji). Shown once the payment is actually submitted (not
+          a DRAFT — a draft hasn't started its journey). The last three stages fill in
+          from the FMS sheet as Accounts processes it; until then they read "pending". */}
+      {isPaymentGrn && g.status !== 'DRAFT' && (
+        <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-sky-700">Payment progress (Accounts / FMS)</div>
+          <FmsTimeline
+            fmsStages={fmsStages}
+            approved={g.releaseStatus === 'APPROVED'}
+            approvedAt={g.releaseStatus === 'APPROVED' ? g.releaseAt : null}
+            paid={payStatus === 'PAID' || payStatus === 'CLOSED' || !!g.utrNumber}
+            utr={g.utrNumber ?? null}
+          />
+        </div>
+      )}
+
       {approved && !amending && (
-        <div className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
-          This payment is approved and locked.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}
+        <div className={`rounded-lg px-3 py-2 text-sm ${isPaymentGrn && g.releaseStatus !== 'APPROVED' ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-700'}`}>
+          {isPaymentGrn && g.releaseStatus !== 'APPROVED'
+            ? <>This payment is submitted and <strong>awaiting approval</strong> from the payment approver(s) — an email has been sent. It becomes final once they sign off.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}</>
+            : <>This payment is approved and locked.{canEditGrn ? ' Use “Amend” above to change it — a reason is required and every change is logged below.' : ''}</>}
         </div>
       )}
       {/* Sent back by an approver: show exactly what they asked to be corrected. */}
@@ -565,7 +643,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
               {g.invoicePdfUrl
                 ? <a className="text-sm text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 View invoice</a>
                 : <span className="text-xs text-slate-400">{isPaymentGrn ? 'Comes after payment' : 'Not uploaded'}</span>}
-              {canUploadTaxInvoice && <input className="input mt-1 text-xs" type="file" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} />}
+              {canUploadTaxInvoice && <input className="input mt-1 text-xs" type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} />}
             </F>
             <F label="Material Photo">
               {g.photoUrl
@@ -581,6 +659,32 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
           <div className="mt-3 flex items-center gap-2">
             <button className="btn-primary text-sm" disabled={saveTaxInvoice.isPending} onClick={() => saveTaxInvoice.mutate()}>Save tax invoice</button>
             <span className="text-[11px] text-slate-400">Recording the tax invoice is the closing step — no amendment reason needed.</span>
+          </div>
+        )}
+        {/* Invoice approval — mails the SAME payment approval chain a link to
+            Approve / Hold the invoice (with invoice PDF + payment status + UTR). */}
+        {isPaymentGrn && g.invoicePdfUrl && (
+          <div className="mt-3 border-t border-slate-100 pt-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-600">Invoice approval:</span>
+              {g.invoiceReleaseStatus === 'APPROVED'
+                ? <span className="badge bg-green-100 text-green-700">✓ Approved{g.invoiceReleaseBy ? ` · ${g.invoiceReleaseBy}` : ''}</span>
+                : g.invoiceReleaseStatus === 'ON_HOLD'
+                  ? <span className="badge bg-orange-100 text-orange-700">⏸ On Hold</span>
+                  : g.invoiceReleaseToken
+                    ? <span className="badge bg-amber-100 text-amber-700">Awaiting approval</span>
+                    : <span className="badge bg-slate-100 text-slate-500">Not submitted</span>}
+              {canEditGrn && g.invoiceReleaseStatus !== 'APPROVED' && (
+                <button className="btn-outline text-xs" disabled={submitInvoiceApproval.isPending} onClick={() => submitInvoiceApproval.mutate()}>
+                  {g.invoiceReleaseToken ? '↻ Re-submit for approval' : '📤 Submit Invoice for Approval'}
+                </button>
+              )}
+              {canEditGrn && g.invoiceReleaseToken && g.invoiceReleaseStatus !== 'APPROVED' && (
+                <button className="text-xs font-medium text-navy hover:underline" disabled={remindInvoiceApproval.isPending} onClick={() => remindInvoiceApproval.mutate()}>Send reminder</button>
+              )}
+            </div>
+            {g.invoiceReleaseStatus === 'ON_HOLD' && g.invoiceReleaseRemark && <div className="mt-1 text-[11px] text-orange-600">On hold: {g.invoiceReleaseRemark}</div>}
+            <div className="mt-1 text-[10px] text-slate-400">Emails the payment approval chain a link to Approve / Hold the invoice — with the invoice PDF, payment status &amp; UTR.</div>
           </div>
         )}
       </div>
@@ -686,7 +790,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
               {g.piPdfUrl
                 ? <a className="text-sm text-navy hover:underline" href={g.piPdfUrl} target="_blank" rel="noreferrer">📄 View PI</a>
                 : <span className="text-xs text-slate-400">Not uploaded</span>}
-              {editable && <input className="input mt-1 text-xs" type="file" accept=".pdf,image/*" onChange={(e) => e.target.files?.[0] && uploadPI.mutate(e.target.files[0])} />}
+              {editable && <input className="input mt-1 text-xs" type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && uploadPI.mutate(e.target.files[0])} />}
             </F>
             <F label="Tax Invoice PDF (closes the entry)">
               {g.invoicePdfUrl
@@ -743,8 +847,8 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
               )}
             </div>
             {payStatus === 'TRIGGERED' && <div className="mt-2 text-[11px] text-amber-700">Triggered to Accounts — awaiting the UTR (Mark Paid).</div>}
-            {paidButOpen && <div className="mt-2 text-[11px] text-emerald-700">Paid, but this entry stays open until the tax invoice is uploaded below — then it closes and leaves the bucket.</div>}
-            {paymentClosed && <div className="mt-2 text-[11px] text-slate-500">Closed — paid and the tax invoice is on file.</div>}
+            {paidButOpen && <div className="mt-2 text-[11px] text-emerald-700">Paid — this entry stays open until the tax invoice is uploaded and <strong>approved by Finance</strong>; then it closes and leaves the bucket.</div>}
+            {paymentClosed && <div className="mt-2 text-[11px] text-slate-500">Closed — paid and the tax invoice is approved &amp; on file.</div>}
           </div>
         )}
       </div>

@@ -4,6 +4,7 @@ import { api, errMsg, openAuthedFile, downloadFile } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { EmptyState, KPI, Modal, Spinner } from '../ui';
 import { fmtDate, inr } from '../../lib/format';
+import FmsTimeline from './FmsTimeline';
 
 // Spread a PO's Accounts-sheet payments across its still-PENDING terms (greedy, in
 // order) so each term SHOWS as paid-via-sheet with its UTR. This is a display mirror
@@ -15,8 +16,12 @@ function computeSheetAlloc(r: any): Record<string, { paid: number; full: boolean
   const pool = (r.sheetPayments || []).map((s: any) => ({ ...s, left: Number(s.amount) || 0 }));
   if (!pool.length) return alloc;
   for (const m of (r.milestones || [])) {
-    if (m.status !== 'PENDING') continue;
-    let need = m.inrAmount || 0;
+    // Skip only terms already settled IN-APP (they carry their own UTR). A term
+    // that is still PENDING or merely TRIGGERED but was actually paid via the
+    // Accounts sheet (its doc carries a matched sheet UTR) is shown paid here.
+    if (m.status === 'PAID' || m.status === 'PARTIALLY_PAID') continue;
+    let need = (m.inrAmount || 0) - (m.amountPaid || 0);
+    if (need <= 0.01) continue;
     const utrs: any[] = []; let paid = 0;
     for (const p of pool) {
       if (need <= 0.01) break;
@@ -114,7 +119,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                   </div>
                 )}
               </div>
-              {(r.sheetPayments?.length ?? 0) > 0 && r.grnStatus === 'No Payment'
+              {sheetPaidOf(r) > 0.01 && r.grnStatus !== 'Payment Paid'
                 ? <span className="badge bg-green-100 text-green-700" title="Paid via the Accounts sheet (outside the app)">✓ Paid (Accounts)</span>
                 : <span className={`badge ${r.grnStatus === 'Payment Paid' ? 'bg-green-100 text-green-700' : r.grnStatus === 'Payment Triggered' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{r.grnStatus}</span>}
             </button>
@@ -143,7 +148,7 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                         <td>
                           {/* Paid via the Accounts sheet (outside the app) — show it as
                               paid with the UTR, in green, instead of PENDING. */}
-                          {sa && m.status === 'PENDING' ? (
+                          {sa && m.status !== 'PAID' && m.status !== 'PARTIALLY_PAID' ? (
                             <>
                               <span className="badge bg-green-100 text-green-700">✓ PAID{sa.full ? '' : ' (PART)'} · sheet</span>
                               <div className="mt-0.5 text-[11px] text-slate-500">UTR: {sa.utrs.map((u: any, i: number) => <span key={i}>{i > 0 ? ', ' : ''}<span className="font-medium text-slate-700">{u.utr}</span>{u.vrNo ? <span className="text-slate-400"> ({u.vrNo})</span> : ''}</span>)}</div>
@@ -184,6 +189,30 @@ export default function PaymentDashboard({ projectId }: { projectId: string; rol
                     ); })}
                   </tbody>
                 </table>
+                {/* Accounts-side stage timeline (Option B) — read from the FMS sheet:
+                    once a payment is approved in-app, Accounts carries it through
+                    AP (Shivani) → Alok Ji → Finance (Taraji), each stamped with a time,
+                    plus the A/C status and the VR number. Read-only; hidden if no match. */}
+                {/* Payment progress timeline — shown once there's a payment in motion
+                    (an in-app payment raised, a sheet payment, or a matched FMS row).
+                    In-app stages go green from the payment's own state; the last three
+                    (AP → Alok → Finance) fill in from the FMS sheet, else read pending. */}
+                {(r.grns?.length > 0 || r.fmsStages || sheetPaidOf(r) > 0.01) && (() => {
+                  // A UTR / VR (from the Accounts sheet or an in-app term) means it's
+                  // paid — so the whole Accounts timeline is complete.
+                  const sp: any[] = r.sheetPayments ?? [];
+                  const spVr = sp.find((x) => x.vrNo)?.vrNo ?? null;
+                  const spUtr = sp.find((x) => x.utr)?.utr ?? null;
+                  const termUtr = (r.milestones ?? []).find((m: any) => m.utrNumber)?.utrNumber ?? null;
+                  const isPaid = Boolean(spVr || spUtr || termUtr) || r.grnStatus === 'Payment Paid' || sheetPaidOf(r) > 0.01;
+                  const approvedIn = (r.grns ?? []).some((g: any) => g.releaseStatus === 'APPROVED') || isPaid;
+                  return (
+                  <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50/70 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase text-sky-700">Payment progress (Accounts / FMS)</div>
+                    <FmsTimeline fmsStages={r.fmsStages ?? null} approved={approvedIn} paid={isPaid} vrNo={spVr} utr={spUtr || termUtr} />
+                  </div>
+                  );
+                })()}
                 {/* Approved GRNs on this PO/WO with their invoice files. */}
                 {r.grns?.length > 0 && (
                   <div className="mt-3 border-t border-slate-200 pt-2">

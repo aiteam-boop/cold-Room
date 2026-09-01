@@ -62,6 +62,9 @@ const HEAD_BG = '#0f2942';
 // marker, since it's a review not a distribution).
 export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStream, opts: { internal?: boolean; internalMarker?: boolean } = {}) {
   const isWO = doc.type === 'WO';
+  // Document title/label by type (Transport Order reuses the PO layout).
+  const longLabel = doc.type === 'WO' ? 'Work Order' : doc.type === 'TO' ? 'Transport Order' : 'Purchase Order';
+  const shortLabel = doc.type === 'WO' ? 'WO' : doc.type === 'TO' ? 'TO' : 'PO';
   const internal = !!opts.internal;
   const internalMarker = internal && opts.internalMarker !== false;
   const pdf = new PDFDocument({ size: 'A4', margin: 24 });
@@ -97,7 +100,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   // ── Title bar ──
   const titleH = 16;
   pdf.rect(L, y, W, titleH).fillAndStroke('#e9eef5', BORDER);
-  pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text(isWO ? 'Work Order' : 'Purchase Order', L, y + 4, { width: W, align: 'center' });
+  pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text(longLabel, L, y + 4, { width: W, align: 'center' });
   // Internal DOWNLOAD copy gets a clear red marker so it can never be mistaken for
   // the vendor copy. The approver-review copy skips it (internalMarker=false).
   if (internalMarker) pdf.font('Helvetica-Bold').fontSize(7).fillColor('#b91c1c').text('INTERNAL COPY — NOT FOR VENDOR', R - 168, y + 5.5, { width: 160, align: 'right' });
@@ -119,7 +122,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   const cH = blockH / 3;
   rect(L + leftW, y, rightW, cH); rect(L + leftW, y + cH, rightW, cH); rect(L + leftW, y + 2 * cH, rightW, blockH - 2 * cH);
   cell(L + leftW, y + cH / 2 - 5, rightW, `Date : ${doc.docDate.toLocaleDateString('en-GB')}`, { size: 8, align: 'center', font: 'Helvetica-Bold' });
-  cell(L + leftW, y + cH + cH / 2 - 5, rightW, `${isWO ? 'WO' : 'PO'} No.: ${doc.docNumber}`, { size: 8, align: 'center', font: 'Helvetica-Bold' });
+  cell(L + leftW, y + cH + cH / 2 - 5, rightW, `${shortLabel} No.: ${doc.docNumber}`, { size: 8, align: 'center', font: 'Helvetica-Bold' });
   // The delivery commitment travels on the document itself — it is the date the
   // vendor is held to, and the one "delivered on time?" is measured against.
   const deliveryLine = doc.promisedDeliveryDate
@@ -185,8 +188,9 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     if (it.gstExempt) descText = `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})`;
     else if (uniformRate == null && doc.gstEnabled) descText = `${it.description}  (GST ${it.gstPct != null ? it.gstPct : doc.gstPct}%)`;
     if (internal) {
-      const meta = [`Head: ${it.boqHead || '—'}`, it.boqItemName ? `BOQ Item: ${it.boqItemName}` : null].filter(Boolean).join('     ·     ');
-      descText += `\n▸ ${meta}`;
+      // Head and BOQ Item each on their OWN line (not joined on one line).
+      const metaLines = [`Head: ${it.boqHead || '—'}`, it.boqItemName ? `BOQ Item: ${it.boqItemName}` : null].filter(Boolean) as string[];
+      for (const m of metaLines) descText += `\n▸ ${m}`;
     }
     const descH = textH(descText, cols[1].w, 7.5);
     const rowH = Math.max(descH + 6, 18);
@@ -253,7 +257,7 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
   openBox();
   pdf.font('Helvetica-Bold').fontSize(9.5).fillColor(HEAD_BG).text('TERMS & CONDITIONS', innerL, y, { width: innerW, align: 'center' });
   y = pdf.y + 2;
-  pdf.font('Helvetica').fontSize(7.5).fillColor('#64748b').text(`${isWO ? 'Work Order' : 'Purchase Order'} No.: ${doc.docNumber}`, innerL, y, { width: innerW, align: 'center' });
+  pdf.font('Helvetica').fontSize(7.5).fillColor('#64748b').text(`${longLabel} No.: ${doc.docNumber}`, innerL, y, { width: innerW, align: 'center' });
   y = pdf.y + 6;
 
   for (const s of doc.termsSections) {

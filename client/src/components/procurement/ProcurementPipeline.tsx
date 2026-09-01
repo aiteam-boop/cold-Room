@@ -3,6 +3,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { Spinner } from '../ui';
 import { inr, fmtDate, titleize } from '../../lib/format';
+import FmsTimeline from './FmsTimeline';
 
 // Spread the PO's Accounts-sheet payments across its still-PENDING terms (greedy, in
 // order) so each covered term SHOWS as paid-via-sheet. Display mirror only — the
@@ -13,7 +14,9 @@ function computeSheetAlloc(payment: any): { byIdx: Record<number, { paid: number
   let total = 0;
   if (!pool.length) return { byIdx, total };
   (payment.terms || []).forEach((t: any, idx: number) => {
-    if (t.status !== 'PENDING') return;
+    // Skip terms already settled in-app; a PENDING or TRIGGERED term paid via the
+    // Accounts sheet is shown paid-via-sheet here.
+    if (t.status === 'PAID' || t.status === 'PARTIALLY_PAID') return;
     let need = (t.inrAmount || 0) - (t.amountPaid || 0);
     if (need <= 0.01) return;
     let paid = 0;
@@ -148,6 +151,33 @@ export default function ProcurementPipeline({ projectId, docId }: { projectId: s
               <div className="mt-0.5 text-[9px] text-slate-400">Paid outside the app via the FMS Accounts form — not counted in the in-app paid/pending above.</div>
             </div>
           )}
+
+          {/* Payment progress timeline — shown once there's a payment in motion (any
+              amount paid in-app, a sheet payment, or a matched FMS row). In-app stages
+              go green from the PO's approval; the last three (AP → Alok → Finance) fill
+              in from the FMS sheet as Accounts processes it, else read "pending". */}
+          {(payment.fmsStages || payment.paidAmount > 0 || (payment.sheetPayments?.length ?? 0) > 0) && (() => {
+            // A UTR / VR (from the Accounts sheet or an in-app term) means it's paid —
+            // so the whole Accounts timeline is complete even without the stage row.
+            const sp: any[] = payment.sheetPayments ?? [];
+            const spVr = sp.find((x) => x.vrNo)?.vrNo ?? null;
+            const spUtr = sp.find((x) => x.utr)?.utr ?? null;
+            const termUtr = (payment.terms ?? []).find((t: any) => t.utrNumber)?.utrNumber ?? null;
+            const isPaid = Boolean(spVr || spUtr || termUtr) || (payment.pendingAmount <= 0.01 && payment.paidAmount > 0);
+            return (
+            <div className="mt-2 rounded border border-blue-200 bg-blue-50/50 p-2.5">
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700">Payment progress (Accounts / FMS)</div>
+              <FmsTimeline
+                fmsStages={payment.fmsStages ?? null}
+                approved={approval.approved >= approval.total && approval.total > 0}
+                paid={isPaid}
+                vrNo={spVr}
+                utr={spUtr || termUtr}
+              />
+              <div className="mt-1 text-[9px] text-slate-400">Live from the Accounts (FMS) sheet — where this bill stands after CRMCTS approval.</div>
+            </div>
+            );
+          })()}
         </div>
 
         {/* Goods Receipt */}
@@ -201,3 +231,4 @@ function CardHead({ title, state }: { title: string; state: Phase }) {
     </div>
   );
 }
+

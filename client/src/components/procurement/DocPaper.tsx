@@ -227,7 +227,7 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
       </div>
 
       {/* Title bar */}
-      <div className={`border-x border-b ${B} bg-slate-100 py-0.5 text-center text-[12px] font-bold text-slate-800`}>{isWO ? 'Work Order' : 'Purchase Order'}</div>
+      <div className={`border-x border-b ${B} bg-slate-100 py-0.5 text-center text-[12px] font-bold text-slate-800`}>{d.type === 'WO' ? 'Work Order' : d.type === 'TO' ? 'Transport Order' : 'Purchase Order'}</div>
 
       {/* To (vendor) + Date/No/Quotation cells */}
       <div className={`flex border-x ${B}`}>

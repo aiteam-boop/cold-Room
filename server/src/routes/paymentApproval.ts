@@ -56,7 +56,10 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
   // /uploads/* is public; a signed /api/* link if it ever moves there.
   const piUrl = gr.piPdfUrl ? (gr.piPdfUrl.startsWith('/api/') ? base + signApiPath(gr.piPdfUrl) : base + gr.piPdfUrl) : null;
   const row = (k: string, v: string) => `<tr><td style="padding:7px 10px;color:#64748b;font-size:12px;white-space:nowrap;vertical-align:top">${k}</td><td style="padding:7px 10px;font-weight:600;color:#0f172a">${v}</td></tr>`;
-  const link = (label: string, url: string | null) => (url ? `<a href="${url}" target="_blank" style="color:#052379;font-weight:600;text-decoration:none">📄 ${label}</a>` : '<span style="color:#94a3b8">—</span>');
+  // Documents open in an in-page popup (like the CRMCTS app) instead of a new
+  // tab. The href/target stay as a no-JS fallback; the click handler below
+  // (attached by class) previews the file in the modal and offers a download.
+  const link = (label: string, url: string | null) => (url ? `<a href="${url}" target="_blank" rel="noopener" class="doclink" data-title="${esc(label)}" style="color:#052379;font-weight:600;text-decoration:none">📄 ${label}</a>` : '<span style="color:#94a3b8">—</span>');
   const action = `/api/public/payment-approval/${esc(token)}/decide`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment Approval — ${esc(gr.grnNumber)}</title></head>
 <body style="margin:0;background:#f1f5f9;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">
@@ -117,6 +120,46 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
       <div style="font-size:11px;color:#94a3b8;margin-top:10px">This records a management decision on the payment. It shows next to the payment status in CRMCTS and on the FMS sheet. It does not itself release funds.</div>
     </div>`}
   </div>
+
+  <!-- In-page document viewer (opens PO / PI / GRN / KYC in a popup, like the CRMCTS app) -->
+  <div id="docModal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.55);padding:16px;box-sizing:border-box">
+    <div style="max-width:960px;height:90vh;margin:0 auto;display:flex;flex-direction:column;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+      <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid #e2e8f0;padding:10px 14px;flex-shrink:0">
+        <div id="docModalTitle" style="flex:1;font-weight:700;color:#052379;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Document</div>
+        <a id="docModalDownload" href="#" download style="border:1px solid #cbd5e1;border-radius:8px;padding:5px 12px;font-size:12px;color:#052379;text-decoration:none;font-weight:700;white-space:nowrap">⬇ Download</a>
+        <button type="button" id="docModalClose" style="border:none;background:#f1f5f9;border-radius:8px;width:30px;height:30px;font-size:16px;color:#475569;cursor:pointer;line-height:1">✕</button>
+      </div>
+      <div id="docModalBody" style="flex:1;min-height:0;background:#f1f5f9"></div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var modal = document.getElementById('docModal');
+      var body = document.getElementById('docModalBody');
+      var titleEl = document.getElementById('docModalTitle');
+      var dl = document.getElementById('docModalDownload');
+      function isImage(u) { return /\\.(png|jpe?g|gif|webp|bmp|svg)(\\?|$)/i.test(u); }
+      function open(url, title) {
+        titleEl.textContent = title || 'Document';
+        dl.setAttribute('href', url);
+        body.innerHTML = isImage(url)
+          ? '<div style="width:100%;height:100%;overflow:auto;display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box"><img src="' + url + '" style="max-width:100%;max-height:100%;object-fit:contain" /></div>'
+          : '<iframe src="' + url + '" style="width:100%;height:100%;border:0;background:#fff"></iframe>';
+        modal.style.display = 'block';
+      }
+      function close() { modal.style.display = 'none'; body.innerHTML = ''; }
+      var links = document.querySelectorAll('a.doclink');
+      for (var i = 0; i < links.length; i++) {
+        links[i].addEventListener('click', function (e) {
+          e.preventDefault();
+          open(this.getAttribute('href'), this.getAttribute('data-title'));
+        });
+      }
+      document.getElementById('docModalClose').addEventListener('click', close);
+      modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+    })();
+  </script>
 </body></html>`;
 }
 

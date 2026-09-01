@@ -570,6 +570,17 @@ model GRN {
   releaseBy      String?
   releaseRemark  String?
 
+  // Invoice-approval sign-off — a SEPARATE chain (ApprovalStep docType 'INVOICE')
+  // that mirrors the payment release: once the tax invoice is uploaded, "Submit
+  // Invoice for Approval" mails the SAME payment approvers a no-login page to
+  // Approve / Hold the invoice. Runs alongside the payment release; the invoice
+  // page also shows the payment's approval status + UTR for reference.
+  invoiceReleaseToken   String?
+  invoiceReleaseStatus  String?   // APPROVED | ON_HOLD (null = not decided)
+  invoiceReleaseAt      DateTime?
+  invoiceReleaseBy      String?
+  invoiceReleaseRemark  String?
+
   // Tax-invoice section (arrives later; closes the payment side).
   invoiceNumber String?
   invoiceDate   DateTime?

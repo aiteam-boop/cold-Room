@@ -13,12 +13,12 @@ import { fixedChainFor, resolveAutoChain, type ChainDocType } from '../services/
 const router = Router();
 router.use(requireAuth);
 
-const DOC_TYPES = ['PO', 'WO', 'GRN', 'PAYMENT'] as const;
+const DOC_TYPES = ['PO', 'WO', 'TO', 'GRN', 'PAYMENT'] as const;
 
 // GET /api/approval-chains?docType=PO[&projectId=] — the configured chain.
 router.get('/', asyncHandler(async (req, res) => {
   const docType = String(req.query.docType || 'PO').toUpperCase();
-  if (!DOC_TYPES.includes(docType as any)) throw badRequest('docType must be PO, WO, GRN or PAYMENT');
+  if (!DOC_TYPES.includes(docType as any)) throw badRequest('docType must be PO, WO, TO, GRN or PAYMENT');
   const projectId = typeof req.query.projectId === 'string' && req.query.projectId ? req.query.projectId : null;
   const { rows, scope } = await fixedChainFor(docType as ChainDocType, projectId);
   res.json({ docType, projectId, scope, chain: rows });
@@ -30,7 +30,7 @@ router.get('/', asyncHandler(async (req, res) => {
 // no approver popup, because the server will route it through this same chain.
 router.get('/resolve', asyncHandler(async (req, res) => {
   const docType = String(req.query.docType || 'PO').toUpperCase();
-  if (!DOC_TYPES.includes(docType as any)) throw badRequest('docType must be PO, WO, GRN or PAYMENT');
+  if (!DOC_TYPES.includes(docType as any)) throw badRequest('docType must be PO, WO, TO, GRN or PAYMENT');
   const projectId = String(req.query.projectId || '');
   if (!projectId) throw badRequest('projectId is required');
   const amount = Number(req.query.amount) || 0;

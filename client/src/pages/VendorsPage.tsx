@@ -33,7 +33,14 @@ export default function VendorsPage() {
 
   if (isLoading) return <Spinner label="Loading vendors…" />;
   if (error) return <div className="card p-6 text-red-600">You don't have access to the global vendor database.</div>;
-  const vendors = (data ?? []).filter((v) => `${v.name} ${v.gstin} ${v.contactPerson}`.toLowerCase().includes(q.toLowerCase()));
+  // Display vendors A→Z by name (case-insensitive), regardless of when they were
+  // added. Names are TRIMMED before comparing — some vendors have a stray leading
+  // space in the stored name, which would otherwise sort them as a block at the
+  // top. Sort a copy so the cached query data isn't mutated.
+  const vendors = (data ?? [])
+    .filter((v) => `${v.name} ${v.gstin} ${v.contactPerson}`.toLowerCase().includes(q.toLowerCase()))
+    .slice()
+    .sort((a, b) => (a.name || '').trim().localeCompare((b.name || '').trim(), undefined, { sensitivity: 'base', numeric: true }));
 
   return (
     <div className="space-y-4">
@@ -67,6 +74,19 @@ export default function VendorsPage() {
               <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
                 KYC <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
               </div>
+              {/* Which specific documents are still pending (doesn't touch the % badge):
+                  mandatory ones in red with a *, optional ones in grey. Hidden when
+                  KYC is complete. */}
+              {v.kyc?.items?.some((it: any) => !it.done) && (
+                <div className="mt-1 text-[11px] leading-snug">
+                  <span className="text-slate-400">Pending: </span>
+                  {v.kyc.items.filter((it: any) => !it.done).map((it: any, i: number, arr: any[]) => (
+                    <span key={it.key} className={it.mandatory ? 'font-medium text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
+                      {it.label}{it.mandatory ? '*' : ''}{i < arr.length - 1 ? ', ' : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="mt-2 space-y-0.5 text-xs text-slate-400">
                 {(v.contactPerson || v.phones) && <div className="truncate">Contact: {v.contactPerson}{v.phones ? ` · ${v.phones}` : ''}</div>}
                 {v.gstin && <div>GSTIN: {v.gstin}</div>}
@@ -136,7 +156,7 @@ function VendorModal({ vendor, onClose, onDone }: { vendor?: any; onClose: () =>
   });
   const F = (k: string, label: string) => <div><label className="label">{label}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>;
   return (
-    <Modal title={isEdit ? 'Edit Vendor / Contractor' : 'Add Vendor / Contractor'} onClose={onClose} wide>
+    <Modal title={isEdit ? 'Edit Vendor / Contractor' : 'Add Vendor / Contractor'} onClose={onClose} wide persistent>
       <form onSubmit={(e) => { e.preventDefault(); setErr(''); m.mutate(); }} className="grid gap-3 sm:grid-cols-2">
         {F('name', 'Name *')}
         <div><label className="label">Type</label><select className="input" value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}><option value="VENDOR">Vendor (material)</option><option value="CONTRACTOR">Contractor (labor)</option></select></div>

@@ -200,7 +200,7 @@ export function kycScore(
     { key: 'GST_CERTIFICATE', label: 'GST Certificate', done: hasDoc('GST_CERTIFICATE'), mandatory: true },
     { key: 'PAN_CARD', label: 'PAN Card', done: hasDoc('PAN_CARD'), mandatory: true },
     { key: 'CANCELLED_CHEQUE', label: 'Cancelled Cheque', done: hasDoc('CANCELLED_CHEQUE'), mandatory: true },
-    { key: 'BANK_ACCOUNT', label: 'Bank Account', done: bankOk, mandatory: true },
+    { key: 'BANK_ACCOUNT', label: 'Bank Account', done: bankOk, mandatory: false },
     { key: 'EMAIL', label: 'Email ID', done: filled(vendor.email), mandatory: true },
     { key: 'GST_NUMBER', label: 'GST Number', done: filled(vendor.gstin), mandatory: false },
   ];

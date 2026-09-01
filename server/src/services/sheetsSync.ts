@@ -212,6 +212,37 @@ async function writeTab(tab: string, headers: string[], rows: (string | number |
   });
 }
 
+/**
+ * Format a tab's Timestamp column (A, from row 2 down) as a DATE_TIME value so
+ * its serial-number cells render as dd/mm/yyyy hh:mm:ss AND open the calendar
+ * date-picker on click — matching the external ADMIN sheet. Number formats
+ * survive value overwrites, but we (re)apply it every export so a freshly
+ * (re)created tab always gets it. Never throws into the export path.
+ */
+async function formatTimestampColumn(tab: string): Promise<void> {
+  try {
+    const sheets = getSheetsClient();
+    const spreadsheetId = getSpreadsheetId();
+    const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties(sheetId,title)' });
+    const sheetId = (meta.data.sheets || []).find((s) => s.properties?.title === tab)?.properties?.sheetId;
+    if (sheetId == null) return;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          repeatCell: {
+            range: { sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 1 }, // col A, rows 2..end
+            cell: { userEnteredFormat: { numberFormat: { type: 'DATE_TIME', pattern: 'dd/mm/yyyy hh:mm:ss' } } },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        }],
+      },
+    });
+  } catch (err) {
+    console.error('[sheetsSync] formatTimestampColumn failed:', (err as Error).message);
+  }
+}
+
 // ── Export (Mongo -> Sheet) ─────────────────────────────────────────────────
 
 export type ExportResult = { tab: string; rows: number }[];
@@ -219,8 +250,17 @@ export type ExportResult = { tab: string; rows: number }[];
 // Base URL for turning stored file paths (e.g. "/uploads/xyz.pdf") into full,
 // clickable links in the sheet. Set APP_URL to your public domain
 // (e.g. https://coldroom.crystalgrp.xyz) for the links to open.
+//
+// The sheet is the SHARED (production) workbook, so a link is worthless if it points
+// at localhost — yet a sync run from a dev machine has APP_URL=http://localhost:4100.
+// So we NEVER emit a localhost link into the sheet: if the resolved base is empty or
+// a localhost/127.0.0.1 URL, fall back to the production domain. Override with
+// SHEET_LINK_BASE if the domain ever changes.
+const PROD_LINK_BASE = 'https://coldroom.crystalgrp.xyz';
 function fileBaseUrl(): string {
-  return (process.env.APP_URL || (process.env.CLIENT_ORIGIN || '').split(',')[0] || '').replace(/\/$/, '');
+  const configured = (process.env.SHEET_LINK_BASE || process.env.APP_URL || (process.env.CLIENT_ORIGIN || '').split(',')[0] || '').replace(/\/$/, '');
+  if (!configured || /localhost|127\.0\.0\.1/i.test(configured)) return PROD_LINK_BASE;
+  return configured;
 }
 
 /** Export one entity by tab name. Reads via the native MongoDB driver. Any
@@ -270,6 +310,9 @@ const FMS_EXTRA_HEADERS = [
   // Vendor email + the no-login "Approval Form" link (management marks the payment
   // Approved / On Hold) and the resulting Approval Status.
   'Vendor Email', 'Approval Status', 'Approval Form',
+  // VR No. — like "UTR / Payment Ref", the accounts team fills this with their own
+  // fetch-from-sheet formula, so our export PRESERVES this column (never overwrites).
+  'VR No.',
 ];
 
 const dmy = (d: unknown): string => {
@@ -277,10 +320,29 @@ const dmy = (d: unknown): string => {
   if (!dt || Number.isNaN(dt.getTime())) return '';
   return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
 };
-const dmyTime = (d: unknown): string => {
+// Timestamp column (A) on the accounts sheet — written as a real Google Sheets
+// datetime *value* (a serial number), not text, so clicking the cell opens the
+// calendar date-picker exactly like the external ADMIN sheet, while the DATE_TIME
+// number format on the column (see formatTimestampColumn) still displays it as
+// dd/mm/yyyy hh:mm:ss. The serial is built from the India-time (Asia/Kolkata)
+// wall-clock so it reads correctly and consistently regardless of the server's
+// timezone (the VPS runs UTC; getHours()/getDate() would be 5.5h off and would
+// flip whenever a differently-zoned machine ran the sync). RAW keeps it numeric.
+const IST_PARTS = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+});
+// Days between the Sheets/Excel epoch (1899-12-30) and the Unix epoch (1970-01-01).
+const SHEETS_EPOCH_OFFSET = 25569;
+const istSerial = (d: unknown): number | '' => {
   const dt = d instanceof Date ? d : d ? new Date(String(d)) : null;
   if (!dt || Number.isNaN(dt.getTime())) return '';
-  return `${dmy(dt)} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`;
+  const p: Record<string, string> = {};
+  for (const part of IST_PARTS.formatToParts(dt)) p[part.type] = part.value;
+  // Sheets serials carry no timezone, so treat the IST wall-clock components as a
+  // naive UTC instant: the cell then displays exactly the India-time clock.
+  const naiveUtcMs = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return naiveUtcMs / 86400000 + SHEETS_EPOCH_OFFSET;
 };
 /** Absolute, click-from-the-sheet URL. /api/* PDFs are signed; /uploads/* are public. */
 function fileUrl(raw: unknown, base: string): string {
@@ -325,7 +387,10 @@ export async function importPaidFromSheet(): Promise<number> {
   for (const row of vals.slice(1)) {
     const ref = (row[iRef] || '').trim();
     const utr = (row[iUtr] || '').trim();
-    if (!ref || !utr || utr === '—') continue;
+    // Never import a spreadsheet ERROR or a still-computing formula as a UTR — a
+    // broken FMS "fetch UTR" formula shows #REF!/#N/A/Loading…, which is NOT a
+    // payment reference. Importing it once wrote "#REF!" onto a paid milestone.
+    if (!ref || !utr || utr === '—' || /^#(REF|N\/A|VALUE|ERROR|NAME|DIV|NULL|NUM|GETTING_DATA)/i.test(utr) || /^Loading/i.test(utr)) continue;
     const m = await milestones.findOne({ _id: ref } as never);
     if (!m) continue;
     // Only promote a triggered-but-unpaid milestone; never touch PAID/PENDING.
@@ -357,6 +422,44 @@ export async function importPaidFromSheet(): Promise<number> {
     paid++;
   }
   return paid;
+}
+
+/** 0-based column index → A1 column letter (0→A, 25→Z, 26→AA). */
+function colLetter(i: number): string {
+  let s = '', n = i + 1;
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+/**
+ * Like writeTab, but LEAVES the DATA cells of one-or-more columns untouched. Used
+ * for the FMS tab's "UTR / Payment Ref" and "VR No." columns, where the accounts
+ * team keeps their OWN fetch-from-sheet formulas — our full-tab overwrite must
+ * never wipe them. Each preserved column's HEADER (row 1) is still (re)written so
+ * the reverse-sync can find it by name; only the data cells below are preserved.
+ * Everything else is cleared and rewritten exactly as writeTab does.
+ */
+async function writeTabPreservingCols(tab: string, headers: string[], rows: (string | number | boolean)[][], skipCols: number[]): Promise<void> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  const values = [headers, ...rows];
+  const skip = new Set(skipCols);
+  const nCols = Math.max(headers.length, ...skipCols.map((c) => c + 1));
+  // Contiguous runs of NON-preserved columns → the blocks we clear + rewrite.
+  const segments: { start: number; end: number }[] = [];
+  let segStart = -1;
+  for (let c = 0; c < nCols; c++) {
+    if (skip.has(c)) { if (segStart >= 0) { segments.push({ start: segStart, end: c - 1 }); segStart = -1; } }
+    else if (segStart < 0) segStart = c;
+  }
+  if (segStart >= 0) segments.push({ start: segStart, end: nCols - 1 });
+  // Clear each non-preserved block (all rows) so stale rows go — never the preserved columns.
+  await sheets.spreadsheets.values.batchClear({ spreadsheetId, requestBody: { ranges: segments.map((s) => `${tab}!${colLetter(s.start)}1:${colLetter(s.end)}`) } });
+  // Write each block's data, plus each preserved column's HEADER only (row 1).
+  const data: { range: string; values: (string | number | boolean)[][] }[] = [];
+  for (const s of segments) data.push({ range: `${tab}!${colLetter(s.start)}1`, values: values.map((r) => r.slice(s.start, s.end + 1)) });
+  for (const c of skipCols) data.push({ range: `${tab}!${colLetter(c)}1`, values: [[headers[c] ?? '']] });
+  await sheets.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data } });
 }
 
 export async function exportPaymentAccountFms(): Promise<number> {
@@ -434,7 +537,7 @@ export async function exportPaymentAccountFms(): Promise<number> {
       const term = m ? `${m.name}${m.percentage ? ` ${m.percentage}%` : ''}` : '';
       const amountToPay = g?.amountToPay ?? (m ? Number(m.inrAmount) || '' : '');
       return [
-        dmyTime(d.createdAt),                                   // A Timestamp
+        istSerial(d.createdAt),                                 // A Timestamp (real datetime value → date-picker; DATE_TIME format below)
         creator?.email ?? '',                                    // B Email address
         creator?.name ?? '',                                     // C User
         (g?.invoiceNumber ?? '') as string,                      // D Invoice Number
@@ -492,7 +595,15 @@ export async function exportPaymentAccountFms(): Promise<number> {
     }
   }
 
-  await writeTab(FMS_TAB, [...FMS_ADMIN_HEADERS, ...FMS_EXTRA_HEADERS], rows as (string | number | boolean)[][]);
+  // Write every column EXCEPT "UTR / Payment Ref" and "VR No.": the accounts team
+  // keeps their own fetch-from-sheet formulas there, and our overwrite must not wipe
+  // them. (The reverse-sync still reads those columns' computed values.)
+  const headers = [...FMS_ADMIN_HEADERS, ...FMS_EXTRA_HEADERS];
+  const preserve = ['UTR / Payment Ref', 'VR No.'].map((h) => headers.indexOf(h)).filter((i) => i >= 0);
+  if (preserve.length) await writeTabPreservingCols(FMS_TAB, headers, rows as (string | number | boolean)[][], preserve);
+  else await writeTab(FMS_TAB, headers, rows as (string | number | boolean)[][]);
+  // Make the Timestamp column a real datetime column (date-picker + dd/mm/yyyy hh:mm:ss).
+  await formatTimestampColumn(FMS_TAB);
   return rows.length;
 }
 

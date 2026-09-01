@@ -132,7 +132,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
   if (isLoading || !d) return <Spinner label="Loading document…" />;
   const isWO = d.type === 'WO';
-  const canEditDoc = canEdit(isWO ? 'wo' : 'po');
+  const canEditDoc = canEdit(d.type === 'WO' ? 'wo' : d.type === 'TO' ? 'to' : 'po');
   const canApprove = can('canApprove');
   const approved = d.status === 'APPROVED';
   // An approved doc is locked unless the editor has chosen to amend it.
@@ -304,7 +304,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       {hasChain && <ApprovalTimeline approval={approval as any} />}
       {showChain && (
         <ChainBuilder
-          docType={isWO ? 'WO' : 'PO'}
+          docType={d.type}
           projectId={projectId}
           amount={Number(d.finalAmount) || 0}
           busy={doAction.isPending || save.isPending}
@@ -324,7 +324,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
         <Modal title="Vendor KYC incomplete" onClose={() => setBlockedVendor(null)}>
           <div className="space-y-3">
             <p className="text-sm text-slate-600">
-              <strong>{blockedVendor.name}</strong> can't be added to this {isWO ? 'WO' : 'PO'} yet — its mandatory KYC is incomplete.
+              <strong>{blockedVendor.name}</strong> can't be added to this {d.type} yet — its mandatory KYC is incomplete.
             </p>
             <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               Missing: {(blockedVendor.kyc?.mandatoryMissing ?? []).join(', ') || 'mandatory KYC documents'}
@@ -422,7 +422,16 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
             </select>
           </div>
           <F label="Against Quotation" v={d.againstQuotation} on={(x) => setD({ ...d, againstQuotation: x })} ed={editable} />
-          <F label="Vendor Name" v={d.vendorName} on={(x) => setD({ ...d, vendorName: x })} ed={editable} />
+          <F label="Vendor Name" v={d.vendorName} on={(x) => setD((p: any) => {
+            // Typing a name that no longer matches the LINKED vendor means it is
+            // not that vendor any more — drop the link (vendorId) so KYC / GST can
+            // never resolve to the wrong vendor. Re-pick from the dropdown above to
+            // re-link. (Root cause of a wrong-KYC-on-payment bug: name edited free-
+            // text while the old vendorId silently stayed, driving the wrong KYC.)
+            const linked = (vendorsQ.data ?? []).find((v: any) => v.id === p.vendorId);
+            const stillMatches = linked && (linked.name || '').trim().toLowerCase() === (x || '').trim().toLowerCase();
+            return { ...p, vendorName: x, vendorId: stillMatches ? p.vendorId : null };
+          })} ed={editable} />
           <F label="Vendor GSTIN" v={d.vendorGstin} on={(x) => setD({ ...d, vendorGstin: x })} ed={editable} />
           <FT label="Vendor Address" v={d.vendorAddress} on={(x) => setD({ ...d, vendorAddress: x })} ed={editable} />
           <div className="grid gap-3">
@@ -471,7 +480,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
                 <input type="date" className="input" disabled={!dateEditable}
                   value={isoDay(d.promisedDeliveryDate)}
                   onChange={(e) => setD({ ...d, promisedDeliveryDate: e.target.value || null })} />
-                <div className="mt-1 text-[11px] text-slate-400">Printed on the {isWO ? 'WO' : 'PO'}. Drives on-time delivery reporting.</div>
+                <div className="mt-1 text-[11px] text-slate-400">Printed on the {d.type}. Drives on-time delivery reporting.</div>
               </div>
               <div>
                 <label className="label">Required By <span className="text-slate-400">(site need date)</span></label>
@@ -922,7 +931,7 @@ function TermPIs({ projectId, docId, doc, editable, onUploaded }: { projectId: s
                 {editable && (
                   <label className="cursor-pointer text-xs font-medium text-navy hover:underline">
                     {busy === t.key ? 'Uploading…' : pi?.piPdfUrl ? 'Replace' : '⬆ Upload PI'}
-                    <input type="file" className="hidden" accept="application/pdf,image/*" disabled={busy === t.key} onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(t.key, f); e.currentTarget.value = ''; }} />
+                    <input type="file" className="hidden" accept="application/pdf,.pdf" disabled={busy === t.key} onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(t.key, f); e.currentTarget.value = ''; }} />
                   </label>
                 )}
               </div>

@@ -87,7 +87,11 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
   const needle = q.toLowerCase().trim();
   const vendors = all
     .filter((v) => showInactive || v.isActive !== false)
-    .filter((v) => !needle || [v.name, v.legalName, v.tradeName, v.gstin, ...(v.boqCategories ?? [])].filter(Boolean).some((s: string) => s.toLowerCase().includes(needle)));
+    .filter((v) => !needle || [v.name, v.legalName, v.tradeName, v.gstin, ...(v.boqCategories ?? [])].filter(Boolean).some((s: string) => s.toLowerCase().includes(needle)))
+    // A→Z by name (case-insensitive); names are trimmed first so a stray leading
+    // space in the stored name doesn't push those vendors to the top.
+    .slice()
+    .sort((a, b) => (a.name || '').trim().localeCompare((b.name || '').trim(), undefined, { sensitivity: 'base', numeric: true }));
 
   return (
     <div className="space-y-3">
@@ -149,6 +153,19 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
               <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
                 <span className="text-slate-400">KYC</span> <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
               </div>
+              {/* Which specific documents are still pending (the % badge stays as is):
+                  mandatory ones in red with a *, optional ones in grey. Hidden when
+                  KYC is complete. */}
+              {v.kyc?.items?.some((it: any) => !it.done) && (
+                <div className="mt-1 text-[11px] leading-snug">
+                  <span className="text-slate-400">Pending: </span>
+                  {v.kyc.items.filter((it: any) => !it.done).map((it: any, i: number, arr: any[]) => (
+                    <span key={it.key} className={it.mandatory ? 'font-medium text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
+                      {it.label}{it.mandatory ? '*' : ''}{i < arr.length - 1 ? ', ' : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {(v.boqCategories?.length > 0) && (
                 <div className="mt-2 flex flex-wrap gap-1">
@@ -272,7 +289,7 @@ export function VendorModal({ projectId, vendor, meta, onClose, onDone, initialT
   };
 
   return (
-    <Modal title={isEdit ? `Edit ${vendor.name}` : 'Add Vendor / Contractor'} onClose={onClose} wide>
+    <Modal title={isEdit ? `Edit ${vendor.name}` : 'Add Vendor / Contractor'} onClose={onClose} wide persistent>
       <div className="mb-4 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 text-sm">
         {TABS.map((t) => (
           // KYC + rate chart need a saved vendor id to attach things to.
@@ -557,8 +574,8 @@ function KycPanel({ projectId, vendorId, meta, onExtracted }: {
           </select>
         </div>
         <div className="flex-1">
-          <label className="label">File (PDF or image)</label>
-          <input className="input text-xs" type="file" accept=".pdf,image/*" disabled={up.isPending} onChange={(e) => e.target.files?.[0] && up.mutate(e.target.files[0])} />
+          <label className="label">File (PDF only)</label>
+          <input className="input text-xs" type="file" accept=".pdf,application/pdf" disabled={up.isPending} onChange={(e) => e.target.files?.[0] && up.mutate(e.target.files[0])} />
         </div>
       </div>
       {msg && <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">{msg}</div>}

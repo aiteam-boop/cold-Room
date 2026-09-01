@@ -9,7 +9,7 @@ import { fmtDate, inr } from '../lib/format';
 import ProcurementPipeline from '../components/procurement/ProcurementPipeline';
 
 interface Item {
-  kind: 'PO' | 'WO' | 'GRN';
+  kind: 'PO' | 'WO' | 'TO' | 'GRN';
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string;
   basicAmount?: number | null; finalAmount?: number | null;
@@ -36,8 +36,8 @@ function reminderCountdown(iso: string, now: number): string {
 }
 
 interface ApprovedItem {
-  kind: 'PO' | 'WO' | 'GRN';
-  label?: string; // display label — 'PO' | 'WO' | 'Payment' | 'GRN'
+  kind: 'PO' | 'WO' | 'TO' | 'GRN';
+  label?: string; // display label — 'PO' | 'WO' | 'TO' | 'Payment' | 'GRN'
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string; finalAmount?: number | null;
   approvedAt?: string | null; approvedBy?: string | null;

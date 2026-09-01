@@ -18,7 +18,7 @@ import { api, errMsg } from '../lib/api';
 import { inr } from '../lib/format';
 import { Spinner } from './ui';
 
-type DocType = 'PO' | 'WO' | 'GRN';
+type DocType = 'PO' | 'WO' | 'TO' | 'GRN';
 const DOC_TYPES: DocType[] = ['PO', 'WO', 'GRN'];
 
 interface Rule {

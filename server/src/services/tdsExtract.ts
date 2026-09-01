@@ -169,7 +169,7 @@ const VISION_PROMPT =
   'Copy the text exactly as printed — do not summarise, reformat, or invent values.';
 
 async function groqVision(b64: string, mime: string): Promise<string> {
-  const model = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+  const model = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },

@@ -58,7 +58,7 @@ const VISION_PROMPT =
 // Groq (OpenAI-compatible) with a vision model — the default path, since GROQ_API_KEY
 // is the key this deployment has. GROQ_MODEL is a text model, so vision needs its own.
 async function groqVision(b64: string, mime: string): Promise<string> {
-  const model = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
+  const model = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },

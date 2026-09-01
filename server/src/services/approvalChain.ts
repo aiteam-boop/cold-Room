@@ -13,7 +13,7 @@ import { isAdmin } from '../lib/enums';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
 
-export type DocType = 'PO' | 'WO' | 'GRN' | 'PAYMENT';
+export type DocType = 'PO' | 'WO' | 'TO' | 'GRN' | 'PAYMENT';
 
 // PO/WO map to their own approval type; GRN is GRN; a vendor PAYMENT (FMS) maps
 // to the VENDOR_PAYMENT approver type.
@@ -181,7 +181,7 @@ export async function approvalDocData(docType: DocType, docId: string): Promise<
     poBasic,
   );
   return {
-    label: d.type, docLabelLong: d.type === 'WO' ? 'Work Order' : 'Purchase Order', number: d.docNumber,
+    label: d.type, docLabelLong: d.type === 'WO' ? 'Work Order' : d.type === 'TO' ? 'Transport Order' : 'Purchase Order', number: d.docNumber,
     vendorName: d.vendorName, projectName: d.project?.name ?? null,
     totalLabel: 'Final Amount', totalAmount: Math.round(d.finalAmount),
     rows: d.lineItems.map((l) => ({ description: l.description, qty: l.qty, unitPrice: l.unitPrice, total: l.totalPrice })),
