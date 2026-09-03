@@ -24,6 +24,7 @@ model User {
   role         String           @default("USER")
   active       Boolean          @default(true)
   employeeCode String?          // company employee ID/code — lets external systems match a person
+  mLevel       String?          // management level (e.g. M1, M2) — auto-filled into the Travel module when this user is the traveller
   whatsapp     String?          // optional, for parity with IMS (no alerting yet)
   // IMS-style per-user grants (admin-controlled). JSON, parsed in permissions.ts.
   pageAccess   String?          // { [pageKey]: { view: bool, edit: bool } }
@@ -1282,6 +1283,9 @@ model ApprovalStep {
   // When the current pending approver was last auto-reminded. Drives the 24-hour
   // reminder cadence so no one is nudged more than once per window.
   lastRemindedAt DateTime?
+  // Travel only: this step's approver also BOOKS & UPLOADS the ticket — their
+  // Approval Form shows a "Upload ticket" field. Copied from ApprovalChainConfig.
+  uploadsTicket Boolean   @default(false)
 
   @@index([docType, docId])
 }
@@ -1310,6 +1314,9 @@ model ApprovalChainConfig {
   approverRole String?
   order        Int      @default(1)
   isActive     Boolean  @default(true)
+  // Travel Request only: this approver also BOOKS & UPLOADS the ticket (their
+  // Approval Form gets a "Upload ticket" field). Ignored for other doc types.
+  canUploadTicket Boolean @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -1538,4 +1545,138 @@ model PettyCashConfig {
   updatedAt      DateTime  @updatedAt
 
   @@index([projectId])
+}
+
+// ── Travel Planning & Booking ────────────────────────────────────────────────
+// A single travel record carries the whole journey: request → approval (via the
+// generic ApprovalStep chain, docType 'TRAVEL') → booking → travel → expense
+// upload → expense approval (docType 'TRAVEL_EXPENSE') → employee notified + PDF.
+// The traveller is either a CRMCTS User (mLevel auto-filled) or a free-typed
+// "Other / Non-Crystal Group" person.
+model TravelPlan {
+  id            String    @id @default(cuid()) @map("_id")
+  planNumber    String    @unique              // TRV-YYYYMMDD-#### (per-day sequence)
+  // Which form created it: 'PLAN' = New-plan sanctioning (own Plan history),
+  // 'REQUEST' = Ticket request (own Request history). Nullable (no default) so a
+  // LEGACY record reads as null and can be inferred — a @default would make every
+  // old doc read as 'REQUEST' and hide New-plans.
+  kind          String?
+
+  // Traveller — a CRMCTS User, or a free-typed non-Crystal person.
+  employeeId    String?                         // User.id when a Crystal employee; null for Other
+  employeeName  String                          // display name (always set)
+  employeeEmail String?                         // for the "expense approved" notification
+  employeePhone String?
+  mLevel        String?                         // snapshot of the traveller's M-Level at creation
+  isNonCrystal  Boolean   @default(false)       // true = Other / Non-Crystal Group
+  // Richer traveller details (Ticket-Request style form)
+  designation   String?
+  department    String?
+  grade         String?                         // Grade · Class entitlement
+  aadharNo      String?
+  aadharFileUrl String?
+
+  // Itinerary / ticket
+  travelMode    String?                         // Flight | Train | Bus | Taxi
+  // The requester's "which ticket to book" reference (uploaded on the request) —
+  // shown to the approver so the booker knows what to book.
+  requestedTicketUrl String?
+  ticketPrice   Float?
+  ticketFileUrl String?                         // the booked ticket document (uploaded by the ticket-booker approver)
+  paymentProofUrl String?                       // proof of how the ticket was paid for
+  // How the ticket-booker paid for the ticket — filled by them on the Approval Form.
+  paymentMethod String?                         // Card | Online
+  paymentBank   String?                         // e.g. SBI, HDFC, ICICI
+  ticketBookedBy String?                        // who booked/uploaded (approver name)
+  remarks       String?
+
+  // Who raised it (self or "through me")
+  appliedById   String?
+  appliedByName String?
+  senderName    String?                         // who dispatched the traveller (New-plan sanctioning form)
+  // A New-plan (sanctioning) is raised AGAINST a Ticket Request — this is that
+  // request's Trip ID, keeping the plan and its request connected.
+  linkedTripNumber String?
+
+  // Trip
+  fromDate      DateTime
+  toDate        DateTime
+  days          Int       @default(1)
+  origin        String?
+  destination   String?
+  purpose       String?
+  projectId     String?                         // optional project tag
+  jobOrders     String?                         // JSON array of { jo, cn, loc, cont, ms }
+
+  // Planned/sanctioned budget + advances (JSON, mirrors the Spares-AI shape)
+  planCosts     String?                         // JSON { travel, food, hotel, other }
+  planDayCosts  String?                         // JSON [{ day,date,travel,food,hotel,other,jobOrderNos,remark }]
+  advances      String?                         // JSON [{ amount, fileUrl }]
+  totalAdvance  Float     @default(0)
+
+  // Booking (tracked after approval)
+  bookingStatus String    @default("NOT_BOOKED") // NOT_BOOKED | BOOKED | CANCELLED
+  bookingMode   String?                          // Flight | Train | Bus | Taxi | Hotel | Mixed
+  bookingRef    String?                          // PNR / ticket / hotel ref
+  bookingNotes  String?
+  bookedById    String?
+  bookedByName  String?
+  bookedAt      DateTime?
+
+  // Lifecycle — the request approval is held in ApprovalStep (docType 'TRAVEL').
+  status        String    @default("DRAFT")      // DRAFT | SUBMITTED | APPROVED | ON_HOLD | BOOKED | TRAVELLED | CLOSED
+  // Request-approval sign-off mirror (for quick status + the public token page).
+  releaseToken   String?
+  releaseStatus  String?                          // APPROVED | ON_HOLD (null = pending)
+  releaseAt      DateTime?
+  releaseBy      String?
+  releaseRemark  String?
+
+  // Append-only JSON: trail = [{ at, action, byName, remark }]
+  trail         String?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  expenses      TravelExpense[]
+
+  @@index([status])
+  @@index([employeeId])
+  @@index([projectId])
+}
+
+// The actual spend the traveller uploads after the trip. Goes through a 2-stage
+// approval (docType 'TRAVEL_EXPENSE'): stage 1 = the ops checkers (any-of),
+// stage 2 = the final approver; on final approval the employee is notified and a
+// PDF (approval + time + comments) is generated.
+model TravelExpense {
+  id             String    @id @default(cuid()) @map("_id")
+  expenseNumber  String    @unique              // EXP-YYYYMMDD-####
+  planId         String
+  plan           TravelPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  // Line items: JSON [{ date, details, paymentMode('Online'|'Cash'), amount, supportingUrl }]
+  // Supporting doc is optional when paymentMode = Cash.
+  items          String?
+  totalAmount    Float     @default(0)
+
+  // Lifecycle — sign-off held in ApprovalStep (docType 'TRAVEL_EXPENSE').
+  status         String    @default("DRAFT")     // DRAFT | SUBMITTED | APPROVED | ON_HOLD
+  releaseToken   String?
+  releaseStatus  String?                          // APPROVED | ON_HOLD (null = pending)
+  releaseAt      DateTime?
+  releaseBy      String?
+  releaseRemark  String?
+
+  submittedById  String?
+  submittedByName String?
+  submittedAt    DateTime?
+
+  trail          String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([planId])
+  @@index([status])
 }

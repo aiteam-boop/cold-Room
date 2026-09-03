@@ -15,6 +15,8 @@ export const PAGE_KEYS = [
   'fms',
   // Petty Cash — site-manager cash float + expense ledger (finance).
   'pettycash',
+  // Travel Planning & Booking.
+  'travel',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -39,6 +41,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   reports: 'Reports & Registers',
   fms: 'FMS — Vendor Payments',
   pettycash: 'Petty Cash',
+  travel: 'Travel Planning',
 };
 
 export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget'] as const;
@@ -66,10 +69,10 @@ export type SectionPerms = Partial<Record<SectionKey, boolean>>;
 
 // Approver registry (mirror of server/lib/permissions.ts).
 export const APPROVAL_ROLES = ['Site Manager', 'Ops Head', 'Director', 'Finance'] as const;
-export const APPROVAL_TYPES = ['PO', 'WO', 'TO', 'GRN', 'VENDOR_PAYMENT'] as const;
+export const APPROVAL_TYPES = ['PO', 'WO', 'TO', 'GRN', 'VENDOR_PAYMENT', 'TRAVEL', 'TRAVEL_EXPENSE'] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number] | 'ALL';
 export const APPROVAL_TYPE_LABELS: Record<string, string> = {
-  PO: 'Purchase Orders', WO: 'Work Orders', TO: 'Transport Orders', GRN: 'GRNs', VENDOR_PAYMENT: 'Vendor Payments', ALL: 'All',
+  PO: 'Purchase Orders', WO: 'Work Orders', TO: 'Transport Orders', GRN: 'GRNs', VENDOR_PAYMENT: 'Vendor Payments', TRAVEL: 'Travel Request', TRAVEL_EXPENSE: 'Travel Expense', ALL: 'All',
 };
 export interface ApproverProfile {
   canApprove: boolean;

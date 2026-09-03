@@ -44,6 +44,8 @@ import publicApiRoutes from './routes/publicApi';
 import publicGrnRoutes from './routes/publicGrn';
 import paymentApprovalRoutes from './routes/paymentApproval';
 import invoiceApprovalRoutes from './routes/invoiceApproval';
+import travelRoutes from './routes/travel';
+import travelApprovalRoutes from './routes/travelApproval';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -74,6 +76,7 @@ app.use('/api/branding', brandingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/petty-cash', pettyCashRoutes);
+app.use('/api/travel', travelRoutes);
 app.use('/api/approval-chains', approvalChainRoutes);
 app.use('/api/machine-models', machineModelRoutes);
 app.use('/api/sync-sheets', syncRoutes);
@@ -85,6 +88,8 @@ app.use('/api/public/grn', publicGrnRoutes);
 // Public no-login payment-release "Approval Form" linked from the FMS sheet.
 app.use('/api/public/payment-approval', paymentApprovalRoutes);
 app.use('/api/public/invoice-approval', invoiceApprovalRoutes);
+// Public no-login Travel "Approval Form" (request + expense), linked from the email.
+app.use('/api/public/travel-approval', travelApprovalRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);

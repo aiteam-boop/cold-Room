@@ -32,13 +32,14 @@ const projectsInput = z
 
 function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
-  employeeCode?: string | null;
+  employeeCode?: string | null; mLevel?: string | null;
   whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
   lastLoginAt?: Date | null; lastLogoutAt?: Date | null;
 }) {
   return {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
     employeeCode: u.employeeCode ?? '',
+    mLevel: u.mLevel ?? '',
     whatsapp: u.whatsapp ?? '',
     pageAccess: parseGrants(u.pageAccess),
     sectionPerms: parseSections(u.sectionPerms),
@@ -51,7 +52,7 @@ function publicUser(u: {
 
 // Column selection shared by the user endpoints (keeps `approver` included).
 const USER_SELECT = {
-  id: true, name: true, email: true, role: true, active: true, employeeCode: true,
+  id: true, name: true, email: true, role: true, active: true, employeeCode: true, mLevel: true,
   whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
   lastLoginAt: true, lastLogoutAt: true,
 } as const;
@@ -271,6 +272,7 @@ const createSchema = z.object({
   role: z.enum(ROLES).default('USER'),
   active: z.boolean().default(true),
   employeeCode: z.string().trim().optional(),
+  mLevel: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -296,6 +298,7 @@ router.post(
         role: body.role,
         active: body.active,
         employeeCode: body.employeeCode?.trim() || null,
+        mLevel: body.mLevel?.trim() || null,
         whatsapp: body.whatsapp || null,
         pageAccess: JSON.stringify(cleanGrants(body.pageAccess)),
         sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)),
@@ -316,6 +319,7 @@ const updateSchema = z.object({
   role: z.enum(ROLES).optional(),
   active: z.boolean().optional(),
   employeeCode: z.string().trim().optional(),
+  mLevel: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -344,6 +348,7 @@ router.patch(
         ...(body.role !== undefined && { role: body.role }),
         ...(body.active !== undefined && { active: body.active }),
         ...(body.employeeCode !== undefined && { employeeCode: body.employeeCode?.trim() || null }),
+        ...(body.mLevel !== undefined && { mLevel: body.mLevel?.trim() || null }),
         ...(body.whatsapp !== undefined && { whatsapp: body.whatsapp || null }),
         ...(body.pageAccess !== undefined && { pageAccess: JSON.stringify(cleanGrants(body.pageAccess)) }),
         ...(body.sectionPerms !== undefined && { sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)) }),

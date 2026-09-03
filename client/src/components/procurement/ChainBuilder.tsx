@@ -42,7 +42,7 @@ interface Resolved {
 }
 
 export default function ChainBuilder({ docType, projectId, amount, onConfirm, onClose, busy }: {
-  docType: 'PO' | 'WO' | 'TO' | 'GRN' | 'PAYMENT';
+  docType: 'PO' | 'WO' | 'TO' | 'GRN' | 'PAYMENT' | 'TRAVEL' | 'TRAVEL_EXPENSE';
   projectId: string;
   /** The document's value — what the matrix bands are compared against. */
   amount: number;

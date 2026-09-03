@@ -20,7 +20,7 @@ const requireAdmin = asyncHandler(async (req, _res, next) => {
   next();
 });
 
-const DOC_TYPES = ['PO', 'WO', 'TO', 'GRN', 'PAYMENT'] as const;
+const DOC_TYPES = ['PO', 'WO', 'TO', 'GRN', 'PAYMENT', 'TRAVEL', 'TRAVEL_EXPENSE'] as const;
 
 const ruleSchema = z.object({
   projectId: z.string().nullable().optional(),

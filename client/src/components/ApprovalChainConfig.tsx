@@ -16,10 +16,12 @@ const DOC_TYPES = [
   { key: 'TO', label: 'TO' },
   { key: 'GRN', label: 'GRN' },
   { key: 'PAYMENT', label: 'Vendor Payments' },
+  { key: 'TRAVEL', label: 'Travel Request' },
+  { key: 'TRAVEL_EXPENSE', label: 'Travel Expense' },
 ] as const;
 
 interface Candidate { id: string; name: string; email: string; approvalRole: string | null; level: number }
-type Row = { approverId: string; approverName: string; approverRole?: string | null; isActive: boolean; order: number };
+type Row = { approverId: string; approverName: string; approverRole?: string | null; isActive: boolean; order: number; canUploadTicket?: boolean };
 
 export default function ApprovalChainConfig() {
   const qc = useQueryClient();
@@ -39,11 +41,11 @@ export default function ApprovalChainConfig() {
   });
 
   useEffect(() => {
-    if (chainQ.data) setRows(chainQ.data.chain.map((c) => ({ approverId: c.approverId, approverName: c.approverName, approverRole: c.approverRole, isActive: c.isActive, order: c.order })));
+    if (chainQ.data) setRows(chainQ.data.chain.map((c) => ({ approverId: c.approverId, approverName: c.approverName, approverRole: c.approverRole, isActive: c.isActive, order: c.order, canUploadTicket: (c as any).canUploadTicket })));
   }, [chainQ.data]);
 
   const save = useMutation({
-    mutationFn: (next: Row[]) => api.put('/approval-chains', { docType, approvers: next.map((r) => ({ approverId: r.approverId, order: r.order, isActive: r.isActive })) }),
+    mutationFn: (next: Row[]) => api.put('/approval-chains', { docType, approvers: next.map((r) => ({ approverId: r.approverId, order: r.order, isActive: r.isActive, canUploadTicket: !!r.canUploadTicket })) }),
     onSuccess: () => { setMsg(`Saved — every future ${docType} routes through this chain automatically.`); qc.invalidateQueries({ queryKey: ['approval-chain', docType] }); },
     onError: (e) => setMsg(errMsg(e)),
   });
@@ -68,6 +70,7 @@ export default function ApprovalChainConfig() {
   };
   const removeApprover = (approverId: string) => commit(rows.filter((r) => r.approverId !== approverId));
   const toggleActive = (approverId: string, on: boolean) => commit(rows.map((r) => (r.approverId === approverId ? { ...r, isActive: on } : r)));
+  const toggleUpload = (approverId: string, on: boolean) => commit(rows.map((r) => (r.approverId === approverId ? { ...r, canUploadTicket: on } : r)));
   const moveStep = (order: number, dir: -1 | 1) => {
     const ords = steps.map((s) => s.order);
     const pos = ords.indexOf(order);
@@ -125,6 +128,11 @@ export default function ApprovalChainConfig() {
                 <li key={r.approverId} className={`flex items-center justify-between px-3 py-2 text-sm ${r.isActive ? '' : 'opacity-50'}`}>
                   <span>{r.approverName}{r.approverRole && <span className="ml-1 text-xs text-slate-400">· {r.approverRole}</span>}</span>
                   <span className="flex items-center gap-3">
+                    {docType === 'TRAVEL' && (
+                      <label className="flex items-center gap-1 text-xs text-blue-600" title="This approver books & uploads the ticket on their Approval Form; it's saved against the trip.">
+                        <input type="checkbox" checked={!!r.canUploadTicket} onChange={(e) => toggleUpload(r.approverId, e.target.checked)} /> 🎫 Uploads ticket
+                      </label>
+                    )}
                     <label className="flex items-center gap-1 text-xs text-slate-500"><input type="checkbox" checked={r.isActive} onChange={(e) => toggleActive(r.approverId, e.target.checked)} /> Active</label>
                     <button className="text-xs text-red-500 hover:underline" onClick={() => confirm(`Remove ${r.approverName} from the ${docType} chain?`) && removeApprover(r.approverId)}>Remove</button>
                   </span>
