@@ -247,6 +247,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
       milestoneId: g.milestoneId ?? null, milestoneKey: g.milestoneKey ?? null, milestoneName: g.milestoneName ?? null,
       piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, paymentDueDate: g.paymentDueDate?.slice?.(0, 10) || null, piValue: g.piValue != null && g.piValue !== '' ? Number(g.piValue) : null,
       amountToPay: g.amountToPay != null && g.amountToPay !== '' ? Number(g.amountToPay) : null,
+      ledgerHead: g.ledgerHead ?? null,
       lineItems: g.lineItems.map((l: any) => ({ id: l.id, receiptQty: Number(l.receiptQty), defectQty: Number(l.defectQty || 0), remarks: l.remarks })),
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.grn,
@@ -782,6 +783,12 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
               {milestones.filter((m) => m.percentage).map((m) => `${m.name} ${m.percentage}%`).join(' · ') || '—'}
             </div>
           )}
+
+          {/* Ledger Head — a free-text remark the raiser types; it flows to the FMS
+              sheet (its own column) and the payment approval email / form. */}
+          <F label="Ledger Head (remark)">
+            <input className="input" disabled={!editable} value={g.ledgerHead ?? ''} placeholder="e.g. Blast & Freezer (BOQ 1.1A) — note for accounts / approver" onChange={(e) => setG({ ...g, ledgerHead: e.target.value })} />
+          </F>
 
           {/* Attachments — the PI drives the payment; the tax invoice lives in its
               own card above; the PO this GRN is against is one click away. */}

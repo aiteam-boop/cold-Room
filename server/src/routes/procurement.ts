@@ -130,7 +130,7 @@ function serializeDoc(d: any) {
     payTriggers: parseJson(d.payTriggers, {}),
     // User-added item columns + each line's values for them.
     customColumns: parseJson(d.customColumns, []),
-    ...(Array.isArray(d.lineItems) ? { lineItems: d.lineItems.map((l: any) => ({ ...l, customValues: parseJson(l.customValues, {}) })) } : {}),
+    ...(Array.isArray(d.lineItems) ? { lineItems: d.lineItems.map((l: any) => ({ ...l, customValues: parseJson(l.customValues, {}), boqItemNames: parseJson(l.boqItemNames, [] as string[]) })) } : {}),
     overrides: parseJson(d.overrides, {}),
     amendments: parseJson(d.amendments, []),
     // The persisted "compare against" BOQ items on the Budget vs Actual panel (§5).
@@ -375,6 +375,9 @@ const lineSchema = z.object({
   boqItemId: z.string().nullable().optional(),
   // BOQ head (heading/category) this line rolls up under — internal only (D2).
   boqHead: z.string().trim().max(120).nullable().optional(),
+  // Multiple BOQ item names (internal PDF display) + a per-line remark.
+  boqItemNames: z.array(z.string()).optional().nullable(),
+  lineRemark: z.string().max(2000).optional().nullable(),
 });
 // Accept null on optional string fields — the client sends null for the
 // address field that doesn't apply (siteAddress on a PO, shipTo on a WO).
@@ -455,7 +458,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, boqHead: li.boqHead ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, boqHead: li.boqHead ?? null, boqItemNames: li.boqItemNames != null ? JSON.stringify(li.boqItemNames) : null, lineRemark: li.lineRemark ?? null, sortOrder: order++ } });
     }
     totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt, gstPct: l.gstPct })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
@@ -750,8 +753,17 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
       .sort((a, b) => a.order - b.order)
       .map((s) => ({ name: s.approverName, role: s.approverRole, at: s.actedAt, remarks: s.remarks }));
   }
-  // Attach the linked BOQ item's description as boqItemName (internal copy only).
-  const lineItems = doc.lineItems.map(({ boqItem, ...l }: any) => ({ ...l, boqItemName: showBoqInternal ? (boqItem?.description ?? null) : null }));
+  // Attach the linked BOQ item's description as boqItemName + the multi-select
+  // boqItemNames + the per-line remark (all INTERNAL copy only, never the vendor PDF).
+  const lineItems = doc.lineItems.map(({ boqItem, ...l }: any) => {
+    const names = showBoqInternal ? ((parseJson(l.boqItemNames, []) as string[]).filter(Boolean)) : [];
+    return {
+      ...l,
+      boqItemName: showBoqInternal ? (boqItem?.description ?? null) : null,
+      boqItemNames: names.length ? names : (showBoqInternal && boqItem?.description ? [boqItem.description] : []),
+      lineRemark: showBoqInternal ? (l.lineRemark ?? null) : null,
+    };
+  });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${pdfFileName(doc.docNumber, doc.vendorName, doc.project?.name, internal ? 'Internal' : withApprovals ? 'Approved' : undefined)}"`);
   renderProcurementPdf({ ...doc, lineItems, approvals, termsSections: normalizeTermsSections(parseJson(doc.termsSections, [])) } as any, res, { internal: showBoqInternal, internalMarker: internal && internalMarker });
@@ -1147,6 +1159,7 @@ const grnUpdate = z.object({
   milestoneId: z.string().nullable().optional(), milestoneKey: z.string().nullable().optional(), milestoneName: z.string().nullable().optional(),
   piNumber: z.string().nullable().optional(), piDate: z.string().nullable().optional(), paymentDueDate: z.string().nullable().optional(), piValue: z.coerce.number().nullable().optional(),
   amountToPay: z.coerce.number().nullable().optional(),
+  ledgerHead: z.string().nullable().optional(),
   lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
   // Required to amend an APPROVED GRN — the reason for the post-approval change.
   amendmentRemark: z.string().trim().max(2000).optional(),
@@ -1188,6 +1201,7 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
       ...(b.milestoneId !== undefined && { milestoneId: b.milestoneId }), ...(b.milestoneKey !== undefined && { milestoneKey: b.milestoneKey }), ...(b.milestoneName !== undefined && { milestoneName: b.milestoneName }),
       ...(b.piNumber !== undefined && { piNumber: b.piNumber }), ...(b.piDate !== undefined && { piDate: b.piDate ? new Date(b.piDate) : null }), ...(b.paymentDueDate !== undefined && { paymentDueDate: b.paymentDueDate ? new Date(b.paymentDueDate) : null }), ...(b.piValue !== undefined && { piValue: b.piValue }),
       ...(b.amountToPay !== undefined && { amountToPay: b.amountToPay }),
+      ...(b.ledgerHead !== undefined && { ledgerHead: b.ledgerHead }),
       ...(amendments !== undefined && { amendments }),
     },
     include: { lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } } },
@@ -1744,6 +1758,8 @@ router.post('/goods-receipts/:grId/assign', requireProjectMember, requireEdit('g
     try {
       await sendEmail({
         to: siteEngineerEmail,
+        // Copy the auditor on the GRN-assignment link, same as approval emails.
+        cc: approvalCcEmail(),
         subject: `Goods Receipt to fill — ${gr.grnNumber} (against ${gr.doc?.docNumber || 'PO'})`,
         html: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
           <p>Hi,</p>

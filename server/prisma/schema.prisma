@@ -455,6 +455,12 @@ model ProcurementLineItem {
   // isn't known. Null = legacy line issued before head-mapping existed (fixed via
   // the Head Mapping view, D3).
   boqHead     String?
+  // Multiple BOQ items for the internal PDF (display only) — JSON array of names.
+  // `boqItemId` above stays the single cost-linkage (the first selected). Never on
+  // the vendor PDF.
+  boqItemNames String?
+  // Per-line remark shown on the internal PDF, on its own line under the BOQ items.
+  lineRemark  String?
 
   grnLines    GRNLineItem[]
 
@@ -549,6 +555,9 @@ model GRN {
   // The amount to release for this milestone (editable; may be partial). Balance
   // is derived = piValue − advance already paid on the PO − amountToPay.
   amountToPay   Float?
+  // Free-text "Ledger Head" — a payment remark the raiser types. Flows to the FMS
+  // sheet (its own column) and the payment approval email / form.
+  ledgerHead    String?
 
   // ── Payment lifecycle (GRN/Payment PRD v3 §6) ──
   // Runs alongside `status` (goods/approval state), NOT on it. Ladder:
@@ -1631,6 +1640,32 @@ model TravelPlan {
   releaseAt      DateTime?
   releaseBy      String?
   releaseRemark  String?
+
+  // ── Tech entry (day-wise ACTUAL spend, filed after the trip is Closed) ──────
+  // JSON [{ day,date,bus,auto,food,hotel,other,misc,notes }] — what it actually cost.
+  actualDayCosts   String?
+  techEntryStatus  String?      // NOT_FILED | SUBMITTED | APPROVED | REJECTED (null = not filed)
+  techEntryNotes   String?
+  techEntrySubmittedAt DateTime?
+  // Manager review of the tech entry (single-stage summary): the final approved
+  // per-category amounts + who signed off + comment.
+  techApproved     String?      // JSON { travel, food, hotel, other, misc }
+  techApprovedBy   String?
+  techApprovedAt   DateTime?
+  techApproveComment String?
+  // Two-stage day-wise review (Reviewer → Final). Each stage: JSON
+  // { status, by, at, comment, days:[{day,travel,food,hotel,other,misc,remark}] }.
+  techStage1       String?
+  techStage2       String?
+  // Accounts finalisation (after final approval): invoice/indent/GL/tax/payment.
+  accountsData     String?      // JSON { glCode, jobType, indentNo, issueNoteNo, poLink, invoiceNo, invoiceAmount, costCenter, gstPct, gstAmt, tdsPct, tdsAmt, paymentMode, bankRef, paymentDate, notes }
+  accountsFinalized Boolean     @default(false)
+  accountsFinalizedBy String?
+  accountsFinalizedAt DateTime?
+  // JSON [{ day, category, fileUrl }] — bill / proof per day-cell.
+  techAttachments  String?
+  // JSON [{ jo, fileUrl }] — JO closure proof.
+  joClosureProofs  String?
 
   // Append-only JSON: trail = [{ at, action, byName, remark }]
   trail         String?

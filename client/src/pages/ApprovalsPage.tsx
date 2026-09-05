@@ -14,6 +14,8 @@ interface Item {
   number: string; vendorName?: string;
   basicAmount?: number | null; finalAmount?: number | null;
   submittedAt: string; myRole?: string | null; pendingWith?: string | null; pendingWithRole?: string | null; legacy?: boolean;
+  // Raised by the signed-in user (not an approver on it) → shown read-only, no action buttons.
+  raisedByMe?: boolean;
   invoiceNumber?: string | null; invoicePdfUrl?: string | null;
   // Per-term Proforma Invoices uploaded on the PO/WO — the approver can open them
   // straight from the queue.
@@ -40,7 +42,7 @@ interface ApprovedItem {
   label?: string; // display label — 'PO' | 'WO' | 'TO' | 'Payment' | 'GRN'
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string; finalAmount?: number | null;
-  approvedAt?: string | null; approvedBy?: string | null;
+  approvedAt?: string | null; approvedBy?: string | null; raisedByMe?: boolean;
   pis?: { term: string; piNumber: string | null; piUrl: string }[];
   // Physical goods receipts raised against this PO/WO (for the GRN action + popup).
   goodsReceipts?: { id: string; grnNumber: string; status: string; receivedDate?: string | null }[];
@@ -133,7 +135,7 @@ export default function ApprovalsPage() {
       <div>
         <h1 className="text-2xl font-bold text-navy">My Approvals</h1>
         <p className="text-sm text-slate-500">
-          {isAdmin ? 'Every document currently awaiting approval, across all projects.' : 'Documents awaiting your approval. Approve, or put on hold with a note, directly here.'}
+          {isAdmin ? 'Every document currently awaiting approval, across all projects.' : 'Documents awaiting your approval, plus the ones you raised (read-only). Approve or put on hold directly here.'}
         </p>
       </div>
 
@@ -172,6 +174,7 @@ export default function ApprovalsPage() {
                       <td className="py-2 pr-2">
                         <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                         {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
+                        {d.raisedByMe && <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span>}
                         {/* Who this document is currently waiting on (current pending approver). */}
                         {d.pendingWith && <div className="text-xs text-amber-600">⏳ Pending with: <span className="font-medium">{d.pendingWith}</span>{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
                         {!d.pendingWith && d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
@@ -197,8 +200,13 @@ export default function ApprovalsPage() {
                             <button key={i} onClick={() => viewPis(d.pis!, i)} title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</button>
                           ))}
                           <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewDoc(d)}>📄 View {d.kind}</button>
-                          <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
-                          <button className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'hold')}>⏸ On Hold</button>
+                          {/* Raised by me → read-only (I'm the raiser, not the approver): no Approve / On-Hold. */}
+                          {d.raisedByMe ? (
+                            <span className="self-center text-xs text-slate-400">⏳ Awaiting approval</span>
+                          ) : (<>
+                            <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
+                            <button className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'hold')}>⏸ On Hold</button>
+                          </>)}
                         </div>
                       </td>
                     </tr>
@@ -250,6 +258,7 @@ export default function ApprovalsPage() {
                     <td className="py-2 pr-2">
                       <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} onClick={(e) => e.stopPropagation()} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
                       <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
+                      {d.raisedByMe && <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span>}
                       {(d.sheetPayments?.length ?? 0) > 0 && (
                         <span className="ml-1 inline-block max-w-[230px] truncate align-middle rounded bg-green-50 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments!.map((s) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>💠 UTR: {d.sheetPayments!.map((s) => s.utr).join(', ')}</span>
                       )}

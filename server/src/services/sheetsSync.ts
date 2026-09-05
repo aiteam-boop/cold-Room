@@ -310,6 +310,11 @@ const FMS_EXTRA_HEADERS = [
   // Vendor email + the no-login "Approval Form" link (management marks the payment
   // Approved / On Hold) and the resulting Approval Status.
   'Vendor Email', 'Approval Status', 'Approval Form',
+  // Ledger Head — free-text remark the raiser types on the Payment. Placed AFTER
+  // "Approval Form" and BEFORE "VR No." (column AF), matching the column inserted
+  // in the sheet. VR No. moves to AG and stays PRESERVED, so the accounts UTR/VR
+  // array-formulas (which reference the VR column) are unaffected.
+  'Ledger Head',
   // VR No. — like "UTR / Payment Ref", the accounts team fills this with their own
   // fetch-from-sheet formula, so our export PRESERVES this column (never overwrites).
   'VR No.',
@@ -536,8 +541,13 @@ export async function exportPaymentAccountFms(): Promise<number> {
       const remark = m ? (m.remarks || '') as string : '';
       const term = m ? `${m.name}${m.percentage ? ` ${m.percentage}%` : ''}` : '';
       const amountToPay = g?.amountToPay ?? (m ? Number(m.inrAmount) || '' : '');
+      // A Timestamp = when THIS payment term was TRIGGERED (raised for payment), so
+      // each row carries its own trigger date — the FMS team uses it as a unique
+      // per-row key. Falls back to the payment date, then the PO/WO creation date,
+      // so the cell is never blank (e.g. a term paid via the sheet with no trigger).
+      const triggerTs = m?.actualTriggerDate || m?.paymentDate || d.createdAt;
       return [
-        istSerial(d.createdAt),                                 // A Timestamp (real datetime value → date-picker; DATE_TIME format below)
+        istSerial(triggerTs),                                   // A Timestamp (this term's trigger date; real datetime → date-picker; DATE_TIME format below)
         creator?.email ?? '',                                    // B Email address
         creator?.name ?? '',                                     // C User
         (g?.invoiceNumber ?? '') as string,                      // D Invoice Number
@@ -574,6 +584,8 @@ export async function exportPaymentAccountFms(): Promise<number> {
         g ? (g.releaseStatus === 'APPROVED' ? 'Approved' : g.releaseStatus === 'ON_HOLD' ? 'On Hold' : g.releaseStatus === 'RESUBMITTED' ? 'Re-submitted' : 'Pending') : '',
         // AE Approval Form — the no-login link management opens to Approve / On-Hold.
         g?.releaseToken ? `${base}/api/public/payment-approval/${g.releaseToken}` : '',
+        (g?.ledgerHead ?? '') as string,                         // AF Ledger Head — free-text payment remark (from the Payment/GRN record)
+        // AG VR No. — PRESERVED (accounts array-formula); omitted here like the other preserved columns.
       ];
     };
 
@@ -586,14 +598,24 @@ export async function exportPaymentAccountFms(): Promise<number> {
       if (m) shownMs.add(String(m._id));
       rows.push(makeRow(g, m));
     }
-    // 2) one row per milestone not already shown by a GRN above — INCLUDING
-    // still-PENDING ones, so Accounts sees the whole payment schedule and knows
-    // exactly what is paid and what is still due for this PO.
+    // 2) one row per milestone not already shown by a GRN above — but ONLY terms
+    // that were actually RAISED (TRIGGERED) or PAID. A still-PENDING term hasn't
+    // been raised for payment yet, so it must NOT appear in the accounts sheet —
+    // the sheet reflects real payment activity, not the future schedule. (Same
+    // rule for PO and WO — this loop doesn't branch on type.)
     for (const m of ms) {
       if (shownMs.has(String(m._id))) continue;
+      if (m.status !== 'TRIGGERED' && m.status !== 'PAID') continue; // skip PENDING (not yet raised)
       rows.push(makeRow(null, m));
     }
   }
+
+  // Order the sheet by each row's Timestamp (column A = this term's trigger date),
+  // oldest → newest, so the sheet reads chronologically to anyone who opens it — the
+  // visible order now matches the visible date. Reordering is SAFE: the Accounts
+  // UTR / VR columns are array formulas keyed off Milestone Ref (col AB), so they
+  // follow each row's data, not its physical position.
+  rows.sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0));
 
   // Write every column EXCEPT "UTR / Payment Ref" and "VR No.": the accounts team
   // keeps their own fetch-from-sheet formulas there, and our overwrite must not wipe

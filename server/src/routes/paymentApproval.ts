@@ -83,6 +83,7 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
         ${row('Amount to Pay', gr.amountToPay != null ? rs(gr.amountToPay) : '—')}
         ${row('PO Total', doc?.finalAmount != null ? rs(doc.finalAmount) : '—')}
         ${row('Payment Status', esc(gr.paymentStatus ?? '—'))}
+        ${gr.ledgerHead ? row('Ledger Head', esc(gr.ledgerHead)) : ''}
         ${row('Documents', `${link('PO', poPdf)} &nbsp; ${link('PI', piUrl)} &nbsp; ${link('Payment / GRN', grnPdf)} &nbsp; ${link(`KYC (${kycCount})`, kycUrl)}`)}
         ${(gr.releaseStatus === 'APPROVED' || gr.releaseStatus === 'ON_HOLD') ? row('Current Decision', `${statusBadge(gr.releaseStatus)}${gr.releaseBy ? ` · by ${esc(gr.releaseBy)}` : ''}${gr.releaseAt ? ` · ${dmy(gr.releaseAt)}` : ''}`) : ''}
       </table>

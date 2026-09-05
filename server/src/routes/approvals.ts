@@ -249,6 +249,27 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
     for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) });
   }
 
+  // Whoever opens the Approvals page also sees the documents THEY raised that are
+  // still pending — READ-ONLY (they are the raiser, not the approver), so they can
+  // track status without opening each project. De-duped against items already shown
+  // (e.g. a doc awaiting this same user's approval, or admin's all-pending list),
+  // and marked `raisedByMe` so the UI shows no Approve / On-Hold buttons on them.
+  {
+    const shown = new Set<string>(items.map((i) => i.docId));
+    const notIn = [...shown];
+    const [myDocs, myGrns] = await Promise.all([
+      prisma.procurementDoc.findMany({ where: { createdById: me.id, status: 'PENDING_APPROVAL', id: { notIn } }, include: { project: { select: { name: true } } } }),
+      prisma.gRN.findMany({ where: { raisedById: me.id, status: 'OPEN', id: { notIn } }, include: { project: { select: { name: true } } } }),
+    ]);
+    // Current pending approver per doc → shown as "pending with X".
+    const rIds = [...myDocs.map((d) => d.id), ...myGrns.map((g) => g.id)];
+    const pendSteps = rIds.length ? await prisma.approvalStep.findMany({ where: { docId: { in: rIds }, status: 'PENDING' }, orderBy: { order: 'asc' } }) : [];
+    const pendBy = new Map<string, { name: string | null; role: string | null }>();
+    for (const s of pendSteps) if (!pendBy.has(s.docId)) pendBy.set(s.docId, { name: s.approverName, role: s.approverRole });
+    for (const d of myDocs) { const p = pendBy.get(d.id); items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, raisedByMe: true, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis) }); }
+    for (const g of myGrns) { const p = pendBy.get(g.id); items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, raisedByMe: true, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) }); }
+  }
+
   res.json({ items: maskFinancials(items, req.account), remindersOn: remindersEnabled() });
 }));
 
@@ -264,8 +285,10 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
     const mySteps = await prisma.approvalStep.findMany({ where: { approverId: me.id, status: 'APPROVED' }, select: { docId: true, docType: true } });
     const poIds = mySteps.filter((s) => s.docType !== 'GRN').map((s) => s.docId);
     const grnIds = mySteps.filter((s) => s.docType === 'GRN').map((s) => s.docId);
-    docWhere = { status: 'APPROVED', id: { in: poIds } };
-    grnWhere = { status: 'APPROVED', id: { in: grnIds } };
+    // A non-admin sees the approved docs THEY approved OR the ones THEY raised, so
+    // the raiser can track their own submissions here too (read-only history).
+    docWhere = { status: 'APPROVED', OR: [{ id: { in: poIds } }, { createdById: me.id }] };
+    grnWhere = { status: 'APPROVED', OR: [{ id: { in: grnIds } }, { raisedById: me.id }] };
   }
   const [docs, grns] = await Promise.all([
     prisma.procurementDoc.findMany({ where: docWhere, orderBy: { approvedAt: 'desc' }, take: 100, include: { project: { select: { name: true } } } }),
@@ -292,8 +315,8 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const items = [
     // `label` is what the UI shows (PO/WO, or "Payment" for a PAY-### record); `kind`
     // stays PO/WO/GRN so the PDF path + pipeline logic keep working.
-    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
-    ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, goodsReceipts: [] })),
+    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, raisedByMe: d.createdById === me.id, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
+    ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, raisedByMe: g.raisedById === me.id, goodsReceipts: [] })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 
   res.json({ items: maskFinancials(items, req.account) });

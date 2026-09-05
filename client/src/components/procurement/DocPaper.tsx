@@ -130,6 +130,7 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
   // "Head then many items" (D2): assign one head to several lines at once. Touches
   // ONLY boqHead; `onlyEmpty` leaves lines that already have a head untouched.
   const [bulkHead, setBulkHead] = useState('');
+  const [boqMenu, setBoqMenu] = useState<number | null>(null); // which line's BOQ-item multi-picker is open
   const applyHeadToLines = (head: string, onlyEmpty: boolean) => {
     if (!head) return;
     setD({ ...d, lineItems: d.lineItems.map((l: any) => (l.isLeadTime || (onlyEmpty && l.boqHead) ? l : { ...l, boqHead: head })) });
@@ -144,6 +145,21 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
     setLine(i, { boqItemId, uom: b.unit ?? null, ...(!d.lineItems?.[i]?.boqHead && b.category ? { boqHead: b.category } : {}) });
   };
   const boqItemName = (l: any) => (l.boqItem?.description ?? boqItems.find((x: any) => x.id === l.boqItemId)?.description ?? '').split('\n')[0];
+  // Multi-select BOQ items (display for the internal PDF). `boqItemNames` holds the
+  // full list; `boqItemId` stays the FIRST selected (unchanged cost-view linkage).
+  const boqName1 = (b: any) => (b.description || '').split('\n')[0];
+  const selectedBoqNames = (l: any): string[] => (Array.isArray(l.boqItemNames) && l.boqItemNames.length ? l.boqItemNames : (boqItemName(l) ? [boqItemName(l)] : []));
+  const toggleBoqItem = (i: number, item: any) => {
+    const l = d.lineItems[i];
+    const names = selectedBoqNames(l);
+    const name = boqName1(item);
+    const has = names.includes(name);
+    const nextNames = has ? names.filter((n) => n !== name) : [...names, name];
+    const patch: any = { boqItemNames: nextNames };
+    if (!has && !l.boqItemId) { patch.boqItemId = item.id; patch.uom = item.unit ?? l.uom; if (!l.boqHead && item.category) patch.boqHead = item.category; }
+    if (has && l.boqItemId === item.id) { const firstRemaining = itemsForLine(l).find((b: any) => nextNames.includes(boqName1(b))); patch.boqItemId = firstRemaining?.id ?? null; }
+    setLine(i, patch);
+  };
   // "Head then item" (D2): a line with a head lists only that head's items (+ the
   // linked one, kept visible). No head → all items.
   const itemsForLine = (l: any) => {
@@ -324,15 +340,28 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
                 {/* BOQ Item + head — INTERNAL: shown here for convenience but NEVER
                     printed on the vendor PO PDF (the PDF is generated server-side without them). */}
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-amber-50/60 px-1 py-0.5 text-[10px] text-slate-500 print:hidden">
-                  <span className="flex min-w-0 items-center gap-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-1">
                     <span className="whitespace-nowrap font-medium text-amber-700">BOQ Item</span>
                     {editable ? (
-                      <select className="min-w-0 rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px]" value={l.boqItemId || ''} onChange={(e) => selectBoqItem(i, e.target.value)}>
-                        <option value="">Other (no specific BOQ item)</option>
-                        {itemsForLine(l).map((b: any) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 50)}</option>)}
-                      </select>
+                      <span className="relative inline-flex flex-wrap items-center gap-1">
+                        {selectedBoqNames(l).map((n: string) => (
+                          <span key={n} className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-1 text-[10px] text-slate-600" title={n}>{n.slice(0, 40)}<button type="button" className="text-slate-400 hover:text-rose-500" onClick={() => { const item = itemsForLine(l).find((b: any) => boqName1(b) === n); if (item) toggleBoqItem(i, item); else setLine(i, { boqItemNames: selectedBoqNames(l).filter((x: string) => x !== n) }); }}>✕</button></span>
+                        ))}
+                        <button type="button" className="rounded border border-dashed border-slate-300 px-1 text-[10px] text-slate-500 hover:bg-white" onClick={() => setBoqMenu(boqMenu === i ? null : i)}>+ Add</button>
+                        {boqMenu === i && (
+                          <>
+                            <div className="fixed inset-0 z-10" onClick={() => setBoqMenu(null)} />
+                            <div className="absolute left-0 top-full z-20 mt-1 max-h-56 w-72 overflow-auto rounded border border-slate-200 bg-white p-1 shadow-lg">
+                              {itemsForLine(l).map((b: any) => { const on = selectedBoqNames(l).includes(boqName1(b)); return (
+                                <button key={b.id} type="button" onClick={() => toggleBoqItem(i, b)} className={`flex w-full items-start gap-1 rounded px-1 py-0.5 text-left text-[10px] hover:bg-slate-50 ${on ? 'font-medium text-navy' : 'text-slate-600'}`}><span>{on ? '☑' : '☐'}</span><span>{b.srNo ? `${b.srNo}. ` : ''}{(b.description || '').slice(0, 60)}</span></button>
+                              ); })}
+                              {itemsForLine(l).length === 0 && <div className="px-1 py-1 text-[10px] text-slate-400">No BOQ items for this head.</div>}
+                            </div>
+                          </>
+                        )}
+                      </span>
                     ) : (
-                      <span className="text-slate-600">{boqItemName(l) || 'Other'}</span>
+                      <span className="text-slate-600">{selectedBoqNames(l).join(', ') || 'Other'}</span>
                     )}
                   </span>
                   <span className="flex min-w-0 items-center gap-1">
@@ -348,6 +377,12 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
                     )}
                   </span>
                   <span className="whitespace-nowrap text-slate-400">(internal — not on PDF)</span>
+                </div>
+                {/* Per-line remark — shown on the internal PDF, on its own line. */}
+                <div className="mt-1 print:hidden">
+                  {editable ? (
+                    <input className="w-full rounded border border-slate-200 bg-amber-50/40 px-1 py-0.5 text-[10px] text-slate-600" placeholder="Remark for this line (internal — shown on the internal PDF)" value={l.lineRemark || ''} onChange={(e) => setLine(i, { lineRemark: e.target.value || null })} />
+                  ) : (l.lineRemark ? <div className="text-[10px] text-slate-500">📝 {l.lineRemark}</div> : null)}
                 </div>
               </td>
               {customCols.map((c) => (

@@ -28,6 +28,13 @@ function serializePlan(p: any) {
     planCosts: parseJson(p.planCosts, { travel: 0, food: 0, hotel: 0, other: 0 }),
     planDayCosts: parseJson(p.planDayCosts, [] as any[]),
     advances: parseJson(p.advances, [] as any[]),
+    actualDayCosts: parseJson(p.actualDayCosts, [] as any[]),
+    techAttachments: parseJson(p.techAttachments, [] as any[]),
+    joClosureProofs: parseJson(p.joClosureProofs, [] as any[]),
+    techApproved: parseJson(p.techApproved, null as any),
+    techStage1: parseJson(p.techStage1, null as any),
+    techStage2: parseJson(p.techStage2, null as any),
+    accountsData: parseJson(p.accountsData, null as any),
     trail: parseJson(p.trail, [] as any[]),
     expenses: Array.isArray(p.expenses) ? p.expenses.map(serializeExpense) : undefined,
   };
@@ -232,6 +239,97 @@ router.patch('/:id/booking', requireEdit('travel'), asyncHandler(async (req, res
     bookedAt: b.bookingStatus === 'BOOKED' ? new Date() : cur.bookedAt,
     trail: withTrail(cur, `Booking ${b.bookingStatus}`, u.name, b.bookingRef),
   } });
+  res.json({ plan: serializePlan(plan) });
+}));
+
+// ── Tech entry — day-wise ACTUAL spend filed after the trip is Closed ────────
+const techDay = z.object({ day: z.coerce.number().default(1), date: z.string().optional().nullable(), bus: z.coerce.number().default(0), auto: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0), notes: z.string().optional().nullable() });
+const techBody = z.object({ actualDayCosts: z.array(techDay).default([]), notes: z.string().optional().nullable(), attachments: z.array(z.any()).optional(), joClosureProofs: z.array(z.any()).optional(), submit: z.boolean().optional() });
+router.post('/:id/tech-entry', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const b = techBody.parse(req.body);
+  const u = req.user!;
+  const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!cur) throw notFound('Travel plan not found');
+  const data: any = {
+    actualDayCosts: JSON.stringify(b.actualDayCosts),
+    techEntryNotes: b.notes ?? null,
+    techEntryStatus: b.submit ? 'SUBMITTED' : (cur.techEntryStatus || 'NOT_FILED'),
+  };
+  if (b.attachments !== undefined) data.techAttachments = JSON.stringify(b.attachments);
+  if (b.joClosureProofs !== undefined) data.joClosureProofs = JSON.stringify(b.joClosureProofs);
+  if (b.submit) { data.techEntrySubmittedAt = new Date(); data.trail = withTrail(cur, 'Expenses submitted', u.name); }
+  const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
+  await audit({ userId: u.sub, action: b.submit ? 'TRAVEL_TECH_SUBMIT' : 'TRAVEL_TECH_SAVE', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
+  res.json({ plan: serializePlan(plan) });
+}));
+
+// ── Approvals — manager review of a submitted tech entry ─────────────────────
+const decideBody = z.object({
+  status: z.enum(['APPROVED', 'REJECTED']),
+  approved: z.object({ travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0) }).optional(),
+  comment: z.string().optional().nullable(),
+});
+router.post('/:id/tech-decide', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const b = decideBody.parse(req.body);
+  const u = req.user!;
+  const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!cur) throw notFound('Travel plan not found');
+  if (cur.techEntryStatus !== 'SUBMITTED') throw badRequest('Only a submitted expense can be reviewed.');
+  const data: any = {
+    techEntryStatus: b.status,
+    techApproveComment: b.comment ?? null,
+    techApprovedBy: u.name,
+    techApprovedAt: new Date(),
+    trail: withTrail(cur, b.status === 'APPROVED' ? 'Expenses approved' : 'Expenses rejected', u.name, b.comment),
+  };
+  if (b.status === 'APPROVED') data.techApproved = JSON.stringify(b.approved ?? {});
+  const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
+  await audit({ userId: u.sub, action: b.status === 'APPROVED' ? 'TRAVEL_TECH_APPROVE' : 'TRAVEL_TECH_REJECT', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
+  res.json({ plan: serializePlan(plan) });
+}));
+
+// ── Two-stage day-wise review (Reviewer → Final) ─────────────────────────────
+const stageDay = z.object({ day: z.coerce.number().default(1), travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0), remark: z.string().optional().nullable() });
+const stageCats = z.object({ travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0) });
+const stageBody = z.object({ stage: z.union([z.literal(1), z.literal(2)]), status: z.enum(['APPROVED', 'REJECTED']), days: z.array(stageDay).default([]), totals: stageCats.optional(), comment: z.string().optional().nullable() });
+router.post('/:id/tech-stage-decide', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const b = stageBody.parse(req.body);
+  const u = req.user!;
+  const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!cur) throw notFound('Travel plan not found');
+  if (cur.techEntryStatus !== 'SUBMITTED') throw badRequest('Only a submitted expense can be reviewed.');
+  const s1 = parseJson<any>(cur.techStage1, null);
+  if (b.stage === 2 && (!s1 || s1.status !== 'APPROVED')) throw badRequest('Stage 1 (Reviewer) must approve before the final decision.');
+  const catTotals = (days: any[]) => days.reduce((a, d) => ({ travel: a.travel + (+d.travel || 0), food: a.food + (+d.food || 0), hotel: a.hotel + (+d.hotel || 0), other: a.other + (+d.other || 0), misc: a.misc + (+d.misc || 0) }), { travel: 0, food: 0, hotel: 0, other: 0, misc: 0 });
+  // The per-category override the reviewer typed wins; else sum the grid cells.
+  const totals = b.totals ?? catTotals(b.days);
+  const stageObj = { status: b.status, by: u.name, at: new Date().toISOString(), comment: b.comment ?? null, days: b.days, totals };
+  const data: any = { trail: withTrail(cur, `Expenses ${b.status === 'APPROVED' ? 'approved' : 'rejected'} (stage ${b.stage})`, u.name, b.comment) };
+  if (b.stage === 1) data.techStage1 = JSON.stringify(stageObj);
+  else data.techStage2 = JSON.stringify(stageObj);
+  if (b.status === 'REJECTED') { data.techEntryStatus = 'REJECTED'; data.techApproveComment = b.comment ?? null; data.techApprovedBy = u.name; data.techApprovedAt = new Date(); }
+  else if (b.stage === 2) { // final approval
+    data.techEntryStatus = 'APPROVED'; data.techApproved = JSON.stringify(totals); data.techApprovedBy = u.name; data.techApprovedAt = new Date();
+  }
+  const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
+  await audit({ userId: u.sub, action: `TRAVEL_TECH_STAGE${b.stage}_${b.status}`, entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
+  res.json({ plan: serializePlan(plan) });
+}));
+
+// ── Accounts — finalise an approved trip (invoice + indent + payment) ────────
+const accountsBody = z.object({ data: z.record(z.any()).optional(), finalize: z.boolean().optional(), unfinalize: z.boolean().optional() });
+router.post('/:id/tech-accounts', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const b = accountsBody.parse(req.body);
+  const u = req.user!;
+  const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!cur) throw notFound('Travel plan not found');
+  if (cur.techEntryStatus !== 'APPROVED') throw badRequest('Only an approved expense can be finalised in Accounts.');
+  const data: any = {};
+  if (b.data !== undefined) data.accountsData = JSON.stringify(b.data);
+  if (b.finalize) { data.accountsFinalized = true; data.accountsFinalizedBy = u.name; data.accountsFinalizedAt = new Date(); data.trail = withTrail(cur, 'Accounts finalised (marked processed)', u.name); }
+  if (b.unfinalize) { data.accountsFinalized = false; data.trail = withTrail(cur, 'Accounts re-opened', u.name); }
+  const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
+  await audit({ userId: u.sub, action: b.finalize ? 'TRAVEL_ACCOUNTS_FINALISE' : 'TRAVEL_ACCOUNTS_SAVE', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
   res.json({ plan: serializePlan(plan) });
 }));
 

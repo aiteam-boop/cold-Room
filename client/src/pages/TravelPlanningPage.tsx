@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode, type ChangeEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, downloadFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -39,10 +39,57 @@ async function uploadAadhar(file: File): Promise<{ fileUrl: string; aadhaar: str
   return (await api.post('/travel/upload-aadhar', fd)).data;
 }
 
+// Readable original filename from an /uploads/<ts>-<rand>-<name> url.
+const fileNameFromUrl = (u?: string) => (u ? decodeURIComponent((u.split('/').pop() || '').replace(/^\d+-\d+-/, '')) : '');
+
+// Small inline "attach a bill" paperclip: upload → 📎¹ → click opens a popover with
+// the file (open ↗ / remove ✕), like the reference.
+function CellAttach({ url, title, onUpload, onClear }: { url?: string; title: string; onUpload: (url: string) => void; onClear?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const pick = async (e: ChangeEvent<HTMLInputElement>) => {
+    const input = e.currentTarget; const f = input.files?.[0]; if (!f) return;
+    setBusy(true);
+    try { const u = await uploadFile(f); onUpload(u); }
+    catch (err) { alert('Attach failed: ' + errMsg(err)); }
+    finally { setBusy(false); try { input.value = ''; } catch { /* ignore */ } }
+  };
+  if (busy) return <span className="shrink-0 text-xs text-amber-500" title="Uploading…">⏳</span>;
+  if (url) {
+    return (
+      <span className="relative inline-flex shrink-0 items-center leading-none">
+        <button type="button" className="inline-flex items-center gap-0.5 hover:opacity-80" onClick={() => setMenu((v) => !v)} title="View attachment"><span className="text-sm text-blue-600">📎</span><span className="text-sm font-bold text-blue-700">1</span></button>
+        {menu && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setMenu(false)} />
+            <div className="absolute left-0 top-full z-20 mt-1 w-60 rounded-lg border border-slate-200 bg-white p-2 text-left shadow-lg">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{title}</div>
+              <div className="mt-1 flex items-center gap-2">
+                <a href={url} target="_blank" rel="noreferrer" className="flex-1 truncate text-xs font-medium text-navy hover:underline" title={fileNameFromUrl(url)}>↗ {fileNameFromUrl(url) || 'View file'}</a>
+                {onClear && <button type="button" className="rounded px-1 text-xs text-rose-500 hover:bg-rose-50 hover:text-rose-700" title="Remove" onClick={() => { onClear(); setMenu(false); }}>✕</button>}
+              </div>
+              <label className="mt-1 block cursor-pointer text-[11px] text-slate-500 hover:text-navy">
+                ↻ Replace file
+                <input type="file" className="hidden" accept="image/*,.pdf" onChange={(e) => { setMenu(false); pick(e); }} />
+              </label>
+            </div>
+          </>
+        )}
+      </span>
+    );
+  }
+  return (
+    <label className="shrink-0 cursor-pointer text-xs leading-none" title={title}>
+      <span className="text-slate-400 hover:text-navy">📎</span>
+      <input type="file" className="hidden" accept="image/*,.pdf" onChange={pick} />
+    </label>
+  );
+}
+
 export default function TravelPlanningPage() {
   const { canEdit } = useAuth();
   const canManage = canEdit('travel');
-  const [tab, setTab] = useState<'plan' | 'planhist' | 'ticket'>('planhist');
+  const [tab, setTab] = useState<'plan' | 'planhist' | 'ticket' | 'tech' | 'approvals' | 'accounts'>('planhist');
   const tabCls = (t: string) => `rounded-lg px-4 py-1.5 font-medium ${tab === t ? 'bg-navy text-white' : 'text-slate-600'}`;
 
   return (
@@ -55,9 +102,15 @@ export default function TravelPlanningPage() {
         {canManage && <button onClick={() => setTab('plan')} className={tabCls('plan')}>+ New plan</button>}
         <button onClick={() => setTab('planhist')} className={tabCls('planhist')}>Plan history</button>
         <button onClick={() => setTab('ticket')} className={tabCls('ticket')}>✈ Ticket request</button>
+        <button onClick={() => setTab('tech')} className={tabCls('tech')}>📝 Tech entry</button>
+        <button onClick={() => setTab('approvals')} className={tabCls('approvals')}>✅ Approvals</button>
+        <button onClick={() => setTab('accounts')} className={tabCls('accounts')}>💳 Accounts</button>
       </div>
       {tab === 'plan' && canManage ? <NewSanctionTab onDone={() => setTab('planhist')} />
         : tab === 'ticket' ? <TicketRequestTab canManage={canManage} />
+        : tab === 'tech' ? <TechEntryTab canManage={canManage} />
+        : tab === 'approvals' ? <ApprovalsTab canManage={canManage} />
+        : tab === 'accounts' ? <AccountsTab canManage={canManage} />
         : <HistoryTab kind="PLAN" canManage={canManage} />}
     </div>
   );
@@ -75,6 +128,519 @@ function TicketRequestTab({ canManage }: { canManage: boolean }) {
         <button onClick={() => setSub('hist')} className={subCls('hist')}>Request history</button>
       </div>
       {sub === 'new' && canManage ? <NewPlanTab onDone={() => setSub('hist')} /> : <HistoryTab kind="REQUEST" canManage={canManage} />}
+    </div>
+  );
+}
+
+// ── Tech entry: file day-wise ACTUAL spend for CLOSED plans (Spare-AI style) ──
+type ActualDay = { day: number; date: string; bus: number; auto: number; food: number; hotel: number; other: number; misc: number; notes: string };
+const CATS = ['bus', 'auto', 'food', 'hotel', 'other', 'misc'] as const;
+const CAT_LABEL: Record<string, string> = { bus: 'Bus', auto: 'Auto', food: 'Food', hotel: 'Hotel', other: 'Other', misc: 'Misc' };
+function buildActuals(days: number, fromDate: string, prev: ActualDay[]): ActualDay[] {
+  const out: ActualDay[] = [];
+  for (let i = 0; i < days; i++) {
+    const p = prev[i];
+    const d = new Date(fromDate); d.setDate(d.getDate() + i);
+    out.push(p ? { ...p, day: i + 1, date: p.date || d.toISOString().slice(0, 10) } : { day: i + 1, date: d.toISOString().slice(0, 10), bus: 0, auto: 0, food: 0, hotel: 0, other: 0, misc: 0, notes: '' });
+  }
+  return out;
+}
+const dayActualTotal = (d: ActualDay) => (+d.bus || 0) + (+d.auto || 0) + (+d.food || 0) + (+d.hotel || 0) + (+d.other || 0) + (+d.misc || 0);
+const techLabel = (s?: string) => (s === 'SUBMITTED' ? 'Submitted' : s === 'APPROVED' ? 'Approved' : 'Expenses not filed');
+const techPill = (s?: string) => (s === 'SUBMITTED' ? 'bg-blue-100 text-blue-700' : s === 'APPROVED' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700');
+
+function TechEntryTab({ canManage }: { canManage: boolean }) {
+  const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
+  const [open, setOpen] = useState<string | null>(null);
+  const [tech, setTech] = useState('');
+  const [month, setMonth] = useState('');
+  const [year, setYear] = useState('');
+  if (plansQ.isLoading) return <Spinner label="Loading closed trips…" />;
+  const allClosed = (plansQ.data ?? []).filter((p) => p.status === 'CLOSED');
+  const closed = allClosed.filter((p) => {
+    if (tech && p.employeeName !== tech) return false;
+    const d = new Date(p.fromDate);
+    if (month !== '' && d.getMonth() !== Number(month)) return false;
+    if (year !== '' && d.getFullYear() !== Number(year)) return false;
+    return true;
+  });
+  const techs = [...new Set(allClosed.map((p) => p.employeeName))];
+  const years = [...new Set(allClosed.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean))].sort((a, b) => b - a);
+  const filed = closed.filter((p) => p.techEntryStatus === 'SUBMITTED' || p.techEntryStatus === 'APPROVED').length;
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
+        <div><div className="font-semibold text-navy">Closed trips — file your expenses</div><div className="text-xs text-slate-400">What did each finished trip actually cost, and where is it in review?</div></div>
+        <div className="flex items-center gap-2 text-xs">
+          <select className="input h-8 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
+          <select className="input h-8 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          <select className="input h-8 text-xs" value={tech} onChange={(e) => setTech(e.target.value)}><option value="">All technicians</option>{techs.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+          <span className="text-slate-400">{closed.length} trip(s) · {filed} submission(s)</span>
+        </div>
+      </div>
+      {closed.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">No closed trips yet. Close a plan from <span className="font-medium">Plan history</span> to file its expenses.</div> : (
+        <div className="divide-y divide-slate-100">
+          {closed.map((p) => (
+            <div key={p.id}>
+              <button className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50" onClick={() => setOpen(open === p.id ? null : p.id)}>
+                <span className="text-slate-400">{open === p.id ? '▾' : '▸'}</span>
+                <span className="font-medium text-navy">{p.planNumber}</span>
+                <span className="text-sm text-slate-500">· {p.employeeName} · {fmtDate(p.fromDate)} → {fmtDate(p.toDate)} <span className="text-xs">({p.days}d · {(p.jobOrders ?? []).filter((j: any) => j.jo).length} projects)</span></span>
+                <span className="badge ml-1 bg-slate-200 text-slate-600">CLOSED</span>
+                <span className="ml-auto flex items-center gap-2 text-xs">
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700">Adv {inr(p.totalAdvance || 0)}</span>
+                  {(() => { const spent = (p.actualDayCosts || []).reduce((s: number, d: any) => s + dayActualTotal(d), 0); return spent > 0 ? <span className="font-medium text-slate-700">Spent {inr(spent)}</span> : null; })()}
+                  <span className={`badge ${techPill(p.techEntryStatus)}`}>{techLabel(p.techEntryStatus)}</span>
+                </span>
+              </button>
+              {open === p.id && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><TechEntryEditor plan={p} canManage={canManage} onDone={() => { setOpen(null); plansQ.refetch(); }} /></div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
+  const readOnly = !canManage || plan.techEntryStatus === 'APPROVED';
+  const pc = plan.planCosts || {};
+  const from = plan.fromDate ? new Date(plan.fromDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const [rows, setRows] = useState<ActualDay[]>(() => plan.actualDayCosts?.length ? plan.actualDayCosts.map((d: any, i: number) => ({ day: i + 1, date: d.date || '', bus: +d.bus || 0, auto: +d.auto || 0, food: +d.food || 0, hotel: +d.hotel || 0, other: +d.other || 0, misc: +d.misc || 0, notes: d.notes || '' })) : buildActuals(plan.days || 1, from, []));
+  const [notes, setNotes] = useState(plan.techEntryNotes || '');
+  const [atts, setAtts] = useState<Record<string, string>>(() => { const m: Record<string, string> = {}; (plan.techAttachments || []).forEach((a: any) => { m[`${a.day}:${a.category}`] = a.fileUrl; }); return m; });
+  const [err, setErr] = useState('');
+  const set = (i: number, patch: Partial<ActualDay>) => setRows(rows.map((d, j) => j === i ? { ...d, ...patch } : d));
+
+  const act = { travel: rows.reduce((s, d) => s + (+d.bus || 0) + (+d.auto || 0), 0), food: rows.reduce((s, d) => s + (+d.food || 0), 0), hotel: rows.reduce((s, d) => s + (+d.hotel || 0), 0), other: rows.reduce((s, d) => s + (+d.other || 0) + (+d.misc || 0), 0) };
+  const actGrand = act.travel + act.food + act.hotel + act.other;
+  const planGrand = (+pc.travel || 0) + (+pc.food || 0) + (+pc.hotel || 0) + (+pc.other || 0);
+  const advReceived = plan.totalAdvance || 0;
+  const balance = advReceived - actGrand;
+  const m0 = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+  const save = useMutation({
+    mutationFn: async (submit: boolean) => {
+      const attachments = Object.entries(atts).filter(([, v]) => v).map(([k, fileUrl]) => { const [day, category] = k.split(':'); return { day: Number(day), category, fileUrl }; });
+      return api.post(`/travel/${plan.id}/tech-entry`, { actualDayCosts: rows, notes, attachments, submit });
+    },
+    onSuccess: onDone,
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  const pvA = (label: string, planV: number, actV: number) => (
+    <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-[10px] uppercase text-slate-400">{label}</div><div className="text-xs text-slate-500">Plan: <span className="font-medium">{m0(planV)}</span></div><div className="text-xs text-slate-500">Act: <span className="font-medium">{m0(actV)}</span></div><div className={`text-xs font-semibold ${actV - planV > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{actV - planV >= 0 ? '+' : ''}{m0(actV - planV)}</div></div>
+  );
+
+  return (
+    <div className="space-y-4">
+      {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+      {/* Plan vs Actual */}
+      <div><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">Plan vs actual</div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{pvA('Travel', +pc.travel || 0, act.travel)}{pvA('Food', +pc.food || 0, act.food)}{pvA('Hotel', +pc.hotel || 0, act.hotel)}{pvA('Other', +pc.other || 0, act.other)}<div className="rounded-lg border border-navy/20 bg-navy/5 p-2.5"><div className="text-[10px] uppercase text-navy/60">Grand</div><div className="text-xs">Plan: <span className="font-medium">{m0(planGrand)}</span></div><div className="text-xs">Act: <span className="font-bold text-navy">{m0(actGrand)}</span></div></div></div>
+      </div>
+
+      {/* Day-wise actual grid */}
+      <fieldset disabled={readOnly}>
+      <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm">
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th>{CATS.map((c) => <th key={c} className="text-right">{CAT_LABEL[c]}</th>)}<th>Notes</th><th className="text-right pr-2">Total</th></tr></thead>
+        <tbody>
+          {rows.map((d, i) => (
+            <tr key={i} className="border-t border-slate-100">
+              <td className="py-1 font-medium text-slate-600">Day {d.day}</td>
+              <td className="text-xs text-slate-500">{d.date}</td>
+              {CATS.map((c) => { const key = `${d.day}:${c}`; return (
+                <td key={c} className="pr-1">
+                  <div className="flex items-center gap-1">
+                    <input type="number" min={0} className="input h-8 w-14 text-right text-xs" value={(d[c] as number) || ''} onChange={(e) => set(i, { [c]: Number(e.target.value) } as any)} placeholder="0" />
+                    <CellAttach url={atts[key]} title={`${CAT_LABEL[c]} · Day ${d.day}`} onUpload={(u) => setAtts((m) => ({ ...m, [key]: u }))} onClear={() => setAtts((m) => { const n = { ...m }; delete n[key]; return n; })} />
+                  </div>
+                </td>
+              ); })}
+              <td className="pr-2"><input className="input h-8 text-xs" value={d.notes} onChange={(e) => set(i, { notes: e.target.value })} placeholder="—" /></td>
+              <td className="pr-2 text-right font-medium">{m0(dayActualTotal(d))}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td colSpan={2} className="py-2">Total</td>{CATS.map((c) => <td key={c} className="text-right">{m0(rows.reduce((s, d) => s + (+d[c] || 0), 0))}</td>)}<td></td><td className="pr-2 text-right">{m0(actGrand)}</td></tr>
+        </tbody>
+      </table></div>
+      <textarea className="input mt-2 min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Trip-level notes (optional)" />
+      </fieldset>
+
+      {/* Advance reconciliation */}
+      <div><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">Advance reconciliation</div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div></div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"><div className="text-xs text-slate-600">Actual spent</div><div className="text-lg font-bold text-slate-700">{m0(actGrand)}</div></div>
+          <div className={`rounded-lg border p-2.5 ${balance < 0 ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}><div className="text-xs text-amber-700">Balance</div><div className="text-lg font-bold text-amber-800">{m0(Math.abs(balance))}</div><div className="text-[10px] text-amber-500">{balance < 0 ? 'reimburse to tech' : 'due back to company'}</div></div>
+          <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-lg font-bold text-slate-700">{techLabel(plan.techEntryStatus)}</div></div>
+        </div>
+        {/* Advance source breakdown (from the trip plan). */}
+        <div className="mt-2 overflow-hidden rounded-lg border border-slate-200">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-[10px] uppercase text-slate-400"><tr><th className="px-3 py-1.5">Advance source</th><th className="px-3 py-1.5 text-right">Amount</th><th className="px-3 py-1.5 text-right">Proof</th></tr></thead>
+            <tbody>
+              {[0, 1, 2, 3, 4].map((i) => { const a = (plan.advances || [])[i] || {}; return (
+                <tr key={i} className="border-t border-slate-100"><td className="px-3 py-1.5 text-slate-600">Advance {i + 1}</td><td className="px-3 py-1.5 text-right font-medium">{m0(+a.amount || 0)}</td><td className="px-3 py-1.5 text-right">{a.fileUrl ? <a href={a.fileUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">View</a> : <span className="text-xs text-slate-300">—</span>}</td></tr>
+              ); })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {!readOnly && (
+        <div className="flex gap-2">
+          <button className="btn-outline" disabled={save.isPending} onClick={() => save.mutate(false)}>Save draft</button>
+          <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✈ {plan.techEntryStatus === 'SUBMITTED' ? 'Resubmit' : 'Submit'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Approvals: manager review of a submitted tech entry ──────────────────────
+const submittedTotals = (rows: any[]) => rows.reduce((a, d) => ({ travel: a.travel + (+d.bus || 0) + (+d.auto || 0), food: a.food + (+d.food || 0), hotel: a.hotel + (+d.hotel || 0), other: a.other + (+d.other || 0), misc: a.misc + (+d.misc || 0) }), { travel: 0, food: 0, hotel: 0, other: 0, misc: 0 });
+const catGrand = (t: any) => (+t.travel || 0) + (+t.food || 0) + (+t.hotel || 0) + (+t.other || 0) + (+t.misc || 0);
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function ApprovalsTab({ canManage }: { canManage: boolean }) {
+  const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
+  const [open, setOpen] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const [month, setMonth] = useState<string>(''); // '' = all
+  const [year, setYear] = useState<string>('');
+  if (plansQ.isLoading) return <Spinner label="Loading…" />;
+  const all = (plansQ.data ?? []).filter((p) => ['SUBMITTED', 'APPROVED', 'REJECTED'].includes(p.techEntryStatus));
+  const years = [...new Set(all.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean))].sort((a, b) => b - a);
+  const rows = all.filter((p) => {
+    if (status && p.techEntryStatus !== status) return false;
+    const d = new Date(p.fromDate);
+    if (month !== '' && d.getMonth() !== Number(month)) return false;
+    if (year !== '' && d.getFullYear() !== Number(year)) return false;
+    return true;
+  });
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
+        <div><div className="font-semibold text-navy">Submitted expenses — awaiting a decision</div><div className="text-xs text-slate-400">What did each technician claim, and who still has to sign it off?</div></div>
+        <div className="flex items-center gap-2 text-xs">
+          <select className="input h-8 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
+          <select className="input h-8 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          <select className="input h-8 text-xs" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option value="SUBMITTED">Awaiting decision</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select>
+          <span className="text-slate-400">{rows.length} entry(s)</span>
+        </div>
+      </div>
+      {rows.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">No submitted expenses. They appear here once a technician submits from <span className="font-medium">Tech entry</span>.</div> : (
+        <div className="divide-y divide-slate-100">
+          {rows.map((p) => { const sub = submittedTotals(p.actualDayCosts || []); const appr = p.techApproved ? catGrand(p.techApproved) : null;
+            return (
+            <div key={p.id}>
+              <button className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left hover:bg-slate-50" onClick={() => setOpen(open === p.id ? null : p.id)}>
+                <span className="text-slate-400">{open === p.id ? '▾' : '▸'}</span>
+                <span className="font-medium text-navy">{p.planNumber}</span>
+                <span className="text-sm text-slate-600">· {p.employeeName}</span>
+                <span className="ml-auto flex items-center gap-3 text-xs">
+                  <span>Submitted <span className="font-semibold">{inr(catGrand(sub))}</span></span>
+                  {appr != null && <span className="text-green-700">Approved <span className="font-semibold">{inr(appr)}</span></span>}
+                  <span className={`badge ${p.techEntryStatus === 'APPROVED' ? 'bg-green-100 text-green-700' : p.techEntryStatus === 'REJECTED' ? 'bg-rose-100 text-rose-600' : 'bg-amber-100 text-amber-700'}`}>{p.techEntryStatus === 'SUBMITTED' ? 'Awaiting decision' : p.techEntryStatus.charAt(0) + p.techEntryStatus.slice(1).toLowerCase()}</span>
+                </span>
+              </button>
+              {open === p.id && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><ApprovalReviewEditor plan={p} canManage={canManage} onDone={() => { setOpen(null); plansQ.refetch(); }} /></div>}
+            </div>
+          ); })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type StageCats = { travel: number; food: number; hotel: number; other: number; misc: number };
+const APPR_CATS = ['travel', 'food', 'hotel', 'other', 'misc'] as const;
+const APPR_LABEL: Record<string, string> = { travel: 'Travel', food: 'Food', hotel: 'Hotel', other: 'Other', misc: 'Misc' };
+const techDayVals = (d: any): StageCats => ({ travel: (+d.bus || 0) + (+d.auto || 0), food: +d.food || 0, hotel: +d.hotel || 0, other: +d.other || 0, misc: +d.misc || 0 });
+const catSum = (days: any[]): StageCats => days.reduce((a: StageCats, d: any) => ({ travel: a.travel + (+d.travel || 0), food: a.food + (+d.food || 0), hotel: a.hotel + (+d.hotel || 0), other: a.other + (+d.other || 0), misc: a.misc + (+d.misc || 0) }), { travel: 0, food: 0, hotel: 0, other: 0, misc: 0 });
+
+function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
+  const rows: any[] = plan.actualDayCosts || [];
+  const planDays: any[] = plan.planDayCosts || [];
+  const s1 = plan.techStage1; const s2 = plan.techStage2;
+  const decided = plan.techEntryStatus === 'APPROVED' || plan.techEntryStatus === 'REJECTED';
+  const stage1Done = !!s1 && s1.status === 'APPROVED';
+  const currentStage: 1 | 2 | null = decided ? null : (stage1Done ? 2 : 1);
+  const readOnly = !canManage || currentStage == null;
+  const m0 = (n: any) => `₹${Math.round(+n || 0).toLocaleString('en-IN')}`;
+  const atts: any[] = plan.techAttachments || [];
+  const [comment, setComment] = useState('');
+  const [verdict, setVerdict] = useState<'APPROVED' | 'REJECTED'>('APPROVED');
+  const [err, setErr] = useState('');
+
+  // The editable stage's per-day amounts. Stage 1 starts from the technician's
+  // submitted figures; the Final stage starts from Stage-1's approved figures.
+  const initDays = useMemo(() => {
+    const base = currentStage === 2 ? (s2?.days ?? s1?.days ?? []) : (s1?.days ?? []);
+    return rows.map((d: any, i: number) => { const t = techDayVals(d); const b = base[i] || {}; return { day: i + 1, travel: b.travel ?? t.travel, food: b.food ?? t.food, hotel: b.hotel ?? t.hotel, other: b.other ?? t.other, misc: b.misc ?? t.misc, remark: b.remark ?? '' }; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [days, setDays] = useState<any[]>(initDays);
+  // Per-category override the reviewer can type (Spare-AI "override per category").
+  // Auto-tracks the grid sum until the reviewer edits it directly.
+  const [override, setOverride] = useState<StageCats>(() => (currentStage === 1 && s1?.totals) || (currentStage === 2 && s2?.totals) || catSum(initDays));
+  const [ovTouched, setOvTouched] = useState(false);
+  const setCell = (i: number, c: string, v: number) => { const nd = days.map((d, j) => j === i ? { ...d, [c]: v } : d); setDays(nd); if (!ovTouched) setOverride(catSum(nd)); };
+  const setRemark = (i: number, v: string) => setDays(days.map((d, j) => j === i ? { ...d, remark: v } : d));
+
+  const advDay = (i: number): StageCats => { const p = planDays[i] || {}; return { travel: +p.travel || 0, food: +p.food || 0, hotel: +p.hotel || 0, other: +p.other || 0, misc: 0 }; };
+  const s1Cell = (i: number, c: string): number | null => stage1Done ? (s1.days?.[i]?.[c] ?? 0) : (currentStage === 1 ? (days[i]?.[c] ?? 0) : null);
+  const s2Cell = (i: number, c: string): number | null => currentStage === 2 ? (days[i]?.[c] ?? 0) : (s2 ? (s2.days?.[i]?.[c] ?? 0) : null);
+
+  const advReceived = plan.totalAdvance || 0;
+  const techSum = catSum(rows.map(techDayVals));
+  const s1Sum = stage1Done ? (s1.totals ?? catSum(s1.days || [])) : (currentStage === 1 ? override : null);
+  const finalSum = currentStage === 2 ? override : (s2 ? (s2.totals ?? catSum(s2.days || [])) : null);
+  const finalGrand = finalSum ? catGrand(finalSum) : (s1Sum ? catGrand(s1Sum) : catGrand(techSum));
+
+  const decide = useMutation({
+    mutationFn: async () => api.post(`/travel/${plan.id}/tech-stage-decide`, { stage: currentStage, status: verdict, days: verdict === 'APPROVED' ? days : [], totals: verdict === 'APPROVED' ? override : undefined, comment }),
+    onSuccess: onDone,
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  const stageLabel = (n: number) => (n === 1 ? 'Reviewer' : 'Final');
+  const chainBadge = (done: boolean, pending: boolean) => (done ? <span className="rounded bg-green-100 px-1.5 text-[10px] text-green-700">Approved</span> : pending ? <span className="rounded bg-amber-100 px-1.5 text-[10px] text-amber-700">Pending</span> : <span className="rounded bg-slate-100 px-1.5 text-[10px] text-slate-500">Waiting</span>);
+
+  const CatCell = ({ i, c }: { i: number; c: string }) => {
+    const adv = advDay(i)[c as keyof StageCats]; const tech = techDayVals(rows[i])[c as keyof StageCats];
+    const s1v = s1Cell(i, c); const s2v = s2Cell(i, c);
+    const editRow = currentStage; // 1 → edit Reviewer row, 2 → edit Final row
+    const inp = (val: number) => <input type="number" min={0} className="w-14 rounded border border-amber-300 bg-amber-50 px-1 text-right text-[10px]" value={val || ''} onChange={(e) => setCell(i, c, Number(e.target.value))} placeholder="0" />;
+    return (
+      <div className="rounded border border-slate-200 bg-white p-1 text-[10px]">
+        <div className="flex justify-between text-slate-400"><span>ADV</span><span>{m0(adv)}</span></div>
+        <div className="flex justify-between text-blue-600"><span>TECH</span><span>{m0(tech)}</span></div>
+        <div className="flex items-center justify-between text-green-600"><span>REV</span><span>{editRow === 1 && !readOnly ? inp(days[i]?.[c] || 0) : (s1v == null ? '—' : m0(s1v))}</span></div>
+        <div className="flex items-center justify-between text-amber-700"><span>FINAL</span><span>{editRow === 2 && !readOnly ? inp(days[i]?.[c] || 0) : (s2v == null ? '—' : m0(s2v))}</span></div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+      <div className="text-xs text-slate-500">Submitted {plan.techEntrySubmittedAt ? fmtDate(plan.techEntrySubmittedAt) : ''} · {plan.days} day(s)</div>
+
+      {/* Advance reconciliation */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div></div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"><div className="text-xs text-slate-600">Actual spent</div><div className="text-lg font-bold text-slate-700">{m0(catGrand(techSum))}</div></div>
+        <div className={`rounded-lg border p-2.5 ${advReceived - finalGrand < 0 ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}><div className="text-xs text-amber-700">Balance</div><div className="text-lg font-bold text-amber-800">{m0(Math.abs(advReceived - finalGrand))}</div><div className="text-[10px] text-amber-500">{advReceived - finalGrand < 0 ? 'owed to tech' : 'due back'}</div></div>
+        <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-base font-bold text-slate-700">{decided ? (plan.techEntryStatus === 'APPROVED' ? 'Approved' : 'Rejected') : stage1Done ? 'Awaiting Final' : 'Open'}</div></div>
+      </div>
+
+      {/* Day-wise 2-stage approval grid */}
+      <div className="rounded-lg border border-slate-200 bg-white p-2">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="text-xs font-semibold text-navy">Day-wise approval · each cell shows Advance / Technician / Reviewer / Final</div>{currentStage && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">You are editing the {stageLabel(currentStage)} row</span>}</div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-sm">
+          <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th>{APPR_CATS.map((c) => <th key={c}>{APPR_LABEL[c]}</th>)}<th>Day total</th></tr></thead>
+          <tbody>
+            {rows.map((d: any, i: number) => (
+              <tr key={i} className="border-t border-slate-100 align-top">
+                <td className="py-1 pr-2">
+                  <div className="font-medium text-slate-600">Day {d.day}</div>
+                  <div className="text-[10px] text-slate-400">{d.date}</div>
+                  {d.notes && <div className="mt-0.5 max-w-[150px] text-[10px] text-slate-400">{d.notes}</div>}
+                  {currentStage && !readOnly && <input className="input mt-1 h-7 text-[10px]" placeholder={`${stageLabel(currentStage)}'s remark for Day ${d.day}…`} value={days[i]?.remark || ''} onChange={(e) => setRemark(i, e.target.value)} />}
+                </td>
+                {APPR_CATS.map((c) => <td key={c} className="pr-1"><CatCell i={i} c={c} /></td>)}
+                <td className="pr-1">{(() => {
+                  const rev = (stage1Done || currentStage === 1) ? APPR_CATS.reduce((s, c) => s + (s1Cell(i, c) ?? 0), 0) : null;
+                  const fin = (currentStage === 2 || !!s2) ? APPR_CATS.reduce((s, c) => s + (s2Cell(i, c) ?? 0), 0) : null;
+                  return (
+                    <div className="rounded border border-slate-200 bg-slate-50 p-1 text-[10px] font-semibold">
+                      <div className="flex justify-between text-slate-400"><span>ADV</span><span>{m0(catGrand(advDay(i)))}</span></div>
+                      <div className="flex justify-between text-blue-600"><span>TECH</span><span>{m0(catGrand(techDayVals(d)))}</span></div>
+                      <div className="flex justify-between text-green-600"><span>REV</span><span>{rev == null ? '—' : m0(rev)}</span></div>
+                      <div className="flex justify-between text-amber-700"><span>FINAL</span><span>{fin == null ? '—' : m0(fin)}</span></div>
+                    </div>
+                  );
+                })()}</td>
+              </tr>
+            ))}
+            <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="py-2">Total</td>{APPR_CATS.map((c) => <td key={c} className="text-[10px]"><div>ADV {m0(rows.reduce((s: number, _d: any, i: number) => s + advDay(i)[c], 0))}</div><div className="text-blue-600">TECH {m0(techSum[c])}</div><div className="text-green-600">REV {s1Sum ? m0(s1Sum[c]) : '—'}</div><div className="text-amber-700">FINAL {finalSum ? m0(finalSum[c]) : '—'}</div></td>)}<td></td></tr>
+          </tbody>
+        </table></div>
+      </div>
+
+      {/* Bills & proofs */}
+      {atts.length > 0 && (
+        <div><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">Bills &amp; proofs ({atts.length}) · click to view</div>
+          <div className="flex flex-wrap gap-2">{atts.map((a, i) => (<a key={i} href={a.fileUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-50" title={fileNameFromUrl(a.fileUrl)}>🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</a>))}</div>
+        </div>
+      )}
+
+      {/* Approval chain */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
+        <span className="font-semibold text-slate-500">Approval chain:</span>
+        <span>1. Reviewer {chainBadge(stage1Done, currentStage === 1)}{stage1Done && s1Sum ? ` ${m0(catGrand(s1Sum))}` : ''}</span>
+        <span className="text-slate-300">→</span>
+        <span>2. Final {chainBadge(plan.techEntryStatus === 'APPROVED', currentStage === 2)}</span>
+        {!decided && <span className="ml-auto font-medium text-amber-600">{stage1Done ? 'Awaiting Final' : 'Awaiting Reviewer'}</span>}
+      </div>
+
+      {/* Stage breakdown + decision */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="overflow-hidden rounded-lg border border-slate-200">
+          <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase text-slate-400">Stage breakdown · per category</div>
+          <table className="w-full text-sm"><thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-3 py-1">Category</th><th className="px-3 py-1 text-right">Submitted</th><th className="px-3 py-1 text-right">Reviewer</th><th className="px-3 py-1 text-right">Final</th></tr></thead>
+            <tbody>{APPR_CATS.map((c) => (<tr key={c} className="border-t border-slate-100"><td className="px-3 py-1 capitalize text-slate-600">{c}</td><td className="px-3 py-1 text-right">{m0(techSum[c])}</td><td className="px-3 py-1 text-right text-green-700">{s1Sum ? m0(s1Sum[c]) : '—'}</td><td className="px-3 py-1 text-right text-amber-700">{finalSum ? m0(finalSum[c]) : '—'}</td></tr>))}
+              <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="px-3 py-1.5">Total</td><td className="px-3 py-1.5 text-right">{m0(catGrand(techSum))}</td><td className="px-3 py-1.5 text-right">{s1Sum ? m0(catGrand(s1Sum)) : '—'}</td><td className="px-3 py-1.5 text-right">{finalSum ? m0(catGrand(finalSum)) : '—'}</td></tr>
+            </tbody></table>
+        </div>
+        <div className={`rounded-lg border p-3 ${readOnly ? 'border-slate-200 bg-slate-50' : 'border-amber-300 bg-amber-50'}`}>
+          <div className="mb-2 text-xs font-semibold text-amber-800">{decided ? 'Approved rate (final)' : `Your ${currentStage ? stageLabel(currentStage) : ''} rate — override per category`}</div>
+          <div className="space-y-1.5 text-sm">{APPR_CATS.map((c) => (
+            <div key={c} className="flex items-center justify-between gap-2">
+              <span className="text-slate-600">{APPR_LABEL[c]}</span>
+              {readOnly
+                ? <span className="font-medium">{m0((finalSum || s1Sum || techSum)[c])}</span>
+                : <input type="number" min={0} className="input h-8 w-28 text-right text-xs" value={override[c] || ''} onChange={(e) => { setOvTouched(true); setOverride({ ...override, [c]: Number(e.target.value) }); }} placeholder="0" />}
+            </div>))}
+            <div className="flex items-center justify-between border-t border-amber-200 pt-1.5 font-bold text-navy"><span>Total</span><span>{m0(readOnly ? catGrand(finalSum || s1Sum || techSum) : catGrand(override))}</span></div>
+          </div>
+          <div className="mt-1 text-[10px] text-amber-600">Submitted: {m0(catGrand(techSum))} — edit the grid cells above or override here; your figure is final.</div>
+        </div>
+      </div>
+
+      {decided ? (
+        <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{plan.techEntryStatus === 'APPROVED' ? '✓ Approved' : '✗ Rejected'}{plan.techApprovedBy ? ` by ${plan.techApprovedBy}` : ''}{plan.techApproveComment ? ` — “${plan.techApproveComment}”` : ''}.</div>
+      ) : !readOnly && (
+        <div className="flex flex-wrap items-center gap-2">
+          <select className="input h-9 w-44 text-sm" value={verdict} onChange={(e) => setVerdict(e.target.value as any)}><option value="APPROVED">Approve → {currentStage === 1 ? 'send to Final' : 'done'}</option><option value="REJECTED">Reject → back to tech</option></select>
+          <input className="input h-9 flex-1" placeholder={verdict === 'REJECTED' ? 'Reason (required)' : 'Comments (optional)'} value={comment} onChange={(e) => setComment(e.target.value)} />
+          <button className="btn-primary" disabled={decide.isPending || (verdict === 'REJECTED' && !comment.trim())} onClick={() => decide.mutate()}>{verdict === 'APPROVED' ? `✓ Approve as ${currentStage ? stageLabel(currentStage) : ''}` : '✗ Reject'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Accounts: finalise an approved trip (invoice + indent + payment) ─────────
+function AccountsTab({ canManage }: { canManage: boolean }) {
+  const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
+  const [open, setOpen] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'pending' | 'finalized' | 'all'>('pending');
+  if (plansQ.isLoading) return <Spinner label="Loading…" />;
+  const approved = (plansQ.data ?? []).filter((p) => p.techEntryStatus === 'APPROVED');
+  const rows = approved.filter((p) => filter === 'all' || (filter === 'finalized' ? p.accountsFinalized : !p.accountsFinalized));
+  const fbtn = (t: string) => `rounded-full px-3 py-0.5 text-xs font-medium ${filter === t ? 'bg-navy text-white' : 'text-slate-500'}`;
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
+        <div><div className="font-semibold text-navy">Approved trips — ready to pay</div><div className="text-xs text-slate-400">What has been signed off, and what still needs an invoice?</div></div>
+        <div className="flex items-center gap-2 text-xs">
+          <div className="flex gap-1 rounded-full bg-slate-100 p-0.5">{(['pending', 'finalized', 'all'] as const).map((t) => <button key={t} className={fbtn(t)} onClick={() => setFilter(t)}>{t}</button>)}</div>
+          <span className="text-slate-400">{rows.length} entry(s)</span>
+        </div>
+      </div>
+      {rows.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">Nothing here. Trips appear once <span className="font-medium">Approvals</span> signs them off.</div> : (
+        <div className="divide-y divide-slate-100">
+          {rows.map((p) => (
+            <div key={p.id}>
+              <button className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50" onClick={() => setOpen(open === p.id ? null : p.id)}>
+                <span className="text-slate-400">{open === p.id ? '▾' : '▸'}</span>
+                <span className="font-medium text-navy">{p.planNumber}</span>
+                <span className="text-sm text-slate-600">· {p.employeeName}</span>
+                {p.accountsFinalized && <span className="badge bg-green-100 text-green-700">✓ Processed</span>}
+                <span className="ml-auto font-semibold text-navy">{inr(p.techApproved ? catGrand(p.techApproved) : 0)}</span>
+              </button>
+              {open === p.id && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><AccountsEditor plan={p} canManage={canManage} onDone={() => { setOpen(null); plansQ.refetch(); }} /></div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ACC_FIELDS: { k: string; label: string; type?: string }[] = [
+  { k: 'glCode', label: 'GL Code' }, { k: 'jobType', label: 'Job Type' }, { k: 'indentNo', label: 'Indent No (Final)' }, { k: 'issueNoteNo', label: 'Issue Note No' },
+  { k: 'poLink', label: 'PO Link' }, { k: 'invoiceNo', label: 'Invoice No' }, { k: 'invoiceAmount', label: 'Invoice Amount (₹)', type: 'number' }, { k: 'costCenter', label: 'Cost Center' },
+  { k: 'gstPct', label: 'GST %', type: 'number' }, { k: 'gstAmt', label: 'GST ₹', type: 'number' }, { k: 'tdsPct', label: 'TDS %', type: 'number' }, { k: 'tdsAmt', label: 'TDS ₹', type: 'number' },
+  { k: 'paymentMode', label: 'Payment Mode' }, { k: 'bankRef', label: 'Bank Account Ref' }, { k: 'paymentDate', label: 'Payment Date', type: 'date' }, { k: 'notes', label: 'Notes' },
+];
+
+function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
+  const finalized = !!plan.accountsFinalized;
+  const readOnly = !canManage || finalized;
+  const m0 = (n: any) => `₹${Math.round(+n || 0).toLocaleString('en-IN')}`;
+  const pc = plan.planCosts || {};
+  const planGrand = (+pc.travel || 0) + (+pc.food || 0) + (+pc.hotel || 0) + (+pc.other || 0);
+  const techGrand = catGrand(submittedTotals(plan.actualDayCosts || []));
+  const revGrand = plan.techStage1 ? catGrand(plan.techStage1.totals ?? {}) : null;
+  const finalGrand = plan.techApproved ? catGrand(plan.techApproved) : 0;
+  const advPaid = plan.totalAdvance || 0;
+  const [form, setForm] = useState<any>(() => ({ invoiceAmount: finalGrand, gstPct: 0, gstAmt: 0, tdsPct: 0, tdsAmt: 0, ...(plan.accountsData || {}) }));
+  const [err, setErr] = useState('');
+  const netPayable = finalGrand + (+form.gstAmt || 0) - (+form.tdsAmt || 0) - advPaid;
+  const atts: any[] = plan.techAttachments || [];
+  const advs: any[] = (plan.advances || []).filter((a: any) => (+a.amount || 0) > 0 || a.fileUrl);
+
+  const save = useMutation({
+    mutationFn: async (finalize: boolean) => api.post(`/travel/${plan.id}/tech-accounts`, { data: form, finalize }),
+    onSuccess: onDone, onError: (e) => setErr(errMsg(e)),
+  });
+  const reopen = useMutation({ mutationFn: async () => api.post(`/travel/${plan.id}/tech-accounts`, { unfinalize: true }), onSuccess: onDone });
+
+  const card = (label: string, val: any, sub: string, cls: string) => (<div className={`rounded-lg border p-2.5 ${cls}`}><div className="text-[11px] text-slate-500">{label}</div><div className="text-lg font-bold">{m0(val)}</div><div className="text-[10px] text-slate-400">{sub}</div></div>);
+
+  return (
+    <div className="space-y-4">
+      {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+      {/* Money trail */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {card('Plan (sanctioned)', planGrand, 'Budget set when planned', 'border-blue-200 bg-blue-50')}
+        {card('Tech entered', techGrand, 'What the technician claimed', 'border-slate-200 bg-slate-50')}
+        {card('Reviewer approved', revGrand ?? 0, 'Stage 1 sign-off', 'border-emerald-200 bg-emerald-50')}
+        {card('Final', finalGrand, 'Final sign-off — what we pay', 'border-green-200 bg-green-50')}
+        {card('Advance paid', advPaid, 'Handed over before the trip', 'border-amber-200 bg-amber-50')}
+      </div>
+
+      {/* Net payable */}
+      <div className="rounded-lg border border-green-200 bg-green-50/60 p-3">
+        <div className="text-[10px] font-semibold uppercase text-green-800">Net payable to the technician</div>
+        <div className="mt-0.5 text-sm text-slate-600">{m0(finalGrand)} + GST {m0(form.gstAmt)} − TDS {m0(form.tdsAmt)} − advance already paid <span className="text-amber-700">{m0(advPaid)}</span> = <span className="text-lg font-bold text-navy">{m0(netPayable)}</span></div>
+      </div>
+
+      {/* Bills */}
+      {(atts.length > 0 || advs.length > 0) && (
+        <div className="flex flex-wrap gap-2 text-[10px]">
+          {advs.map((a, i) => a.fileUrl && <a key={`a${i}`} href={a.fileUrl} target="_blank" rel="noreferrer" className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700 hover:bg-amber-100">💰 Advance {inr(a.amount)}</a>)}
+          {atts.map((a, i) => <a key={`t${i}`} href={a.fileUrl} target="_blank" rel="noreferrer" className="rounded border border-slate-200 bg-white px-2 py-1 text-slate-500 hover:bg-slate-50">🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</a>)}
+        </div>
+      )}
+
+      {/* Finalize form */}
+      <fieldset disabled={readOnly}>
+        <div className="grid gap-2 sm:grid-cols-4">
+          {ACC_FIELDS.map((f) => (
+            <div key={f.k}><label className="label">{f.label}</label><input type={f.type || 'text'} className="input h-9 text-sm" value={form[f.k] ?? ''} onChange={(e) => setForm({ ...form, [f.k]: f.type === 'number' ? Number(e.target.value) : e.target.value })} /></div>
+          ))}
+        </div>
+      </fieldset>
+
+      {finalized ? (
+        <div className="flex items-center justify-between gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+          <span>✓ Processed{plan.accountsFinalizedBy ? ` by ${plan.accountsFinalizedBy}` : ''}{plan.accountsFinalizedAt ? ` · ${fmtDate(plan.accountsFinalizedAt)}` : ''}.</span>
+          {canManage && <button className="btn-outline text-xs" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
+        </div>
+      ) : !readOnly && (
+        <div className="flex gap-2">
+          <button className="btn-outline" disabled={save.isPending} onClick={() => save.mutate(false)}>Save draft</button>
+          <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✓ Mark processed</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -134,12 +700,10 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
   const empQ = useQuery({ queryKey: ['travel-employees'], queryFn: async () => (await api.get('/travel/employees')).data.employees as Employee[] });
   const numQ = useQuery({ queryKey: ['travel-next-number'], queryFn: async () => (await api.get('/travel/next-number')).data.planNumber as string });
   const projectsQ = useQuery({ queryKey: ['travel-projects'], queryFn: async () => (await api.get('/projects')).data.projects as any[] });
-  // A New plan is raised AGAINST a Ticket Request — the Trip ID picker lists them.
-  const reqQ = useQuery({ queryKey: ['travel-plans', 'REQUEST'], queryFn: async () => (await api.get('/travel?kind=REQUEST')).data.plans as any[] });
+  // New plan is now the ORIGIN of a trip: it generates its own unique Trip ID. The
+  // Ticket Request links to a plan (not the other way round), so there's no picker here.
   const employees = empQ.data ?? [];
   const projects = projectsQ.data ?? [];
-  const requests = reqQ.data ?? [];
-  const [linkedTripNumber, setLinkedTrip] = useState('');
 
   const [employeeId, setEmployeeId] = useState('');
   const [employeeName, setName] = useState('');
@@ -166,18 +730,6 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
     const e = employees.find((x) => x.id === id);
     if (e) { setName(e.name); setEmail(e.email || ''); setMLevel(e.mLevel || ''); }
   }
-  // Raise this plan AGAINST a Ticket Request: link to it + prefill the traveller and
-  // dates from the request. The plan's own Projects / sanctioned amounts are entered
-  // fresh below.
-  function linkFromRequest(reqId: string) {
-    if (!reqId) { setLinkedTrip(''); return; }
-    const p = requests.find((x) => x.id === reqId);
-    if (!p) return;
-    setLinkedTrip(p.planNumber || '');
-    setEmployeeId(p.employeeId || ''); setName(p.employeeName || ''); setEmail(p.employeeEmail || ''); setMLevel(p.mLevel || ''); setSender(p.senderName || p.appliedByName || '');
-    if (p.fromDate) setFrom(new Date(p.fromDate).toISOString().slice(0, 10));
-    if (p.toDate) setTo(new Date(p.toDate).toISOString().slice(0, 10));
-  }
   const setDay = (i: number, patch: Partial<DayCost>) => setDayCosts(dayCosts.map((d, j) => j === i ? { ...d, ...patch } : d));
   const setJo = (i: number, patch: Partial<JobOrder>) => setJobOrders(jobOrders.map((j, k) => k === i ? { ...j, ...patch } : j));
 
@@ -187,7 +739,7 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
     mutationFn: async () => {
       if (!employeeName.trim()) throw new Error('Select a technician');
       const body = {
-        kind: 'PLAN' as const, linkedTripNumber: linkedTripNumber || null,
+        kind: 'PLAN' as const,
         employeeId: employeeId || null, employeeName, employeeEmail, mLevel, senderName,
         fromDate, toDate, days,
         jobOrders: jobOrders.filter((j) => j.jo.trim()),
@@ -209,12 +761,9 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
       <Section title="Trip details" hint="Auto-assigned ID + sanctioning basics" accent="#f59e0b">
         <div className="grid gap-3 sm:grid-cols-3">
           <div>
-            <label className="label">Trip ID <span className="text-[10px] font-normal text-slate-400">(against a ticket request)</span></label>
-            <select className="input font-mono text-navy" defaultValue="" onChange={(e) => linkFromRequest(e.target.value)}>
-              <option value="">🆕 New — {numQ.data || '…'}</option>
-              {requests.map((p) => <option key={p.id} value={p.id}>{p.planNumber} · {p.employeeName}{p.destination ? ` · ${p.origin || ''}→${p.destination}` : ''}</option>)}
-            </select>
-            {linkedTripNumber && <p className="mt-1 text-[11px] font-medium text-emerald-600">🔗 Against request {linkedTripNumber}</p>}
+            <label className="label">Trip ID <span className="text-[10px] font-normal text-slate-400">(auto-assigned)</span></label>
+            <input className="input font-mono text-navy bg-slate-50" value={numQ.data ? `🆕 ${numQ.data}` : '…'} readOnly />
+            <p className="mt-1 text-[11px] text-slate-400">New unique Trip ID — the Ticket Request links to this.</p>
           </div>
           <div>
             <label className="label">Technician name *</label>
@@ -347,7 +896,12 @@ function Section({ title, hint, accent, children }: { title: string; hint?: stri
 function NewPlanTab({ onDone }: { onDone: () => void }) {
   const qc = useQueryClient();
   const empQ = useQuery({ queryKey: ['travel-employees'], queryFn: async () => (await api.get('/travel/employees')).data.employees as Employee[] });
+  // A Ticket Request is raised either fresh (its own new Trip ID) or AGAINST an
+  // existing New plan — the Trip ID picker lists the plans.
+  const numQ = useQuery({ queryKey: ['travel-next-number'], queryFn: async () => (await api.get('/travel/next-number')).data.planNumber as string });
+  const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
   const employees = empQ.data ?? [];
+  const plans = plansQ.data ?? [];
 
   const [isNonCrystal, setNonCrystal] = useState(false);
   const [employeeId, setEmployeeId] = useState('');
@@ -371,6 +925,8 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
   const [purpose, setPurpose] = useState('');
   const [remarks, setRemarks] = useState('');
   const [advances, setAdvances] = useState<Advance[]>([]);
+  const [linkedPlanId, setLinkedPlanId] = useState('');
+  const [linkedTripNumber, setLinkedTrip] = useState('');
   const [err, setErr] = useState('');
 
   const days = useMemo(() => Math.max(1, Math.ceil((new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86400000) + 1), [fromDate, toDate]);
@@ -381,12 +937,30 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
     const e = employees.find((x) => x.id === id);
     if (e) { setName(e.name); setEmail(e.email || ''); setMLevel(e.mLevel || ''); setPhone(e.whatsapp || ''); }
   }
+  // Raise this request AGAINST an existing New plan: link to it + prefill the traveller
+  // and dates from the plan. Leave the picker on "New" to raise a fresh request with
+  // its own Trip ID instead.
+  function linkFromPlan(planId: string) {
+    setLinkedPlanId(planId);
+    if (!planId) { setLinkedTrip(''); return; }
+    const p = plans.find((x) => x.id === planId);
+    if (!p) return;
+    setLinkedTrip(p.planNumber || '');
+    if (p.employeeId) { setNonCrystal(false); setEmployeeId(p.employeeId); }
+    if (p.employeeName) setName(p.employeeName);
+    if (p.employeeEmail) setEmail(p.employeeEmail);
+    if (p.mLevel) setMLevel(p.mLevel);
+    if (p.employeePhone) setPhone(p.employeePhone);
+    if (p.fromDate) setFrom(new Date(p.fromDate).toISOString().slice(0, 10));
+    if (p.toDate) setTo(new Date(p.toDate).toISOString().slice(0, 10));
+  }
 
   const save = useMutation({
     mutationFn: async (submit: boolean) => {
       if (!employeeName.trim()) throw new Error('Traveller name is required');
       const body = {
         kind: 'REQUEST' as const,
+        linkedTripNumber: linkedTripNumber || null,
         employeeId: isNonCrystal ? null : (employeeId || null), employeeName, employeeEmail, employeePhone, mLevel,
         designation, department, grade, aadharNo, aadharFileUrl,
         isNonCrystal, fromDate, toDate, days, origin, destination, purpose, remarks,
@@ -396,13 +970,27 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
       if (submit) await api.post(`/travel/${plan.id}/submit`);
       return plan;
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['travel-plans'] }); onDone(); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['travel-plans'] }); qc.invalidateQueries({ queryKey: ['travel-next-number'] }); onDone(); },
     onError: (e) => setErr(errMsg(e)),
   });
 
   return (
     <div className="space-y-4 pb-16">
       {err && <div className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+
+      {/* Trip ID — fresh, or book this request against an existing New plan */}
+      <Section title="Trip details" hint="Fresh Trip ID, or book against a New plan" accent="#f59e0b">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div>
+            <label className="label">Trip ID <span className="text-[10px] font-normal text-slate-400">(new, or against a plan)</span></label>
+            <select className="input font-mono text-navy" value={linkedPlanId} onChange={(e) => linkFromPlan(e.target.value)}>
+              <option value="">🆕 New — {numQ.data || '…'}</option>
+              {plans.map((p) => <option key={p.id} value={p.id}>{p.planNumber} · {p.employeeName}</option>)}
+            </select>
+            {linkedTripNumber && <p className="mt-1 text-[11px] font-medium text-emerald-600">🔗 Against plan {linkedTripNumber}</p>}
+          </div>
+        </div>
+      </Section>
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Employee details */}
@@ -665,7 +1253,7 @@ function PlanSummary({ plan }: { plan: any }) {
         {fact('Other sanctioned', money0(pc.other))}
         {fact('Total advance', money0(plan.totalAdvance))}
         {fact('Created', fmtDate(plan.createdAt))}
-        {plan.linkedTripNumber ? fact('Against request', plan.linkedTripNumber) : null}
+        {plan.linkedTripNumber ? fact('Linked trip', plan.linkedTripNumber) : null}
       </div>
       <div className="mt-3">
         <div className="text-[10px] uppercase text-slate-400">Advances paid</div>
@@ -840,7 +1428,7 @@ function PlanDetail({ planId, canManage }: { planId: string; canManage: boolean 
             <div className="text-xs text-slate-400">{plan.days} day(s){plan.travelMode ? ` · ${plan.travelMode}` : ''}{plan.purpose ? ` · ${plan.purpose}` : ''}</div>
             {(plan.designation || plan.department) && <div className="text-xs text-slate-400">{[plan.designation, plan.department].filter(Boolean).join(' · ')}</div>}
             {plan.senderName && <div className="text-xs text-slate-400">Sender: {plan.senderName}</div>}
-            {plan.linkedTripNumber && <div className="text-xs font-medium text-emerald-600">🔗 Against request: {plan.linkedTripNumber}</div>}
+            {plan.linkedTripNumber && <div className="text-xs font-medium text-emerald-600">🔗 Linked trip: {plan.linkedTripNumber}</div>}
             {plan.employeeEmail && <div className="mt-1 text-xs text-slate-400">✉ {plan.employeeEmail}</div>}
             {(() => { const pc = plan.planCosts || {}; const g = (+pc.travel || 0) + (+pc.food || 0) + (+pc.hotel || 0) + (+pc.other || 0); return g > 0 ? <div className="mt-1 text-xs">Sanctioned: <span className="font-semibold">{inr(g)}</span> <span className="text-slate-400">(T {inr(+pc.travel || 0)} · F {inr(+pc.food || 0)} · H {inr(+pc.hotel || 0)} · O {inr(+pc.other || 0)})</span></div> : null; })()}
             {(plan.jobOrders?.length ?? 0) > 0 && <div className="mt-1 text-xs text-slate-500">JOs: {plan.jobOrders.map((j: any) => j.jo).filter(Boolean).join(', ') || '—'}</div>}

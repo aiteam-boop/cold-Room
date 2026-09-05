@@ -92,7 +92,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       payGstInclusive: !!d.payGstInclusive,
       customColumns: d.customColumns ?? [],
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null, boqHead: l.boqHead ?? null })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null, boqHead: l.boqHead ?? null, boqItemNames: Array.isArray(l.boqItemNames) ? l.boqItemNames : [], lineRemark: l.lineRemark ?? null })),
       // Only sent when amending an approved doc — the server logs it and requires it.
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,

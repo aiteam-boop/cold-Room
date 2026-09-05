@@ -16,13 +16,13 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma';
 import { resolveAutoChain } from './fixedChain';
 import { parseApprover } from '../lib/permissions';
-import { sendEmail, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from './email';
+import { sendEmail, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml, escapeHtml } from './email';
 import { signApiPath } from '../lib/signedUrl';
 
 export interface PayGrn {
   id: string; grnNumber: string; docId: string; projectId: string; vendorName: string | null;
   releaseToken: string | null; amountToPay: number | null; piValue: number | null;
-  piPdfUrl: string | null; piNumber: string | null;
+  piPdfUrl: string | null; piNumber: string | null; ledgerHead?: string | null;
 }
 
 const PAYMENT = 'PAYMENT';
@@ -96,6 +96,9 @@ export async function notifyCurrentPaymentStep(grn: PayGrn): Promise<void> {
     const piUrl = grn.piPdfUrl ? `${appBaseUrl()}${grn.piPdfUrl.startsWith('/api/') ? signApiPath(grn.piPdfUrl) : grn.piPdfUrl}` : null;
     const lines = [`A payment <strong>${grn.grnNumber}</strong>${po?.docNumber ? ` (against ${po.docNumber})` : ''}${grn.vendorName ? ` — ${grn.vendorName}` : ''} needs your decision.`];
     if (piUrl) lines.push(`Proforma Invoice${grn.piNumber ? ` (PI ${grn.piNumber})` : ''}: <a href="${piUrl}" style="color:#052379;font-weight:600;text-decoration:none">📄 View PI</a>`);
+    // Ledger Head — free-text remark from the Payment, so the approver sees it here.
+    const ledger = grn.ledgerHead ?? (await prisma.gRN.findUnique({ where: { id: grn.id }, select: { ledgerHead: true } }).catch(() => null))?.ledgerHead ?? null;
+    if (ledger) lines.push(`Ledger Head: <strong>${escapeHtml(ledger)}</strong>`);
     lines.push('Open the Approval Form to review the PO / PI / GRN / KYC / amount and Approve or put it On Hold. Your decision shows on the FMS sheet and in the app.');
     const html = approvalEmailHtml({ heading: `Payment approval needed — ${grn.grnNumber}`, lines, actionUrl: link, actionLabel: 'Open Approval Form' });
     // ONE email with everyone on this step in "To" (they share the same form link,

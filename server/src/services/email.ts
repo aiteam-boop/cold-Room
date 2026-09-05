@@ -65,29 +65,46 @@ async function sendViaMailgun({ to, cc, subject, html, text, attachments }: Emai
     ? 'https://api.eu.mailgun.net'
     : 'https://api.mailgun.net';
 
-  const form = new FormData();
-  form.set('from', fromAddress());
-  form.set('to', to);
-  if (cc) form.set('cc', cc);
-  form.set('subject', subject);
-  form.set('html', html);
-  form.set('text', text ?? html.replace(/<[^>]+>/g, ' '));
-  for (const a of attachments ?? []) {
-    form.append('attachment', new Blob([a.content], { type: a.contentType || 'application/octet-stream' }), a.filename);
-  }
+  // Build a fresh FormData per attempt: a sent request body can't be re-used.
+  const buildForm = () => {
+    const form = new FormData();
+    form.set('from', fromAddress());
+    form.set('to', to);
+    if (cc) form.set('cc', cc);
+    form.set('subject', subject);
+    form.set('html', html);
+    form.set('text', text ?? html.replace(/<[^>]+>/g, ' '));
+    for (const a of attachments ?? []) {
+      form.append('attachment', new Blob([a.content], { type: a.contentType || 'application/octet-stream' }), a.filename);
+    }
+    return form;
+  };
 
-  const res = await fetch(`${base}/v3/${encodeURIComponent(domain)}/messages`, {
-    method: 'POST',
-    headers: { Authorization: 'Basic ' + Buffer.from(`api:${key}`).toString('base64') },
-    body: form,
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    console.error(`[email] Mailgun send failed (${res.status}): ${detail.slice(0, 300)}`);
-    return false;
+  const url = `${base}/v3/${encodeURIComponent(domain)}/messages`;
+  const auth = { Authorization: 'Basic ' + Buffer.from(`api:${key}`).toString('base64') };
+  // Retry transient failures (network error, 429 rate-limit, 5xx) so a momentary
+  // Mailgun/VPS hiccup doesn't silently drop an approval email. 4xx (bad request,
+  // auth, suppressed recipient) is permanent — no point retrying, so we stop.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, { method: 'POST', headers: auth, body: buildForm() });
+      if (res.ok) {
+        if (attempt > 1) console.log(`[email] Mailgun send to ${to} succeeded on attempt ${attempt}`);
+        return true;
+      }
+      const detail = await res.text().catch(() => '');
+      const transient = res.status === 429 || res.status >= 500;
+      console.error(`[email] Mailgun send failed (${res.status})${transient ? `, attempt ${attempt}/${MAX_ATTEMPTS}` : ''} to ${to}: ${detail.slice(0, 300)}`);
+      if (!transient) return false; // permanent — don't retry
+    } catch (e) {
+      // Network / DNS / timeout — transient, worth another try.
+      console.error(`[email] Mailgun request error, attempt ${attempt}/${MAX_ATTEMPTS} to ${to}:`, (e as Error).message);
+    }
+    if (attempt < MAX_ATTEMPTS) await new Promise((r) => setTimeout(r, attempt * 800)); // 0.8s, 1.6s backoff
   }
-  return true;
+  console.error(`[email] Mailgun send GAVE UP after ${MAX_ATTEMPTS} attempts to ${to}: ${subject}`);
+  return false;
 }
 
 // Send an email. Never throws — logs and resolves false on failure / no-config

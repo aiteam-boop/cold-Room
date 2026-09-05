@@ -37,7 +37,7 @@ interface DocForPdf {
   promisedDeliveryDate?: Date | null;
   basicAmount: number; gstEnabled: boolean; gstPct: number; gstAmount: number; finalAmount: number;
   esignApplied: boolean;
-  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; gstPct?: number | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null; boqHead?: string | null; boqItemName?: string | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; qty: number; unitPrice: number; totalPrice: number; isLeadTime: boolean; gstExempt?: boolean; gstExemptRemark?: string | null; gstPct?: number | null; leadTimeText?: string | null; customValues?: string | Record<string, string> | null; boqHead?: string | null; boqItemName?: string | null; boqItemNames?: string[] | null; lineRemark?: string | null }[];
   customColumns?: string | { key: string; label: string }[] | null;
   termsSections: TermsSection[];
   // Approval trail printed under the signature once the document is e-signed:
@@ -188,8 +188,10 @@ export function renderProcurementPdf(doc: DocForPdf, stream: NodeJS.WritableStre
     if (it.gstExempt) descText = `${it.description}  (No GST${it.gstExemptRemark ? ` — ${it.gstExemptRemark}` : ''})`;
     else if (uniformRate == null && doc.gstEnabled) descText = `${it.description}  (GST ${it.gstPct != null ? it.gstPct : doc.gstPct}%)`;
     if (internal) {
-      // Head and BOQ Item each on their OWN line (not joined on one line).
-      const metaLines = [`Head: ${it.boqHead || '—'}`, it.boqItemName ? `BOQ Item: ${it.boqItemName}` : null].filter(Boolean) as string[];
+      // Head, then EACH BOQ Item on its own line, then the remark on its own line.
+      const names = (it.boqItemNames && it.boqItemNames.length) ? it.boqItemNames.filter(Boolean) : (it.boqItemName ? [it.boqItemName] : []);
+      const metaLines = [`Head: ${it.boqHead || '—'}`, ...names.map((n) => `BOQ Item: ${n}`)];
+      if (it.lineRemark && it.lineRemark.trim()) metaLines.push(`Remark: ${it.lineRemark.trim()}`);
       for (const m of metaLines) descText += `\n▸ ${m}`;
     }
     const descH = textH(descText, cols[1].w, 7.5);
