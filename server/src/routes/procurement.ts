@@ -1585,6 +1585,19 @@ export async function signedDocsFor(grnNumber: string) {
   return docs;
 }
 
+// Invoice(s) uploaded on the GRN (PDF or image, multiple) — by the site engineer on
+// the public link, so the quantities can be cross-checked. Shown on the office GRN
+// screen too. Stored as ProcurementDocuments, like the signed packing list.
+export const GRN_INVOICE_TYPE = 'GRN_INVOICE';
+export async function invoiceDocsFor(grnNumber: string) {
+  const docs = await prisma.procurementDocument.findMany({
+    where: { type: GRN_INVOICE_TYPE, linkedDocNumber: grnNumber, archived: false },
+    orderBy: { uploadedAt: 'desc' },
+    select: { id: true, fileName: true, fileUrl: true, uploadedAt: true, mimeType: true },
+  });
+  return docs;
+}
+
 // Map a GoodsReceipt (+ project + lineItems) to the packing-list PDF shape. Used
 // by both the authenticated download and the public site-engineer link.
 export function packingListShape(gr: any) {
@@ -1682,7 +1695,8 @@ router.get('/goods-receipts/:grId', requireProjectMember, requirePage('grn'), as
   });
   if (!gr) throw notFound();
   const signedDocs = await signedDocsFor(gr.grnNumber);
-  res.json({ goodsReceipt: { ...serializeGoodsReceipt(gr), signedDocs } });
+  const invoiceDocs = await invoiceDocsFor(gr.grnNumber);
+  res.json({ goodsReceipt: { ...serializeGoodsReceipt(gr), signedDocs, invoiceDocs } });
 }));
 
 const goodsReceiptUpdate = z.object({
@@ -1795,6 +1809,18 @@ router.post('/goods-receipts/:grId/signed', requireProjectMember, requireEdit('g
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: SIGNED_TYPE, fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_SIGNED_UPLOAD', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, fileName: req.file.originalname } });
   res.status(201).json({ ok: true, signedDocs: await signedDocsFor(gr.grnNumber) });
+}));
+
+// POST .../goods-receipts/:grId/invoice — upload a vendor invoice (PDF OR image) to
+// cross-check the received quantities. Multiple allowed — each call adds one.
+router.post('/goods-receipts/:grId/invoice', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Please attach the invoice (PDF or image).');
+  const gr = await prisma.goodsReceipt.findFirst({ where: { id: req.params.grId, projectId: req.params.projectId } });
+  if (!gr) throw notFound();
+  const fileUrl = `/uploads/${req.file.filename}`;
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: GRN_INVOICE_TYPE, fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_INVOICE_UPLOAD', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, fileName: req.file.originalname } });
+  res.status(201).json({ ok: true, invoiceDocs: await invoiceDocsFor(gr.grnNumber) });
 }));
 
 // POST .../goods-receipts/:grId/confirm-billing — Crystal's billing confirms the

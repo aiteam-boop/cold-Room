@@ -4,7 +4,7 @@ import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, notFound } from '../lib/errors';
 import { audit } from '../lib/audit';
 import { renderPackingListPdf } from '../services/procurementPdf';
-import { packingListShape, signedDocsFor } from './procurement';
+import { packingListShape, signedDocsFor, invoiceDocsFor, GRN_INVOICE_TYPE } from './procurement';
 import { uploadPdf, upload } from '../middleware/upload';
 import { SIGNED_TYPE } from '../services/grnReminders';
 
@@ -17,6 +17,7 @@ import { SIGNED_TYPE } from '../services/grnReminders';
 const router = Router();
 
 const parseJson = (s: string | null | undefined, fallback: unknown) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
+
 
 async function findByToken(token: string) {
   return prisma.goodsReceipt.findFirst({
@@ -31,7 +32,7 @@ async function findByToken(token: string) {
 
 // Only the fields the site engineer needs — deliberately NO rupee values (the
 // PO/payment amounts stay inside the authenticated app, not on a public link).
-function publicSerialize(gr: any, signedDocs: any[] = []) {
+function publicSerialize(gr: any, signedDocs: any[] = [], invoiceDocs: any[] = []) {
   return {
     id: gr.id,
     grnNumber: gr.grnNumber,
@@ -54,6 +55,7 @@ function publicSerialize(gr: any, signedDocs: any[] = []) {
     doc: gr.doc,
     project: gr.project,
     signedDocs,
+    invoiceDocs,
     lineItems: (gr.lineItems || []).map((l: any) => ({
       id: l.id,
       srNo: l.srNo,
@@ -75,7 +77,7 @@ function publicSerialize(gr: any, signedDocs: any[] = []) {
 router.get('/:token', asyncHandler(async (req, res) => {
   const gr = await findByToken(req.params.token);
   if (!gr) throw notFound('This link is invalid or has expired.');
-  res.json({ goodsReceipt: publicSerialize(gr, await signedDocsFor(gr.grnNumber)) });
+  res.json({ goodsReceipt: publicSerialize(gr, await signedDocsFor(gr.grnNumber), await invoiceDocsFor(gr.grnNumber)) });
 }));
 
 // GET /:token/pdf — download the packing-list PDF (the engineer prints/signs it).
@@ -171,6 +173,19 @@ router.post('/:token/lines/:lineId/photo', upload.single('file'), asyncHandler(a
   const fileUrl = `/uploads/${req.file.filename}`;
   await prisma.goodsReceiptLine.update({ where: { id: line.id }, data: { photoUrl: fileUrl } });
   res.status(201).json({ ok: true, photoUrl: fileUrl });
+}));
+
+// POST /:token/invoice — the engineer uploads the vendor invoice(s) WHILE filling
+// the GRN, to cross-check the received quantities. PDF OR image; multiple allowed.
+router.post('/:token/invoice', upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Please attach the invoice (PDF or image).');
+  const gr = await findByToken(req.params.token);
+  if (!gr) throw notFound('This link is invalid or has expired.');
+  if (gr.status !== 'DRAFT') throw badRequest('This goods receipt is already submitted and locked.');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  await prisma.procurementDocument.create({ data: { projectId: gr.projectId, type: GRN_INVOICE_TYPE, fileName: req.file.originalname, fileUrl, linkedDocNumber: gr.grnNumber, vendorName: gr.vendorName, mimeType: req.file.mimetype } });
+  await audit({ projectId: gr.projectId, action: 'GOODS_RECEIPT_INVOICE_UPLOAD_PUBLIC', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber: gr.grnNumber, fileName: req.file.originalname, via: 'site-engineer-link' } });
+  res.status(201).json({ ok: true, invoiceDocs: await invoiceDocsFor(gr.grnNumber) });
 }));
 
 // POST /:token/submit — the engineer confirms delivery; the record is locked.

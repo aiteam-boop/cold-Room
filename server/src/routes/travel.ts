@@ -126,6 +126,32 @@ router.get('/:id', requirePage('travel'), asyncHandler(async (req, res) => {
   res.json({ plan: serializePlan(p), requestChain, expenseChains });
 }));
 
+// ── GET /:id/statement — extras for the Accounts "full statement" ────────────────
+// Money trail / advance lines / documents are already on the plan object the client
+// holds, so this returns only what it can't derive: the ticket REQUESTS booked
+// against this plan (office paid the vendor direct — NOT from the technician's cash).
+router.get('/:id/statement', requirePage('travel'), asyncHandler(async (req, res) => {
+  const plan = await prisma.travelPlan.findUnique({ where: { id: req.params.id }, select: { id: true, planNumber: true } });
+  if (!plan) throw notFound('Travel plan not found');
+  const reqs = await prisma.travelPlan.findMany({
+    where: { linkedTripNumber: plan.planNumber, id: { not: plan.id } },
+    orderBy: { fromDate: 'asc' },
+    select: { planNumber: true, origin: true, destination: true, travelMode: true, ticketPrice: true, fromDate: true, bookingStatus: true, status: true, ticketFileUrl: true, employeeName: true },
+  });
+  const tickets = reqs.map((r) => ({
+    requestId: r.planNumber,
+    route: `${r.origin || '—'} → ${r.destination || '—'}`,
+    mode: r.travelMode || null,
+    fare: r.ticketPrice || 0,
+    departureDate: r.fromDate,
+    status: r.bookingStatus || r.status || null,
+    ticketFileUrl: r.ticketFileUrl || null,
+    traveller: r.employeeName || null,
+  }));
+  const ticketsTotal = tickets.reduce((s, t) => s + (t.fare || 0), 0);
+  res.json({ tickets, ticketsTotal });
+}));
+
 const joSchema = z.object({ jo: z.string(), cn: z.string().optional().nullable(), loc: z.string().optional().nullable(), cont: z.string().optional().nullable(), ms: z.string().optional().nullable() });
 const costsSchema = z.object({ travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0) });
 const advanceSchema = z.object({ amount: z.coerce.number().default(0), fileUrl: z.string().optional().nullable() });

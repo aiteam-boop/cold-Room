@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, downloadFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Spinner } from '../components/ui';
+import { FileViewerModal, type ViewFile } from '../components/FileViewer';
 import { fmtDate, inr } from '../lib/format';
 
 // ── Travel Planning & Booking ────────────────────────────────────────────────
@@ -586,6 +587,25 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
   const netPayable = finalGrand + (+form.gstAmt || 0) - (+form.tdsAmt || 0) - advPaid;
   const atts: any[] = plan.techAttachments || [];
   const advs: any[] = (plan.advances || []).filter((a: any) => (+a.amount || 0) > 0 || a.fileUrl);
+  // Full statement — the extras (tickets booked against this trip) are lazy-loaded
+  // from the server only when the panel is opened; money-trail / advance-lines /
+  // documents come straight off the plan object.
+  const [showStmt, setShowStmt] = useState(false);
+  const stmtQ = useQuery({ queryKey: ['travel-statement', plan.id], enabled: showStmt, queryFn: async () => (await api.get(`/travel/${plan.id}/statement`)).data as { tickets: any[]; ticketsTotal: number } });
+  const tickets: any[] = stmtQ.data?.tickets ?? [];
+
+  // Documents open in an in-page popup viewer (PDF/image inline + Download), not a
+  // new tab. One combined list so the popup can page prev/next across every doc.
+  const [viewIdx, setViewIdx] = useState<number | null>(null);
+  const norm = (u: string) => (u.startsWith('/api/') ? u.replace(/^\/api/, '') : u);
+  const vfName = (u?: string) => (u ? decodeURIComponent(u.split('/').pop() || 'file') : 'file');
+  const toVF = (url: string, label: string): ViewFile => ({ url: norm(url), name: vfName(url), authed: url.startsWith('/api/'), label });
+  const docItems: ViewFile[] = [
+    ...advs.filter((a: any) => a.fileUrl).map((a: any) => toVF(a.fileUrl, `Advance ${inr(a.amount)}`)),
+    ...atts.filter((a: any) => a.fileUrl).map((a: any) => toVF(a.fileUrl, `${CAT_LABEL[a.category] || a.category} · Day ${a.day}`)),
+    ...tickets.filter((t: any) => t.ticketFileUrl).map((t: any) => toVF(t.ticketFileUrl, `Ticket ${t.requestId}`)),
+  ];
+  const openDoc = (url: string) => { const i = docItems.findIndex((d) => d.url === norm(url)); setViewIdx(i >= 0 ? i : 0); };
 
   const save = useMutation({
     mutationFn: async (finalize: boolean) => api.post(`/travel/${plan.id}/tech-accounts`, { data: form, finalize }),
@@ -594,6 +614,11 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
   const reopen = useMutation({ mutationFn: async () => api.post(`/travel/${plan.id}/tech-accounts`, { unfinalize: true }), onSuccess: onDone });
 
   const card = (label: string, val: any, sub: string, cls: string) => (<div className={`rounded-lg border p-2.5 ${cls}`}><div className="text-[11px] text-slate-500">{label}</div><div className="text-lg font-bold">{m0(val)}</div><div className="text-[10px] text-slate-400">{sub}</div></div>);
+  const toneCls = (t?: string) => t === 'amber' ? 'text-amber-700' : t === 'emerald' ? 'text-emerald-700' : t === 'rose' ? 'text-rose-700' : 'text-slate-700';
+  const mrow = (label: string, v: number, opts?: { tone?: string; note?: string }) => (
+    <div className="flex flex-wrap items-center gap-x-2 border-t border-slate-100 py-1 first:border-0"><span className="text-slate-600">{label}</span><span className={`ml-auto font-mono font-semibold ${toneCls(opts?.tone)}`}>{m0(v)}</span>{opts?.note && <div className="w-full text-[10px] text-slate-400">{opts.note}</div>}</div>
+  );
+  const bal = finalGrand - advPaid;
 
   return (
     <div className="space-y-4">
@@ -616,10 +641,73 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
       {/* Bills */}
       {(atts.length > 0 || advs.length > 0) && (
         <div className="flex flex-wrap gap-2 text-[10px]">
-          {advs.map((a, i) => a.fileUrl && <a key={`a${i}`} href={a.fileUrl} target="_blank" rel="noreferrer" className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700 hover:bg-amber-100">💰 Advance {inr(a.amount)}</a>)}
-          {atts.map((a, i) => <a key={`t${i}`} href={a.fileUrl} target="_blank" rel="noreferrer" className="rounded border border-slate-200 bg-white px-2 py-1 text-slate-500 hover:bg-slate-50">🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</a>)}
+          {advs.map((a, i) => a.fileUrl && <button type="button" key={`a${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700 hover:bg-amber-100">💰 Advance {inr(a.amount)}</button>)}
+          {atts.map((a, i) => a.fileUrl && <button type="button" key={`t${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-slate-200 bg-white px-2 py-1 text-slate-500 hover:bg-slate-50">🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</button>)}
         </div>
       )}
+
+      {/* Full statement — Money trail · Advance lines · Tickets · Documents */}
+      <div className="rounded-lg border border-slate-200 bg-white">
+        <button type="button" onClick={() => setShowStmt((v) => !v)} className="flex w-full items-center gap-2 px-3 py-2 text-xs">
+          <span className="font-semibold text-slate-700">Everything booked against this trip</span>
+          <span className="text-slate-400">{atts.length + advs.filter((a) => a.fileUrl).length} document(s){showStmt && tickets.length ? ` · ${tickets.length} ticket(s)` : ''}</span>
+          <span className="ml-auto rounded border border-slate-300 px-2 py-0.5 text-[10px] font-medium text-slate-600">{showStmt ? 'Hide' : 'Show'} full statement</span>
+        </button>
+        {showStmt && (
+          <div className="grid gap-2 border-t border-slate-100 p-3 lg:grid-cols-2">
+            {/* Money trail */}
+            <div className="rounded border border-slate-200 p-2 text-xs">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">Money trail</div>
+              {mrow('Planned (sanctioned)', planGrand, { note: `travel ${m0(pc.travel)} · food ${m0(pc.food)} · hotel ${m0(pc.hotel)} · other ${m0(pc.other)}` })}
+              {mrow('Advance disbursed', advPaid, { tone: 'amber' })}
+              {mrow('Technician claimed', techGrand)}
+              {revGrand != null && mrow('Reviewer approved', revGrand)}
+              {mrow('Final', finalGrand, { tone: 'emerald' })}
+              {mrow('Balance (final − advance)', bal, { tone: bal < 0 ? 'rose' : bal > 0 ? 'amber' : 'emerald', note: bal < 0 ? 'advance exceeded the claim — recover from the technician' : bal > 0 ? 'still payable to the technician' : 'settled' })}
+            </div>
+            <div className="space-y-2">
+              {/* Advance lines */}
+              {advs.length > 0 && (
+                <div className="rounded border border-slate-200 p-2 text-xs">
+                  <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">Advance lines</div>
+                  {advs.map((a, i) => (
+                    <div key={i} className="flex items-center gap-2 border-t border-slate-100 py-1 first:border-0">
+                      <span className="text-slate-600">Advance {i + 1}</span>
+                      <span className="font-mono">{inr(a.amount)}</span>
+                      {a.fileUrl && <button type="button" onClick={() => openDoc(a.fileUrl)} className="ml-auto text-navy hover:underline">proof</button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Tickets — office paid the vendor direct */}
+              <div className="rounded border border-slate-200 p-2 text-xs">
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">Tickets — paid by the office direct to the vendor, not from the technician's cash</div>
+                {stmtQ.isLoading ? <div className="py-1 text-slate-400">Loading…</div>
+                  : tickets.length === 0 ? <div className="py-1 text-slate-400">No tickets booked against this trip.</div>
+                  : tickets.map((t, i) => (
+                    <div key={i} className="flex items-center gap-2 border-t border-slate-100 py-1 first:border-0">
+                      <span className="font-mono text-[10px] text-slate-500">{t.requestId}</span>
+                      <span className="truncate text-slate-600">{t.route}</span>
+                      {t.ticketFileUrl && <button type="button" onClick={() => openDoc(t.ticketFileUrl)} className="text-navy hover:underline">📄</button>}
+                      <span className="ml-auto font-mono">{inr(t.fare)}</span>
+                    </div>
+                  ))}
+              </div>
+              {/* Documents */}
+              {(atts.length > 0 || advs.some((a) => a.fileUrl) || tickets.some((t) => t.ticketFileUrl)) && (
+                <div className="rounded border border-slate-200 p-2 text-xs">
+                  <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">Documents</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {advs.map((a, i) => a.fileUrl && <button type="button" key={`a${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-amber-700">💰 Advance {inr(a.amount)}</button>)}
+                    {atts.map((a, i) => a.fileUrl && <button type="button" key={`t${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-slate-200 bg-white px-2 py-0.5 text-slate-500">🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</button>)}
+                    {tickets.map((t, i) => t.ticketFileUrl && <button type="button" key={`k${i}`} onClick={() => openDoc(t.ticketFileUrl)} className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-blue-700">🎫 {t.requestId}</button>)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Finalize form */}
       <fieldset disabled={readOnly}>
@@ -640,6 +728,10 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
           <button className="btn-outline" disabled={save.isPending} onClick={() => save.mutate(false)}>Save draft</button>
           <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✓ Mark processed</button>
         </div>
+      )}
+
+      {viewIdx !== null && docItems.length > 0 && (
+        <FileViewerModal items={docItems} startIndex={viewIdx} title="Trip document" onClose={() => setViewIdx(null)} />
       )}
     </div>
   );
@@ -1186,9 +1278,15 @@ function PlanRow({ p, isReq, open, onToggle, canManage }: { p: any; isReq?: bool
   const col3 = isReq ? [p.origin, p.destination].filter(Boolean).join(' → ') : planProjects(p);
   const isPlan = !isReq;
   const isClosed = p.status === 'CLOSED';
-  const [mode, setMode] = useState<'summary' | 'edit'>('summary');
+  // 'summary' = quick facts dropdown (row-click); 'view' = full form READ-ONLY
+  // (the View button); 'edit' = full form editable (the Edit button).
+  const [mode, setMode] = useState<'summary' | 'edit' | 'view'>('summary');
   const closeM = useMutation({ mutationFn: async () => api.patch(`/travel/${p.id}`, { status: 'CLOSED' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['travel-plans'] }) });
-  const openAs = (m: 'summary' | 'edit') => { setMode(m); if (!open) onToggle(); };
+  const openAs = (m: 'summary' | 'edit' | 'view') => {
+    if (open && mode === m) { onToggle(); return; } // same panel already open → Hide (collapse)
+    setMode(m);
+    if (!open) onToggle();
+  };
 
   return (
     <>
@@ -1207,7 +1305,7 @@ function PlanRow({ p, isReq, open, onToggle, canManage }: { p: any; isReq?: bool
           {isReq || !isPlan ? (
             <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAs('summary')}>{open ? 'Hide' : '👁 View'}</button>
           ) : isClosed ? (
-            <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAs('summary')}>{open && mode === 'summary' ? 'Hide' : '👁 View'}</button>
+            <button className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => openAs('view')}>{open && mode === 'view' ? 'Hide' : '👁 View'}</button>
           ) : (
             <div className="flex justify-end gap-1.5">
               {canManage && <button className="rounded-lg border border-navy/30 bg-navy/5 px-2.5 py-1 text-xs font-medium text-navy hover:bg-navy/10" onClick={() => openAs('edit')}>✎ Edit</button>}
@@ -1220,7 +1318,12 @@ function PlanRow({ p, isReq, open, onToggle, canManage }: { p: any; isReq?: bool
         {isPlan
           ? (mode === 'edit' && !isClosed && canManage
               ? <PlanEditPanel plan={p} readOnly={false} onDone={() => { setMode('summary'); onToggle(); }} />
-              : <PlanSummary plan={p} />)
+              // View button → the SAME full form with all the sanctioned data, but
+              // READ-ONLY (user sees everything they filled, cannot edit it).
+              : mode === 'view'
+                ? <PlanEditPanel plan={p} readOnly onDone={() => onToggle()} />
+                // Row-click → the quick facts summary dropdown (as before).
+                : <PlanSummary plan={p} />)
           : <PlanDetail planId={p.id} canManage={canManage} />}
       </td></tr>}
     </>

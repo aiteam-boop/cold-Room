@@ -64,6 +64,13 @@ export default function PublicGrn() {
     onSuccess: ({ lineId, photoUrl }) => { setG((p: any) => ({ ...p, lineItems: p.lineItems.map((l: any) => (l.id === lineId ? { ...l, photoUrl } : l)) })); setMsg('Photo added.'); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Vendor invoice(s) uploaded while filling — PDF or image, more than one allowed —
+  // so the engineer can cross-check the received quantities against the bill.
+  const uploadInvoice = useMutation({
+    mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return (await api.post(`/public/grn/${token}/invoice`, fd)).data.invoiceDocs; },
+    onSuccess: (docs) => { setG((p: any) => ({ ...p, invoiceDocs: docs })); setMsg('Invoice uploaded.'); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
 
   if (grQ.isLoading) return <div className="p-10"><Spinner label="Loading goods receipt…" /></div>;
   if (grQ.isError || !g) {
@@ -181,7 +188,9 @@ export default function PublicGrn() {
       <div className="card mt-4 p-5">
         <div className="mb-1 text-sm font-semibold text-slate-600">{isCustom ? 'Packing List Items' : 'Received Items'}</div>
         <p className="mb-3 text-xs text-slate-400">Enter what actually arrived. {isCustom ? '' : 'Accepted = Receipt − Defect.'}</p>
-        <div className="overflow-x-auto">
+        {/* Desktop = table; on mobile the regular GRN shows a card list below so the
+            whole row (incl. the photo button) fits in ONE view — no sideways scroll. */}
+        <div className={`overflow-x-auto ${isCustom ? '' : 'hidden sm:block'}`}>
           {isCustom ? (
             <table className="w-full text-sm">
               <thead className="text-xs uppercase text-slate-400">
@@ -208,16 +217,16 @@ export default function PublicGrn() {
               </tbody>
             </table>
           ) : (
-            <table className="w-full text-sm">
+            <table className="w-full border border-slate-200 text-sm [&_td]:border-l [&_td]:border-slate-100 [&_th]:border-l [&_th]:border-slate-100 [&_td:first-child]:border-l-0 [&_th:first-child]:border-l-0">
               <thead className="text-xs uppercase text-slate-400">
-                <tr>
-                  <th className="text-left">Description</th>
-                  <th className="w-16 text-center">PO Qty</th>
-                  <th className="w-20 text-center">Remaining</th>
-                  <th className="w-20 text-center">Receipt</th>
-                  <th className="w-16 text-center">Defect</th>
-                  <th className="w-16 text-center">Accepted</th>
-                  <th className="w-16 text-center" title="Photo of the delivered item (compulsory for received items)">Photo *</th>
+                <tr className="border-b border-slate-200">
+                  <th className="px-2 py-1 text-left">Description</th>
+                  <th className="w-16 px-1 py-1 text-center">PO Qty</th>
+                  <th className="w-20 px-1 py-1 text-center">Remaining</th>
+                  <th className="w-20 px-1 py-1 text-center">Receipt</th>
+                  <th className="w-16 px-1 py-1 text-center">Defect</th>
+                  <th className="w-16 px-1 py-1 text-center">Accepted</th>
+                  <th className="w-16 px-1 py-1 text-center" title="Photo of the delivered item (compulsory for received items)">Photo *</th>
                 </tr>
               </thead>
               <tbody>
@@ -262,7 +271,76 @@ export default function PublicGrn() {
             </table>
           )}
         </div>
+
+        {/* Mobile card list — regular GRN only. Description, quantities and the photo
+            button all stack in one card so nothing needs horizontal scrolling. */}
+        {!isCustom && (
+          <div className="space-y-3 sm:hidden">
+            {g.lineItems.map((l: any, i: number) => {
+              const accepted = Math.max((Number(l.receiptQty) || 0) - (Number(l.defectQty) || 0), 0);
+              const needsPhoto = !l.photoUrl && (modeOf(l) === 'full' || Number(l.receiptQty) > 0);
+              return (
+                <div key={l.id} className="rounded-lg border border-slate-200 p-3">
+                  <div className="text-sm font-medium text-slate-700">{l.description}</div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-500"><span>PO Qty: <b className="text-slate-700">{l.poQty}</b></span><span>Remaining: <b className="text-slate-700">{l.remainingToReceive}</b></span></div>
+                  {locked ? (
+                    <div className="mt-2 flex flex-wrap gap-x-4 text-xs"><span className="text-slate-500">Receipt: <b>{l.receiptQty}</b></span><span className="text-slate-500">Defect: <b>{l.defectQty}</b></span><span className="text-slate-500">Accepted: <b>{accepted}</b></span></div>
+                  ) : modeOf(l) === undefined ? (
+                    <div className="mt-2"><div className="text-[11px] text-slate-500">100% received?</div>
+                      <div className="mt-1 flex gap-2">
+                        <button className="rounded border border-green-300 bg-green-50 px-3 py-1 text-xs font-semibold text-green-700" onClick={() => markFull(i, l)}>Yes</button>
+                        <button className="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-600" onClick={() => markPartial(l)}>No</button>
+                      </div>
+                    </div>
+                  ) : modeOf(l) === 'full' ? (
+                    <div className="mt-2 text-xs font-semibold text-green-700">✓ 100% received ({l.remainingToReceive}) <button className="ml-1 text-[10px] font-medium text-navy underline" onClick={() => markPartial(l)}>not full?</button></div>
+                  ) : (
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <label className="block text-[10px] uppercase text-slate-400">Receipt<input className="input mt-0.5 text-center" type="number" value={l.receiptQty} onChange={(e) => setLine(i, { receiptQty: e.target.value })} /></label>
+                      <label className="block text-[10px] uppercase text-slate-400">Defect<input className="input mt-0.5 text-center" type="number" value={l.defectQty} onChange={(e) => setLine(i, { defectQty: e.target.value })} /></label>
+                      <div className="text-[10px] uppercase text-slate-400">Accepted<div className="mt-1 text-center text-sm font-semibold text-slate-700">{accepted}</div><button className="block w-full text-[10px] font-medium text-navy underline" onClick={() => markFull(i, l)}>100%?</button></div>
+                    </div>
+                  )}
+                  <div className="mt-2 flex items-center gap-2 border-t border-slate-100 pt-2">
+                    {l.photoUrl && <a href={l.photoUrl} target="_blank" rel="noreferrer"><img src={l.photoUrl} alt="item" className="h-10 w-10 rounded border object-cover" /></a>}
+                    {!locked && (
+                      <label className={`inline-flex cursor-pointer items-center rounded border px-3 py-1.5 text-xs font-medium ${l.photoUrl ? 'border-slate-300 text-slate-600' : needsPhoto ? 'border-rose-300 bg-rose-50 text-rose-600' : 'border-navy/30 text-navy'}`}>
+                        {l.photoUrl ? '📷 Change photo' : '📷 Add photo'}
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadLinePhoto.mutate({ lineId: l.id, file: f }); (e.currentTarget as HTMLInputElement).value = ''; }} />
+                      </label>
+                    )}
+                    {needsPhoto && <span className="text-[10px] text-rose-500">photo needed</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {isCustom && !locked && <button className="mt-2 text-xs font-medium text-navy hover:underline" onClick={addRow}>+ Add row</button>}
+      </div>
+
+      {/* Vendor invoice — uploaded BEFORE remarks so the engineer can cross-check the
+          received quantities against the bill. PDF or image; more than one allowed. */}
+      <div className="card mt-4 p-5">
+        <div className="mb-1 text-sm font-semibold text-slate-600">Vendor Invoice <span className="text-xs font-normal text-slate-400">— helps cross-check quantities</span></div>
+        <p className="mb-3 text-xs text-slate-400">Upload the vendor's invoice — <b>PDF or image</b>. You can upload more than one.</p>
+        {!locked && (
+          <label className="inline-flex cursor-pointer items-center rounded-lg border border-navy/30 bg-navy/5 px-3 py-1.5 text-sm font-medium text-navy hover:bg-navy/10">
+            {uploadInvoice.isPending ? 'Uploading…' : '⬆ Upload invoice'}
+            <input type="file" accept="application/pdf,.pdf,image/*" className="hidden" disabled={uploadInvoice.isPending} onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadInvoice.mutate(f); e.currentTarget.value = ''; }} />
+          </label>
+        )}
+        {(g.invoiceDocs || []).length > 0 ? (
+          <ul className="mt-3 space-y-1.5">
+            {(g.invoiceDocs || []).map((d: any) => (
+              <li key={d.id} className="flex items-center gap-2 text-sm">
+                <a href={d.fileUrl} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-navy hover:underline">{/\.pdf$/i.test(d.fileName) ? '📄' : '🖼️'} {d.fileName}</a>
+                <span className="shrink-0 text-[11px] text-slate-400">{new Date(d.uploadedAt).toLocaleDateString('en-GB')}</span>
+              </li>
+            ))}
+          </ul>
+        ) : locked ? <p className="mt-2 text-xs text-slate-400">No invoice uploaded.</p> : null}
       </div>
 
       <div className="card mt-4 p-5">

@@ -173,6 +173,13 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
     onSuccess: (gr) => { setG(structuredClone(gr)); setMsg('Material received — confirmed by billing. GRN closed.'); qc.invalidateQueries({ queryKey: ['goods-receipts', projectId] }); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Vendor invoice(s) on this GRN — PDF or image, multiple. Uploaded by the site
+  // engineer on the public link, or here by the office; both show in this list.
+  const uploadInvoice = useMutation({
+    mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return (await api.post(`/projects/${projectId}/procurement/goods-receipts/${grId}/invoice`, fd)).data.invoiceDocs; },
+    onSuccess: (docs) => { setG((p: any) => ({ ...p, invoiceDocs: docs })); setMsg('Invoice uploaded.'); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
 
   if (grQ.isLoading || !g) return <Spinner label="Loading goods receipt…" />;
   const editable = g.status === 'DRAFT' && canEdit('grn');
@@ -338,6 +345,29 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
           {g.billingConfirmedAt && <div className="mt-2 text-xs text-emerald-700">Confirmed on {fmtDate(g.billingConfirmedAt)}.</div>}
         </div>
       )}
+
+      {/* Vendor invoice(s) — uploaded by the site engineer on the public link, or here
+          by the office. PDF or image, more than one; to cross-check received quantities. */}
+      <div className="card p-4">
+        <div className="mb-1 text-sm font-semibold text-slate-600">Vendor Invoice(s)</div>
+        <p className="mb-3 text-xs text-slate-400">Invoice(s) against this GRN — to cross-check the received quantities. <b>PDF or image</b>, more than one allowed.</p>
+        {g.invoiceDocs?.length ? (
+          <ul className="space-y-1">
+            {g.invoiceDocs.map((d: any) => (
+              <li key={d.id} className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+                <a href={d.fileUrl} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-navy hover:underline">{/\.pdf$/i.test(d.fileName) ? '📄' : '🖼️'} {d.fileName}</a>
+                <span className="ml-2 shrink-0 text-slate-400">{fmtDate(d.uploadedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="text-xs text-slate-400">No invoice uploaded yet.</p>}
+        {canGrn && (
+          <label className="btn-outline mt-3 inline-block cursor-pointer text-sm">
+            {uploadInvoice.isPending ? 'Uploading…' : '⬆ Upload invoice'}
+            <input type="file" accept="application/pdf,.pdf,image/*" className="hidden" disabled={uploadInvoice.isPending} onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadInvoice.mutate(f); e.currentTarget.value = ''; }} />
+          </label>
+        )}
+      </div>
 
       <div className="card p-4">
         <div className="mb-3 text-sm font-semibold text-slate-600">Notes & Photo</div>
