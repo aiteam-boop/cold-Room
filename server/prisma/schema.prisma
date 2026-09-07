@@ -78,6 +78,8 @@ model Project {
   // A GRN picks WHICH one it is against (GoodsReceipt.clientPoNumber).
   clientPoNumber       String?
   clientPos            Json?
+  // The client's GST number (GSTIN) for this project — shown in the Projects list.
+  clientGstin          String?
   startDate            DateTime?
   targetCompletionDate DateTime?
   status               String          @default("DRAFT")

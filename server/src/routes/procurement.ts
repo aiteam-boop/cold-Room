@@ -170,6 +170,17 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
     ? await prisma.approvalStep.findMany({ where: { docId: { in: pendingIds }, status: 'PENDING' }, select: { docId: true, approverName: true, approverRole: true } })
     : [];
   const pendingBy = new Map(pendingSteps.map((s) => [s.docId, s]));
+  // Approval-chain progress per doc: how many STEPS are approved out of the total, so
+  // the list can show "Approved · 2/2" (a step = one `order`).
+  const allDocIds = docs.map((d) => d.id);
+  const allSteps = allDocIds.length ? await prisma.approvalStep.findMany({ where: { docId: { in: allDocIds } }, select: { docId: true, order: true, status: true } }) : [];
+  const stepsByDoc = new Map<string, { order: number; status: string }[]>();
+  for (const s of allSteps) (stepsByDoc.get(s.docId) ?? stepsByDoc.set(s.docId, []).get(s.docId)!).push(s);
+  const chainOf = (docId: string) => {
+    const ss = stepsByDoc.get(docId) ?? [];
+    const orders = [...new Set(ss.map((s) => s.order))];
+    return { totalSteps: orders.length, approvedSteps: orders.filter((o) => ss.some((s) => s.order === o && s.status === 'APPROVED')).length };
+  };
   // Physical goods receipts (GRN-QAS) per PO/WO — for the "GRN pdf" action.
   const goodsReceipts = docs.length
     ? await prisma.goodsReceipt.findMany({ where: { docId: { in: docs.map((d) => d.id) } }, orderBy: { createdAt: 'desc' }, select: { id: true, grnNumber: true, status: true, docId: true } })
@@ -186,6 +197,7 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         createdBy: (d.createdById && creators.get(d.createdById)) || null,
         pendingWith: pendingBy.get(d.id)?.approverName ?? null,
         pendingWithRole: pendingBy.get(d.id)?.approverRole ?? null,
+        ...chainOf(d.id),
         // Proforma Invoices uploaded on this PO/WO (per term) — shown as a link.
         pis: Object.entries(parseJson(d.termPis, {}) as Record<string, any>).filter(([, v]) => v && v.piPdfUrl).map(([k, v]) => ({ term: k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl as string })),
         goodsReceipts: grByDoc.get(d.id) ?? [],
@@ -997,7 +1009,7 @@ function serializeGrn(grn: any, acc: Parameters<typeof maskFinancials>[1]) {
     ...grn,
     amendments: parseJson(grn.amendments, []),
     poVisible: !hide,
-    ...(grn.doc && { doc: { ...grn.doc, finalAmount: hide ? null : grn.doc.finalAmount } }),
+    ...(grn.doc && { doc: { ...grn.doc, finalAmount: hide ? null : grn.doc.finalAmount, basicAmount: hide ? null : grn.doc.basicAmount } }),
     ...(grn.lineItems && {
       lineItems: grn.lineItems.map(({ lineItem, ...l }: any) => ({
         ...l,
@@ -1071,7 +1083,7 @@ router.get('/grns/:grnId', requireProjectMember, requirePage('grn'), asyncHandle
     where: { id: req.params.grnId, projectId: req.params.projectId },
     include: {
       lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
-      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, basicAmount: true, gstEnabled: true, gstPct: true, vendorId: true } },
     },
   });
   if (!grn) throw notFound();
@@ -1337,7 +1349,7 @@ router.post('/grns/:grnId/resubmit-approval', requireProjectMember, requireEdit(
     where: { id: grn.id, projectId: req.params.projectId },
     include: {
       lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
-      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, basicAmount: true, gstEnabled: true, gstPct: true, vendorId: true } },
     },
   });
   res.json({ grn: serializeGrn(full, req.account) });
@@ -1377,7 +1389,7 @@ router.post('/grns/:grnId/submit-invoice-approval', requireProjectMember, requir
     where: { id: grn.id, projectId: req.params.projectId },
     include: {
       lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } },
-      doc: { select: { docNumber: true, type: true, finalAmount: true, vendorId: true } },
+      doc: { select: { docNumber: true, type: true, finalAmount: true, basicAmount: true, gstEnabled: true, gstPct: true, vendorId: true } },
     },
   });
   res.json({ grn: serializeGrn(full, req.account) });

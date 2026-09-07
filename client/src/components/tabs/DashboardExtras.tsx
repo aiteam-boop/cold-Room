@@ -155,7 +155,7 @@ function ProcPipelineSection({ projectId }: { projectId: string }) {
                           {d.status === 'PENDING_APPROVAL' && d.pendingWith && (
                             <span className="rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700" title="Currently pending with">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</span>
                           )}
-                          <span className={`badge ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : d.status === 'ON_HOLD' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}</span>
+                          <span className={`badge ${d.status === 'APPROVED' ? 'bg-green-100 text-green-700' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : d.status === 'ON_HOLD' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>{titleize(d.status)}{d.totalSteps ? ` · ${d.approvedSteps ?? 0}/${d.totalSteps}` : ''}</span>
                         </span>
                         {(d.sheetPayments?.length ?? 0) > 0 && (
                           <span className="max-w-[260px] truncate rounded bg-green-50 px-2 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments.map((s: any) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>

@@ -7,7 +7,7 @@ import { docStatusPill, fmtDate, inr, titleize } from '../../lib/format';
 import DocBuilder from './DocBuilder';
 import { DeliveryPill, type Delivery } from '../DeliveryBadge';
 
-interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; pendingWith?: string | null; pendingWithRole?: string | null; }
+interface Doc { id: string; type: string; docNumber: string; status: string; vendorName?: string; docDate: string; basicAmount: number; finalAmount: number; esignApplied: boolean; counts: { lineItems: number; grns: number; milestones: number }; delivery?: Delivery; createdBy?: { name: string; email: string } | null; pendingWith?: string | null; pendingWithRole?: string | null; approvedSteps?: number; totalSteps?: number; }
 
 export default function DocList({ projectId, role, type, focusId }: { projectId: string; role: string; type: 'PO' | 'WO' | 'TO'; focusId?: string }) {
   const qc = useQueryClient();
@@ -67,7 +67,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
                   <td className="text-right">{money(d.basicAmount)}</td>
                   <td className="text-right font-medium">{money(d.finalAmount)}</td>
                   <td>
-                    <span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}</span>
+                    <span className={`badge ${docStatusPill(d.status)}`}>{titleize(d.status)}{d.totalSteps ? ` · ${d.approvedSteps ?? 0}/${d.totalSteps}` : ''}</span>
                     {/* Who this document is currently waiting on to approve. */}
                     {d.pendingWith && <div className="mt-0.5 text-[11px] text-amber-600">⏳ {d.pendingWith}{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
                   </td>

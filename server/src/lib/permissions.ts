@@ -60,7 +60,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
 // Entering the budget and FREEZING it are deliberately two different rights: the
 // costing may be typed by one person and locked by whoever owns the number.
 // Freezing is what makes the budget the benchmark, so it is the stronger right.
-export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget'] as const;
+export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
@@ -69,6 +69,7 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
   canMarkPaid: 'Can mark payment milestones paid (Accounts)',
   canEditBudget: 'Can enter the BOQ budget (costing)',
   canFreezeBudget: 'Can FREEZE the budget (locks it for everyone)',
+  seeAllApprovals: 'See ALL raised documents in Approvals (everyone\'s, not just their own)',
 };
 
 export interface PageGrant { view: boolean; edit: boolean }

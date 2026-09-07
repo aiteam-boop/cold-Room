@@ -95,6 +95,7 @@ router.get(
           siteLocation: p.siteLocation,
           clientPoNumber: p.clientPoNumber,
           clientPos: p.clientPos ?? null,
+          clientGstin: p.clientGstin ?? null,
           status: p.status,
           startDate: p.startDate,
           officialStartDate: p.officialStartDate,
@@ -132,6 +133,7 @@ const createSchema = z.object({
   siteLocation: z.string().optional(),
   clientPoNumber: z.string().optional(),
   clientPos: z.array(clientPoSchema).optional(),
+  clientGstin: z.string().trim().max(20).nullable().optional(),
   startDate: z.string().datetime().optional().or(z.string().date().optional()),
   targetCompletionDate: z.string().datetime().optional().or(z.string().date().optional()),
 });
@@ -151,6 +153,7 @@ router.post(
         // (packing-list default) that still read it.
         clientPoNumber: body.clientPos?.length ? body.clientPos[0].number : body.clientPoNumber,
         ...(body.clientPos !== undefined && { clientPos: body.clientPos }),
+        clientGstin: body.clientGstin ?? null,
         startDate: body.startDate ? new Date(body.startDate) : null,
         targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
         createdById: req.user!.sub,
@@ -219,6 +222,7 @@ router.patch(
         ...(body.siteLocation !== undefined && { siteLocation: body.siteLocation }),
         ...(body.clientPos !== undefined && { clientPos: body.clientPos, clientPoNumber: body.clientPos?.[0]?.number ?? null }),
         ...(body.clientPos === undefined && body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
+        ...(body.clientGstin !== undefined && { clientGstin: body.clientGstin }),
         ...(body.startDate !== undefined && { startDate: body.startDate ? new Date(body.startDate) : null }),
         ...(body.targetCompletionDate !== undefined && {
           targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,

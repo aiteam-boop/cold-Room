@@ -118,14 +118,28 @@ export default function VendorsView({ projectId }: { projectId: string; role: st
               {vendors.map((v) => {
                 const pc = primaryContact(v);
                 return (
-                  <tr key={v.id} onClick={() => setViewing(v.id)} className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${v.isActive === false ? 'opacity-60' : ''}`}>
+                  <tr key={v.id} onClick={() => setViewing(v.id)} className={`cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50 ${v.isActive === false ? 'opacity-60' : ''}`}>
                     <td className="px-4 py-2 font-medium text-navy">{v.name}{v.legalName && v.legalName !== v.name && <div className="text-xs font-normal text-slate-400">{v.legalName}</div>}{v.isActive === false && <div className="text-[11px] font-semibold text-red-600">Inactive</div>}</td>
                     <td><span className="badge bg-slate-100 text-slate-600">{v.vendorType ? VENDOR_TYPE_LABEL[v.vendorType] : v.type}</span></td>
                     <td className="text-slate-500">{v.gstin || '—'}</td>
                     <td className="text-slate-500">{v.boqCategories?.length ? v.boqCategories.slice(0, 2).join(', ') + (v.boqCategories.length > 2 ? ` +${v.boqCategories.length - 2}` : '') : '—'}</td>
                     <td className="text-slate-500">{pc ? `${pc.name}${pc.phones?.[0] ? ` · ${pc.phones[0]}` : ''}` : '—'}</td>
-                    <td><KycBadge kyc={v.kyc} kycStatus={v.kycStatus} /></td>
-                    {canManage && <td className="px-2 text-right"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
+                    <td className="align-top">
+                      <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
+                      {/* Which specific KYC documents are still pending — same as the
+                          cards: mandatory in red with a *, optional in grey. */}
+                      {v.kyc?.items?.some((it: any) => !it.done) && (
+                        <div className="mt-1 max-w-[320px] text-[11px] leading-snug">
+                          <span className="text-slate-400">Pending: </span>
+                          {v.kyc.items.filter((it: any) => !it.done).map((it: any, i: number, arr: any[]) => (
+                            <span key={it.key} className={it.mandatory ? 'font-medium text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
+                              {it.label}{it.mandatory ? '*' : ''}{i < arr.length - 1 ? ', ' : ''}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    {canManage && <td className="px-2 text-right align-top"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
                   </tr>
                 );
               })}

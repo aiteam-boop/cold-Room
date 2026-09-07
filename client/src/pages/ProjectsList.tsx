@@ -15,6 +15,7 @@ interface ProjectCard {
   siteLocation?: string;
   clientPoNumber?: string | null;
   clientPos?: { number: string; proofUrl?: string | null }[] | null;
+  clientGstin?: string | null;
   status: string;
   startDate?: string | null;
   officialStartDate?: string | null;
@@ -36,6 +37,8 @@ interface ProjectCard {
 // already returns the list ordered by delay severity — the default here matches
 // it, so "Delay severity" is a no-op re-sort rather than a second ordering.
 const SORTS = {
+  name: { label: 'Name (A–Z)', fn: (a: ProjectCard, b: ProjectCard) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) },
+  nameDesc: { label: 'Name (Z–A)', fn: (a: ProjectCard, b: ProjectCard) => b.name.localeCompare(a.name, undefined, { sensitivity: 'base', numeric: true }) },
   delay: { label: 'Delay severity', fn: (a: ProjectCard, b: ProjectCard) => severity(b) - severity(a) || b.gantt.worstDelay - a.gantt.worstDelay },
   updated: { label: 'Last updated', fn: () => 0 },
   complete: { label: '% complete', fn: (a: ProjectCard, b: ProjectCard) => b.completionPct - a.completionPct },
@@ -49,15 +52,25 @@ export default function ProjectsList() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
-  const [sort, setSort] = useState<SortKey>('delay');
+  const [sort, setSort] = useState<SortKey>('name');
+  const [search, setSearch] = useState('');
   const [view, setView] = useViewMode('projectsList.view', 'cards');
 
   const { data, isLoading } = useQuery({
     queryKey: ['projects'],
     queryFn: async () => (await api.get('/projects')).data.projects as ProjectCard[],
   });
+  // Free-text filter across project name, client, site, GST and Client PO(s) —
+  // so a user can jump straight to a project by any of those.
+  const needle = search.toLowerCase().trim();
+  const matches = (p: ProjectCard) => {
+    if (!needle) return true;
+    const poNumbers = p.clientPos?.map((x) => x.number).join(' ') ?? '';
+    return [p.name, p.clientName, p.siteLocation, p.clientGstin, p.clientPoNumber, poNumbers]
+      .filter(Boolean).some((s) => String(s).toLowerCase().includes(needle));
+  };
   // The server's order is the "last updated" order; every other sort is derived.
-  const projects = data ? [...data].sort(SORTS[sort].fn) : undefined;
+  const projects = data ? [...data].filter(matches).sort(SORTS[sort].fn) : undefined;
 
   // Documents awaiting the signed-in user's approval (surfaced on the home page).
   const { data: myApprovals } = useQuery({
@@ -82,7 +95,15 @@ export default function ProjectsList() {
           <h1 className="text-2xl font-bold text-navy">Projects</h1>
           <p className="text-sm text-slate-500">Cold room construction projects you can access.</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {!!data?.length && (
+            <input
+              className="input w-full max-w-xs py-1.5 text-sm sm:w-64"
+              placeholder="Search name, client, PO, GST…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          )}
           {!!data?.length && <ViewToggle view={view} onChange={setView} />}
           {!!data?.length && (
             <label className="flex items-center gap-1 text-xs text-slate-500">
@@ -101,11 +122,15 @@ export default function ProjectsList() {
       {isLoading ? (
         <Spinner label="Loading projects…" />
       ) : !projects?.length ? (
-        <EmptyState
-          title="No projects yet"
-          hint={user?.role === 'ADMIN' ? 'Create your first project to upload a BOQ and start tracking.' : 'Ask an admin to add you to a project.'}
-          action={user?.role === 'ADMIN' ? <button className="btn-primary mt-2" onClick={() => setShowCreate(true)}>+ New Project</button> : undefined}
-        />
+        needle ? (
+          <EmptyState title="No matches" hint={`No project matches "${search}". Try a different name, client, PO or GST.`} />
+        ) : (
+          <EmptyState
+            title="No projects yet"
+            hint={user?.role === 'ADMIN' ? 'Create your first project to upload a BOQ and start tracking.' : 'Ask an admin to add you to a project.'}
+            action={user?.role === 'ADMIN' ? <button className="btn-primary mt-2" onClick={() => setShowCreate(true)}>+ New Project</button> : undefined}
+          />
+        )
       ) : view === 'grid' ? (
         <ProjectGrid projects={projects} />
       ) : (
@@ -206,10 +231,10 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
   const canEdit = user?.role === 'ADMIN' || user?.role === 'CEO';
   return (
     <div className="card overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="w-full text-sm [&_td]:px-3 [&_td]:py-2 [&_th]:px-3 [&_th]:py-2">
         <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
           <tr>
-            <th className="px-4 py-2">Project</th><th>Status</th><th className="text-right">Completion</th>
+            <th className="px-4 py-2">Project</th><th>Status</th><th>GST No.</th><th>Client PO</th><th className="text-right">Completion</th>
             <th className="text-center" title="Completed · In progress · Not started">C · IP · NS</th>
             <th className="text-center">Delay</th><th className="text-center">Timeline</th><th>Start</th><th>Target</th><th></th>
           </tr>
@@ -221,11 +246,13 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
             return (
               <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50">
                 <td className="px-4 py-2">
-                  <div className="font-medium text-navy">{p.name}</div>
-                  <div className="text-xs text-slate-500">{p.clientName || '—'}{p.siteLocation ? ` · ${p.siteLocation}` : ''}</div>
+                  <div className="max-w-[280px] truncate font-medium text-navy">{p.name}</div>
+                  <div className="max-w-[280px] truncate text-xs text-slate-500" title={`${p.clientName || ''}${p.siteLocation ? ' · ' + p.siteLocation : ''}`}>{p.clientName || '—'}{p.siteLocation ? ` · ${p.siteLocation}` : ''}</div>
                   {p.pendingDrawingApproval && <div className="mt-0.5 text-[10px] font-medium text-amber-700">{p.drawingApprovalLabel}</div>}
                 </td>
                 <td><span className={`badge ${projectStatusPill(p.status)}`}>{p.status}</span></td>
+                <td className="whitespace-nowrap font-mono text-xs text-slate-600">{p.clientGstin || '—'}</td>
+                <td className="text-xs text-slate-600">{p.clientPos?.length ? p.clientPos.map((x) => x.number).join(', ') : (p.clientPoNumber || '—')}</td>
                 <td className="text-right">
                   <div className="font-semibold text-navy">{p.completionPct}%</div>
                   <div className="ml-auto mt-0.5 w-20"><ProgressBar pct={p.completionPct} /></div>
@@ -256,11 +283,11 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', clientPoNumber: '', startDate: '', targetCompletionDate: '' });
+  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', clientPoNumber: '', clientGstin: '', startDate: '', targetCompletionDate: '' });
   const [err, setErr] = useState('');
   const m = useMutation({
     mutationFn: async () => {
-      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, clientPoNumber: form.clientPoNumber };
+      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, clientPoNumber: form.clientPoNumber, clientGstin: form.clientGstin || null };
       if (form.startDate) payload.startDate = form.startDate;
       if (form.targetCompletionDate) payload.targetCompletionDate = form.targetCompletionDate;
       return (await api.post('/projects', payload)).data;
@@ -277,7 +304,10 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={(e) => setForm({ ...form, clientName: e.target.value })} /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} /></div>
         </div>
-        <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
+          <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={(e) => setForm({ ...form, clientGstin: e.target.value })} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">Start date</label><input className="input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></div>
           <div><label className="label">Target completion</label><input className="input" type="date" value={form.targetCompletionDate} onChange={(e) => setForm({ ...form, targetCompletionDate: e.target.value })} /></div>

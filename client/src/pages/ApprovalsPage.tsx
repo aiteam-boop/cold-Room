@@ -16,6 +16,12 @@ interface Item {
   submittedAt: string; myRole?: string | null; pendingWith?: string | null; pendingWithRole?: string | null; legacy?: boolean;
   // Raised by the signed-in user (not an approver on it) → shown read-only, no action buttons.
   raisedByMe?: boolean;
+  raisedBy?: string | null;   // name of whoever raised it (for see-all viewers)
+  // Whether the signed-in user may act (approve/hold) on this item. False for a
+  // "see-all" viewer looking at a document they are not the approver of → view-only.
+  canAct?: boolean;
+  // Approval-chain progress: how many steps are approved out of the total.
+  approvedSteps?: number; totalSteps?: number;
   invoiceNumber?: string | null; invoicePdfUrl?: string | null;
   // Per-term Proforma Invoices uploaded on the PO/WO — the approver can open them
   // straight from the queue.
@@ -42,7 +48,8 @@ interface ApprovedItem {
   label?: string; // display label — 'PO' | 'WO' | 'TO' | 'Payment' | 'GRN'
   docId: string; projectId: string; projectName?: string;
   number: string; vendorName?: string; finalAmount?: number | null;
-  approvedAt?: string | null; approvedBy?: string | null; raisedByMe?: boolean;
+  approvedAt?: string | null; approvedBy?: string | null; raisedByMe?: boolean; raisedBy?: string | null;
+  approvedSteps?: number; totalSteps?: number;
   pis?: { term: string; piNumber: string | null; piUrl: string }[];
   // Physical goods receipts raised against this PO/WO (for the GRN action + popup).
   goodsReceipts?: { id: string; grnNumber: string; status: string; receivedDate?: string | null }[];
@@ -58,6 +65,8 @@ export default function ApprovalsPage() {
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
 
   const [tab, setTab] = useState<'pending' | 'approved'>('pending');
+  // Within the Approved tab: split PO/WO/GRN documents from Payments (PAY-###).
+  const [approvedSub, setApprovedSub] = useState<'docs' | 'payments'>('docs');
   const [search, setSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   // Which Approved rows have their phase pipeline expanded (lazy-loaded on open).
@@ -129,6 +138,12 @@ export default function ApprovalsPage() {
     && (!projectFilter || x.projectId === projectFilter);
   const pendingItems = items.filter(matches);
   const approvedItems = (approvedQ.data ?? []).filter(matches);
+  // A "Payment" row is a PAY-### record (GRN kind, labelled Payment); everything else
+  // (PO / WO / TO / GRN goods receipt) is a document.
+  const isPaymentRow = (d: ApprovedItem) => d.label === 'Payment' || (d.kind === 'GRN' && String(d.number || '').startsWith('PAY'));
+  const approvedDocs = approvedItems.filter((d) => !isPaymentRow(d));
+  const approvedPayments = approvedItems.filter(isPaymentRow);
+  const approvedList = approvedSub === 'payments' ? approvedPayments : approvedDocs;
 
   return (
     <div className="space-y-4">
@@ -174,7 +189,9 @@ export default function ApprovalsPage() {
                       <td className="py-2 pr-2">
                         <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.kind}</span>
                         {latest && <span className="badge ml-1 bg-amber-100 text-amber-700">⚠ Resubmitted</span>}
-                        {d.raisedByMe && <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span>}
+                        {d.raisedByMe ? <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span> : d.raisedBy ? <span className="badge ml-1 bg-slate-100 text-slate-600">🧾 Raised by {d.raisedBy}</span> : null}
+                        {/* Approval-chain progress: how many steps signed vs still pending. */}
+                        {!!d.totalSteps && <span className="badge ml-1 bg-blue-100 text-blue-700">{d.approvedSteps ?? 0}/{d.totalSteps} done · {Math.max(d.totalSteps - (d.approvedSteps ?? 0), 0)} pending</span>}
                         {/* Who this document is currently waiting on (current pending approver). */}
                         {d.pendingWith && <div className="text-xs text-amber-600">⏳ Pending with: <span className="font-medium">{d.pendingWith}</span>{d.pendingWithRole ? ` · ${d.pendingWithRole}` : ''}</div>}
                         {!d.pendingWith && d.myRole && <div className="text-xs text-slate-400">as {d.myRole}</div>}
@@ -200,9 +217,10 @@ export default function ApprovalsPage() {
                             <button key={i} onClick={() => viewPis(d.pis!, i)} title={`Proforma Invoice — ${p.term}${p.piNumber ? ` · ${p.piNumber}` : ''}`} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 PI{d.pis!.length > 1 ? ` (${p.term})` : ''}</button>
                           ))}
                           <button className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-navy hover:bg-slate-50" onClick={() => viewDoc(d)}>📄 View {d.kind}</button>
-                          {/* Raised by me → read-only (I'm the raiser, not the approver): no Approve / On-Hold. */}
-                          {d.raisedByMe ? (
-                            <span className="self-center text-xs text-slate-400">⏳ Awaiting approval</span>
+                          {/* Read-only when it's my own raised doc, or a see-all viewer looking
+                              at a doc they're not the approver of. Otherwise Approve / On-Hold. */}
+                          {(d.raisedByMe || d.canAct === false) ? (
+                            <span className="self-center text-xs text-slate-400">{d.raisedByMe ? '⏳ Awaiting approval' : '👁 View only'}</span>
                           ) : (<>
                             <button className="rounded-lg bg-navy px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'approve')}>✓ Approve</button>
                             <button className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50" disabled={act.isPending} onClick={() => decide(d, 'hold')}>⏸ On Hold</button>
@@ -236,17 +254,25 @@ export default function ApprovalsPage() {
         </div>
       ))}
 
+      {/* Approved sub-tabs: documents (PO/WO/GRN) vs Payments (PAY-###). */}
+      {tab === 'approved' && !approvedQ.isLoading && (
+        <div className="flex flex-wrap gap-2 text-sm">
+          <button type="button" onClick={() => setApprovedSub('docs')} className={`rounded-md px-3 py-1.5 font-medium ${approvedSub === 'docs' ? 'bg-navy text-white' : 'text-slate-500 hover:bg-slate-100'}`}>PO / WO / GRN ({approvedDocs.length})</button>
+          <button type="button" onClick={() => setApprovedSub('payments')} className={`rounded-md px-3 py-1.5 font-medium ${approvedSub === 'payments' ? 'bg-navy text-white' : 'text-slate-500 hover:bg-slate-100'}`}>Payments ({approvedPayments.length})</button>
+        </div>
+      )}
+
       {tab === 'approved' && (
         approvedQ.isLoading ? <Spinner label="Loading approved…" />
-        : approvedItems.length === 0 ? <EmptyState title={needle || projectFilter ? 'No matches' : 'Nothing approved yet'} hint={needle || projectFilter ? 'No approved document matches your filter.' : 'Approved PO/WO/GRN will appear here.'} />
+        : approvedList.length === 0 ? <EmptyState title={needle || projectFilter ? 'No matches' : (approvedSub === 'payments' ? 'No approved payments' : 'Nothing approved yet')} hint={needle || projectFilter ? 'No approved document matches your filter.' : (approvedSub === 'payments' ? 'Approved payments will appear here.' : 'Approved PO/WO/GRN will appear here.')} />
         : (
           <div className="card overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
-                <tr><th className="w-8 pl-4 py-2"></th><th className="py-2">Approved</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right pr-6">Amount</th><th className="pl-2">Approved by</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>
+                <tr><th className="w-8 pl-4 py-2"></th><th className="py-2">Approved</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right pr-6">Amount</th><th className="pl-2">Status</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>
               </thead>
               <tbody>
-                {approvedItems.map((d) => {
+                {approvedList.map((d) => {
                   const key = `${d.kind}-${d.docId}`;
                   const canPipe = d.kind === 'PO' || d.kind === 'WO'; // pipeline is for PO/WO docs
                   const open = openPipe.has(key);
@@ -257,8 +283,7 @@ export default function ApprovalsPage() {
                     <td className="whitespace-nowrap py-2 pr-4 align-top text-slate-500">{d.approvedAt ? fmtDate(d.approvedAt) : '—'}</td>
                     <td className="py-2 pr-2">
                       <Link to={`/projects/${d.projectId}?open=${d.kind.toLowerCase()}:${d.docId}`} onClick={(e) => e.stopPropagation()} className="font-medium text-navy hover:underline" title="Open in its project">{d.number}</Link> <span className="badge bg-slate-100 text-slate-600">{d.label ?? d.kind}</span>
-                      <span className="badge ml-1 bg-green-100 text-green-700">Approved</span>
-                      {d.raisedByMe && <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span>}
+                      {d.raisedByMe ? <span className="badge ml-1 bg-emerald-100 text-emerald-700">🧾 Raised by you</span> : d.raisedBy ? <span className="badge ml-1 bg-slate-100 text-slate-600">🧾 Raised by {d.raisedBy}</span> : null}
                       {(d.sheetPayments?.length ?? 0) > 0 && (
                         <span className="ml-1 inline-block max-w-[230px] truncate align-middle rounded bg-green-50 px-1.5 py-0.5 font-mono text-[10px] font-medium text-green-700" title={d.sheetPayments!.map((s) => `${s.utr}${s.vrNo ? ` (${s.vrNo})` : ''}`).join('\n')}>💠 UTR: {d.sheetPayments!.map((s) => s.utr).join(', ')}</span>
                       )}
@@ -266,7 +291,11 @@ export default function ApprovalsPage() {
                     <td className="text-slate-600">{d.projectName}</td>
                     <td className="text-slate-600">{d.vendorName || '—'}</td>
                     <td className="text-right font-medium pr-6">{money(d.finalAmount)}</td>
-                    <td className="pl-2 text-slate-500">{d.approvedBy || '—'}</td>
+                    {/* Status — approval-chain progress (e.g. "Approved · 2/2"). */}
+                    <td className="pl-2">
+                      <span className="badge bg-green-100 text-green-700">Approved{d.totalSteps ? ` · ${d.approvedSteps ?? d.totalSteps}/${d.totalSteps}` : ''}</span>
+                      {d.approvedBy && <div className="mt-0.5 text-[11px] text-slate-400">by {d.approvedBy}</div>}
+                    </td>
                     {/* Goods receipts against this PO/WO — one opens directly, several open a popup. */}
                     <td className="text-slate-500">
                       {(d.goodsReceipts?.length ?? 0) === 0 ? <span className="text-slate-300">—</span>

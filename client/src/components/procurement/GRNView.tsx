@@ -776,6 +776,21 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
             <F label="Balance to Pay (auto)"><input className="input bg-slate-50 font-semibold text-navy" disabled value={inr(balanceToPay)} readOnly /></F>
           </div>
 
+          {/* PO value breakup — for reference only, so the raiser can compare the
+              Basic vs GST vs Final PO value against what's being paid. This does NOT
+              change the amount actually being paid (that stays "Amount to Pay"). */}
+          {g.doc?.basicAmount != null && (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+              <span className="font-semibold text-slate-600">PO value (for reference):</span>
+              <span className="text-slate-500">Basic Amount: <span className="font-medium text-slate-700">{inr(g.doc.basicAmount)}</span></span>
+              {g.doc.gstEnabled && g.doc.gstPct != null && (
+                <span className="text-slate-500">GST ({g.doc.gstPct}%): <span className="font-medium text-slate-700">{inr(Math.round(((g.doc.finalAmount ?? 0) - (g.doc.basicAmount ?? 0)) * 100) / 100)}</span></span>
+              )}
+              {g.doc.finalAmount != null && <span className="text-slate-500">Final Amount (with GST): <span className="font-semibold text-navy">{inr(g.doc.finalAmount)}</span></span>}
+              <span className="text-[11px] text-slate-400">Only "Amount to Pay" above is actually paid.</span>
+            </div>
+          )}
+
           {/* The PO's terms, same strip as the FMS form. */}
           {milestones.length > 0 && (
             <div className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-500">

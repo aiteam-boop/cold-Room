@@ -3,7 +3,7 @@ import { prisma } from '../lib/prisma';
 import { asyncHandler } from '../lib/errors';
 import { requireAuth, requirePage } from '../middleware/authMiddleware';
 import { maskFinancials } from '../lib/financial';
-import { parseApprover } from '../lib/permissions';
+import { parseApprover, hasSection } from '../lib/permissions';
 import { isAdmin } from '../lib/enums';
 import { verifyApprovalToken, recordDecision, finalizeApproval, markDocOnHold, resolveActor, approvalDocData, parseAmendments, nextReminderAt, remindersEnabled } from '../services/approvalChain';
 import { signApiPath } from '../lib/signedUrl';
@@ -208,9 +208,13 @@ router.get(
 router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
   const me = req.account!;
   const admin = me.role === 'ADMIN';
+  // `seeAll` = admins, OR anyone granted the "See ALL raised documents" section
+  // permission. They see EVERY pending document, not just the ones awaiting their own
+  // approval — but can still only ACT on their own step (canAct); the rest is view-only.
+  const seeAll = admin || hasSection(me, 'seeAllApprovals');
 
   const steps = await prisma.approvalStep.findMany({
-    where: { status: 'PENDING', ...(admin ? {} : { approverId: me.id }) },
+    where: { status: 'PENDING', ...(seeAll ? {} : { approverId: me.id }) },
     orderBy: { createdAt: 'asc' },
   });
   const poIds = steps.filter((s) => s.docType !== 'GRN').map((s) => s.docId);
@@ -232,21 +236,22 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
     const remindAt = nextReminderAt(s).toISOString();
     if (s.docType === 'GRN') {
       const g = grnById.get(s.docId);
-      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments), nextReminderAt: remindAt };
+      return g && { kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments), nextReminderAt: remindAt, canAct: admin || s.approverId === me.id, raisedById: g.raisedById };
     }
     const d = docById.get(s.docId);
-    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis), nextReminderAt: remindAt };
+    return d && { kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: s.approverRole, pendingWith: s.approverName, pendingWithRole: s.approverRole, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis), nextReminderAt: remindAt, canAct: admin || s.approverId === me.id, raisedById: d.createdById };
   }).filter(Boolean) as any[];
 
-  // Admins also see legacy items that were submitted without an approval chain.
-  if (admin) {
+  // seeAll users also see legacy items that were submitted without an approval chain.
+  // Only an admin can ACT on these (no chain to authorise anyone else) → canAct: admin.
+  if (seeAll) {
     const withChain = new Set(steps.map((s) => s.docId));
     const [legacyDocs, legacyGrns] = await Promise.all([
       prisma.procurementDoc.findMany({ where: { status: 'PENDING_APPROVAL', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
       prisma.gRN.findMany({ where: { status: 'OPEN', id: { notIn: [...withChain] } }, include: { project: { select: { name: true } } } }),
     ]);
-    for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis) });
-    for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) });
+    for (const d of legacyDocs) items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, legacy: true, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis), canAct: admin, raisedById: d.createdById });
+    for (const g of legacyGrns) items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, legacy: true, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments), canAct: admin, raisedById: g.raisedById });
   }
 
   // Whoever opens the Approvals page also sees the documents THEY raised that are
@@ -266,8 +271,28 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
     const pendSteps = rIds.length ? await prisma.approvalStep.findMany({ where: { docId: { in: rIds }, status: 'PENDING' }, orderBy: { order: 'asc' } }) : [];
     const pendBy = new Map<string, { name: string | null; role: string | null }>();
     for (const s of pendSteps) if (!pendBy.has(s.docId)) pendBy.set(s.docId, { name: s.approverName, role: s.approverRole });
-    for (const d of myDocs) { const p = pendBy.get(d.id); items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, raisedByMe: true, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis) }); }
-    for (const g of myGrns) { const p = pendBy.get(g.id); items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, raisedByMe: true, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) }); }
+    for (const d of myDocs) { const p = pendBy.get(d.id); items.push({ kind: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, submittedAt: d.updatedAt, myRole: null, raisedByMe: true, raisedById: me.id, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, amendments: parseAmendments(d.amendments), pis: piLinks(d.termPis) }); }
+    for (const g of myGrns) { const p = pendBy.get(g.id); items.push({ kind: 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, submittedAt: g.createdAt, myRole: null, raisedByMe: true, raisedById: me.id, pendingWith: p?.name ?? null, pendingWithRole: p?.role ?? null, invoiceNumber: g.invoiceNumber, invoicePdfUrl: g.invoicePdfUrl, amendments: parseAmendments(g.amendments) }); }
+  }
+
+  // Resolve WHO raised each item (createdBy / raisedBy) so a see-all viewer sees the
+  // raiser's name; `raisedByMe` is recomputed here from the raiser id, uniformly.
+  const rIds = [...new Set(items.map((i) => i.raisedById).filter(Boolean) as string[])];
+  const raisers = rIds.length ? await prisma.user.findMany({ where: { id: { in: rIds } }, select: { id: true, name: true } }) : [];
+  const raiserName = new Map(raisers.map((u) => [u.id, u.name]));
+  // Approval progress per doc: how many chain STEPS are approved out of the total, so
+  // the queue shows "2/3 done · 1 pending" at a glance (a step = one `order`).
+  const allDocIds = [...new Set(items.map((i) => i.docId))];
+  const allSteps = allDocIds.length ? await prisma.approvalStep.findMany({ where: { docId: { in: allDocIds } }, select: { docId: true, order: true, status: true } }) : [];
+  const stepsByDoc = new Map<string, { order: number; status: string }[]>();
+  for (const s of allSteps) (stepsByDoc.get(s.docId) ?? stepsByDoc.set(s.docId, []).get(s.docId)!).push(s);
+  for (const it of items) {
+    it.raisedByMe = !!it.raisedById && it.raisedById === me.id;
+    it.raisedBy = it.raisedById ? (raiserName.get(it.raisedById) ?? null) : null;
+    const ss = stepsByDoc.get(it.docId) ?? [];
+    const orders = [...new Set(ss.map((s) => s.order))];
+    it.totalSteps = orders.length;
+    it.approvedSteps = orders.filter((o) => ss.some((s) => s.order === o && s.status === 'APPROVED')).length;
   }
 
   res.json({ items: maskFinancials(items, req.account), remindersOn: remindersEnabled() });
@@ -279,9 +304,12 @@ router.get('/mine', requireAuth, asyncHandler(async (req, res) => {
 router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const me = req.account!;
   const admin = me.role === 'ADMIN';
+  // seeAll (admin or the "See ALL raised documents" section permission) → every
+  // approved doc across projects; otherwise only the ones this user approved or raised.
+  const seeAll = admin || hasSection(me, 'seeAllApprovals');
   let docWhere: any = { status: 'APPROVED' };
   let grnWhere: any = { status: 'APPROVED' };
-  if (!admin) {
+  if (!seeAll) {
     const mySteps = await prisma.approvalStep.findMany({ where: { approverId: me.id, status: 'APPROVED' }, select: { docId: true, docType: true } });
     const poIds = mySteps.filter((s) => s.docType !== 'GRN').map((s) => s.docId);
     const grnIds = mySteps.filter((s) => s.docType === 'GRN').map((s) => s.docId);
@@ -294,8 +322,9 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
     prisma.procurementDoc.findMany({ where: docWhere, orderBy: { approvedAt: 'desc' }, take: 100, include: { project: { select: { name: true } } } }),
     prisma.gRN.findMany({ where: grnWhere, orderBy: { approvedAt: 'desc' }, take: 100, include: { project: { select: { name: true } } } }),
   ]);
-  // Resolve the finaliser's name for the "approved by" column.
-  const approverIds = [...new Set([...docs.map((d) => d.approvedById), ...grns.map((g) => g.approvedById)].filter(Boolean) as string[])];
+  // Resolve names for the "approved by" column AND the raiser ("raised by") — so a
+  // see-all viewer sees who raised each approved document too.
+  const approverIds = [...new Set([...docs.map((d) => d.approvedById), ...grns.map((g) => g.approvedById), ...docs.map((d) => d.createdById), ...grns.map((g) => g.raisedById)].filter(Boolean) as string[])];
   const approvers = approverIds.length ? await prisma.user.findMany({ where: { id: { in: approverIds } }, select: { id: true, name: true } }) : [];
   const nameById = new Map(approvers.map((a) => [a.id, a.name]));
 
@@ -315,9 +344,21 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
   const items = [
     // `label` is what the UI shows (PO/WO, or "Payment" for a PAY-### record); `kind`
     // stays PO/WO/GRN so the PDF path + pipeline logic keep working.
-    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, raisedByMe: d.createdById === me.id, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
-    ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, raisedByMe: g.raisedById === me.id, goodsReceipts: [] })),
+    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, raisedByMe: d.createdById === me.id, raisedBy: (d.createdById && nameById.get(d.createdById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
+    ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, raisedByMe: g.raisedById === me.id, raisedBy: (g.raisedById && nameById.get(g.raisedById)) || null, goodsReceipts: [] })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
+
+  // Approval progress per doc (approved steps / total) so the row shows "Approved · 2/2".
+  const aDocIds = [...new Set(items.map((i) => i.docId))];
+  const aSteps = aDocIds.length ? await prisma.approvalStep.findMany({ where: { docId: { in: aDocIds } }, select: { docId: true, order: true, status: true } }) : [];
+  const aByDoc = new Map<string, { order: number; status: string }[]>();
+  for (const s of aSteps) (aByDoc.get(s.docId) ?? aByDoc.set(s.docId, []).get(s.docId)!).push(s);
+  for (const it of items as any[]) {
+    const ss = aByDoc.get(it.docId) ?? [];
+    const orders = [...new Set(ss.map((s) => s.order))];
+    it.totalSteps = orders.length;
+    it.approvedSteps = orders.filter((o) => ss.some((s) => s.order === o && s.status === 'APPROVED')).length;
+  }
 
   res.json({ items: maskFinancials(items, req.account) });
 }));
