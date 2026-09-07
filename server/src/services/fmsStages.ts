@@ -74,7 +74,10 @@ export function matchPaymentStages(
   rows: FmsStageRow[],
 ): { stages: FmsStages | null; reason: string } {
   if (!(p.amount > 0)) return { stages: null, reason: 'no amount to match on' };
-  const amtHit = (row: FmsStageRow) => (row.amount != null && Math.abs(row.amount - p.amount) < 0.5) || (row.amountToPay != null && Math.abs(row.amountToPay - p.amount) < 0.5);
+  // ±1 tolerance: a milestone can carry paise (e.g. 3,07,200.5) while the sheet has
+  // the rounded rupee (3,07,201) — an exact-0.5 gap must still match. Under 1 rupee so
+  // genuinely different amounts (≥1 apart) never merge.
+  const amtHit = (row: FmsStageRow) => (row.amount != null && Math.abs(row.amount - p.amount) < 1) || (row.amountToPay != null && Math.abs(row.amountToPay - p.amount) < 1);
   const vendorHit = (row: FmsStageRow) => Boolean(norm(row.vendor) && norm(p.vendorName) && (norm(row.vendor).includes(norm(p.vendorName)) || norm(p.vendorName).includes(norm(row.vendor))));
   const byAmt = rows.filter(amtHit);
   const byInvAmt = p.invoiceNumber ? byAmt.filter((row) => norm(row.invoice) && norm(row.invoice) === norm(p.invoiceNumber)) : [];

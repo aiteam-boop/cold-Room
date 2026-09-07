@@ -10,6 +10,7 @@ import PettyCashPage from './pages/PettyCashPage';
 import TravelPlanningPage from './pages/TravelPlanningPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import MasterReports from './pages/MasterReports';
+import DepositTracking from './pages/DepositTracking';
 import UsersAdmin from './pages/UsersAdmin';
 import ApiKeysAdmin from './pages/ApiKeysAdmin';
 import MachineModelsPage from './pages/MachineModelsPage';
@@ -72,6 +73,7 @@ export default function App() {
         <Route path="/travel" element={<RequirePage page="travel"><TravelPlanningPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
         <Route path="/reports" element={<RequirePage page="reports"><MasterReports /></RequirePage>} />
+        <Route path="/deposits" element={<RequirePage page="po"><DepositTracking /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
         <Route path="/settings/api-keys" element={<RequireSuperAdmin><ApiKeysAdmin /></RequireSuperAdmin>} />
         <Route path="/settings/machine-models" element={<RequirePage page="machinemodels"><MachineModelsPage /></RequirePage>} />

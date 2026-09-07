@@ -46,6 +46,7 @@ import paymentApprovalRoutes from './routes/paymentApproval';
 import invoiceApprovalRoutes from './routes/invoiceApproval';
 import travelRoutes from './routes/travel';
 import travelApprovalRoutes from './routes/travelApproval';
+import depositRoutes from './routes/deposits';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -101,6 +102,7 @@ app.use('/api/projects/:projectId/drawings', drawingRoutes);
 app.use('/api/projects/:projectId/dashboard', dashboardRoutes);
 app.use('/api/projects/:projectId/reports', reportRoutes);
 app.use('/api/reports', masterReportRoutes);
+app.use('/api/deposits', depositRoutes);
 app.use('/api/projects/:projectId/procurement', procurementRoutes);
 app.use('/api/projects/:projectId/boq-items', boqEnhanceRoutes);
 app.use('/api/projects/:projectId/gantt', ganttRoutes);

@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtDate, projectStatusPill } from '../lib/format';
 import { Modal, ProgressBar, RiskBadge, Spinner, EmptyState } from '../components/ui';
+import ViewToggle, { useViewMode } from '../components/ViewToggle';
 import ProjectEditModal from '../components/ProjectEditModal';
 
 interface ProjectCard {
@@ -12,6 +13,8 @@ interface ProjectCard {
   name: string;
   clientName?: string;
   siteLocation?: string;
+  clientPoNumber?: string | null;
+  clientPos?: { number: string; proofUrl?: string | null }[] | null;
   status: string;
   startDate?: string | null;
   officialStartDate?: string | null;
@@ -47,6 +50,7 @@ export default function ProjectsList() {
   const qc = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [sort, setSort] = useState<SortKey>('delay');
+  const [view, setView] = useViewMode('projectsList.view', 'cards');
 
   const { data, isLoading } = useQuery({
     queryKey: ['projects'],
@@ -79,6 +83,7 @@ export default function ProjectsList() {
           <p className="text-sm text-slate-500">Cold room construction projects you can access.</p>
         </div>
         <div className="flex items-center gap-2">
+          {!!data?.length && <ViewToggle view={view} onChange={setView} />}
           {!!data?.length && (
             <label className="flex items-center gap-1 text-xs text-slate-500">
               Sort by
@@ -101,6 +106,8 @@ export default function ProjectsList() {
           hint={user?.role === 'ADMIN' ? 'Create your first project to upload a BOQ and start tracking.' : 'Ask an admin to add you to a project.'}
           action={user?.role === 'ADMIN' ? <button className="btn-primary mt-2" onClick={() => setShowCreate(true)}>+ New Project</button> : undefined}
         />
+      ) : view === 'grid' ? (
+        <ProjectGrid projects={projects} />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {projects.map((p) => <ProjectCardTile key={p.id} p={p} />)}
@@ -187,6 +194,64 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
     </Link>
     {editing && <ProjectEditModal project={p} onClose={() => setEditing(false)} />}
     </>
+  );
+}
+
+// Table (grid) view of the same projects — same data as the cards, denser. A row
+// opens the project; the pencil (Admin/CEO) edits it. Purely a display alternative.
+function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [editing, setEditing] = useState<ProjectCard | null>(null);
+  const canEdit = user?.role === 'ADMIN' || user?.role === 'CEO';
+  return (
+    <div className="card overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
+          <tr>
+            <th className="px-4 py-2">Project</th><th>Status</th><th className="text-right">Completion</th>
+            <th className="text-center" title="Completed · In progress · Not started">C · IP · NS</th>
+            <th className="text-center">Delay</th><th className="text-center">Timeline</th><th>Start</th><th>Target</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {projects.map((p) => {
+            const overdue = p.daysRemaining != null && p.daysRemaining < 0;
+            const daysLabel = p.daysRemaining == null ? 'No target date' : overdue ? `${Math.abs(p.daysRemaining)}d overdue` : `${p.daysRemaining}d left`;
+            return (
+              <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50">
+                <td className="px-4 py-2">
+                  <div className="font-medium text-navy">{p.name}</div>
+                  <div className="text-xs text-slate-500">{p.clientName || '—'}{p.siteLocation ? ` · ${p.siteLocation}` : ''}</div>
+                  {p.pendingDrawingApproval && <div className="mt-0.5 text-[10px] font-medium text-amber-700">{p.drawingApprovalLabel}</div>}
+                </td>
+                <td><span className={`badge ${projectStatusPill(p.status)}`}>{p.status}</span></td>
+                <td className="text-right">
+                  <div className="font-semibold text-navy">{p.completionPct}%</div>
+                  <div className="ml-auto mt-0.5 w-20"><ProgressBar pct={p.completionPct} /></div>
+                </td>
+                <td className="whitespace-nowrap text-center text-xs"><span className="font-semibold text-green-600">{p.stats.completed}</span> · <span className="font-semibold text-blue-600">{p.stats.inProgress}</span> · <span className="font-semibold text-slate-400">{p.stats.notStarted}</span></td>
+                <td className="text-center"><RiskBadge level={p.delayRisk.level} />{p.gantt.delayed > 0 && <div className="text-[10px] text-red-600">{p.gantt.delayed} delayed</div>}</td>
+                <td className="text-center text-xs text-slate-500">{p.timelinePct != null ? `${p.timelinePct}%` : '—'}</td>
+                <td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(p.startDate)}</td>
+                <td className="whitespace-nowrap text-xs">
+                  <div className="text-slate-500">{fmtDate(p.targetCompletionDate)}</div>
+                  <div className={overdue ? 'font-medium text-red-600' : 'text-slate-400'}>{daysLabel}</div>
+                </td>
+                <td className="pr-4 text-right" onClick={(e) => e.stopPropagation()}>
+                  {canEdit && (
+                    <button className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-navy" title="Edit project details" onClick={() => setEditing(p)}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {editing && <ProjectEditModal project={editing} onClose={() => setEditing(null)} />}
+    </div>
   );
 }
 

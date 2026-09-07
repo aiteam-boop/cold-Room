@@ -16,7 +16,7 @@ import { maskFinancials } from '../lib/financial';
 import { upload, uploadPdf } from '../middleware/upload';
 import { SIGNED_TYPE } from '../services/grnReminders';
 import { audit } from '../lib/audit';
-import { extractPiFields } from '../services/piExtract';
+import { extractPiFields, extractPiLineItems } from '../services/piExtract';
 import { scheduleSheetSync } from '../services/sheetsSync';
 import {
   COMPANY, nextDocNumber, computeTotals, paymentTotalPct,
@@ -378,6 +378,9 @@ const lineSchema = z.object({
   // Multiple BOQ item names (internal PDF display) + a per-line remark.
   boqItemNames: z.array(z.string()).optional().nullable(),
   lineRemark: z.string().max(2000).optional().nullable(),
+  // Deposit marker — flags a refundable/adjustable deposit line for Deposit Tracking.
+  isDeposit: z.boolean().optional(),
+  depositNote: z.string().max(2000).optional().nullable(),
 });
 // Accept null on optional string fields — the client sends null for the
 // address field that doesn't apply (siteAddress on a PO, shipTo on a WO).
@@ -458,7 +461,7 @@ router.patch('/docs/:docId', requireProjectMember, requireAnyEdit(...DOC_PAGES),
     let order = 0;
     for (const li of b.lineItems) {
       const total = li.isLeadTime ? 0 : (li.totalPrice ?? li.qty * li.unitPrice);
-      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, boqHead: li.boqHead ?? null, boqItemNames: li.boqItemNames != null ? JSON.stringify(li.boqItemNames) : null, lineRemark: li.lineRemark ?? null, sortOrder: order++ } });
+      await prisma.procurementLineItem.create({ data: { docId: existing.id, srNo: li.srNo ?? order + 1, description: li.description, uom: li.uom ?? null, qty: li.qty, unitPrice: li.unitPrice, totalPrice: Math.round(total * 100) / 100, isLeadTime: !!li.isLeadTime, gstExempt: !!li.gstExempt, gstExemptRemark: li.gstExemptRemark ?? null, gstPct: li.gstPct ?? null, leadTimeText: li.leadTimeText ?? null, customValues: li.customValues != null ? JSON.stringify(li.customValues) : null, boqItemId: li.boqItemId ?? null, boqHead: li.boqHead ?? null, boqItemNames: li.boqItemNames != null ? JSON.stringify(li.boqItemNames) : null, lineRemark: li.lineRemark ?? null, isDeposit: !!li.isDeposit, depositNote: li.isDeposit ? (li.depositNote ?? null) : null, sortOrder: order++ } });
     }
     totals = computeTotals(b.lineItems.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, totalPrice: l.totalPrice, isLeadTime: l.isLeadTime, gstExempt: l.gstExempt, gstPct: l.gstPct })), b.gstEnabled ?? existing.gstEnabled, b.gstPct ?? existing.gstPct, { basicAmount: b.basicAmount, gstAmount: b.gstAmount, finalAmount: b.finalAmount });
   } else if (b.basicAmount != null || b.gstAmount != null || b.finalAmount != null || b.gstPct != null || b.gstEnabled != null) {
@@ -782,6 +785,10 @@ router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdi
   const fileUrl = `/uploads/${req.file.filename}`;
   // Read the PI so number / date / value fill themselves (best-effort).
   const extracted = await extractPiFields(req.file.path, req.file.mimetype).catch(() => null);
+  // Also read the item rows (Description / UOM / Qty / Unit price) so the buyer can
+  // fill the PO lines from the PI instead of retyping. Best-effort, reviewed by the
+  // user — never auto-applied; does NOT touch the doc's saved line items here.
+  const lineItems = await extractPiLineItems(req.file.path, req.file.mimetype).catch(() => null);
   const termPis = parseJson(doc.termPis, {}) as Record<string, any>;
   termPis[termKey] = {
     piPdfUrl: fileUrl,
@@ -801,7 +808,7 @@ router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdi
       await remindCurrent(doc.type as DocType, doc.id, actor);
     } catch { /* email is best-effort; the PI is saved regardless */ }
   }
-  res.json({ ok: true, termKey, pi: termPis[termKey], extracted });
+  res.json({ ok: true, termKey, pi: termPis[termKey], extracted, lineItems: lineItems?.lineItems ?? [], lineItemsNote: lineItems?.note ?? null });
 }));
 
 // ── Payment milestones ──────────────────────────────────────────────────────
@@ -1607,7 +1614,7 @@ export function packingListShape(gr: any) {
     status: gr.status,
     customerName: gr.project?.clientName ?? null,
     customerAddress: gr.siteAddress || gr.project?.siteLocation || null,
-    clientPoNumber: gr.project?.clientPoNumber ?? null,
+    clientPoNumber: gr.clientPoNumber ?? gr.project?.clientPoNumber ?? null,
     // The internal PO/WO this GRN is against (shown on the packing list).
     againstNumber: gr.doc?.docNumber ?? null,
     againstType: gr.doc?.type ?? null,
@@ -1670,7 +1677,7 @@ router.post('/goods-receipts', requireProjectMember, requireEdit('grn'), asyncHa
   if (mode === 'CUSTOM') {
     gr = await prisma.goodsReceipt.create({
       data: { ...base, mode: 'CUSTOM', customColumns: JSON.stringify(DEFAULT_PACKING_COLUMNS) },
-      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true, clientPos: true } } },
     });
   } else {
     // Previously received per line = sum of already-RECEIVED goods receipts for this PO.
@@ -1681,7 +1688,7 @@ router.post('/goods-receipts', requireProjectMember, requireEdit('grn'), asyncHa
         ...base, mode: 'DIRECT',
         lineItems: { create: doc.lineItems.map((li, i) => ({ lineItemId: li.id, srNo: i + 1, description: li.description, uom: li.uom, poQty: li.qty, previouslyReceivedQty: priorMap.get(li.id) ?? 0, receiptQty: 0, defectQty: 0, acceptedQty: 0 })) },
       },
-      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+      include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true, clientPos: true } } },
     });
   }
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GOODS_RECEIPT_CREATE', entity: 'GoodsReceipt', entityId: gr.id, details: { grnNumber, against: doc.docNumber, mode: mode || 'DIRECT' } });
@@ -1691,7 +1698,7 @@ router.post('/goods-receipts', requireProjectMember, requireEdit('grn'), asyncHa
 router.get('/goods-receipts/:grId', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const gr = await prisma.goodsReceipt.findFirst({
     where: { id: req.params.grId, projectId: req.params.projectId },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true, clientPos: true } } },
   });
   if (!gr) throw notFound();
   const signedDocs = await signedDocsFor(gr.grnNumber);
@@ -1705,6 +1712,8 @@ const goodsReceiptUpdate = z.object({
   invoiceNumber: z.string().nullable().optional(), dispatchDate: z.string().nullable().optional(), deliveryDate: z.string().nullable().optional(), ewayBillNumber: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
   siteSupervisor: z.string().nullable().optional(),
+  // Which of the project's client PO numbers this GRN is against (picked in "Against").
+  clientPoNumber: z.string().nullable().optional(),
   // Mode 2 (custom packing list) — configurable columns Amisha builds.
   customColumns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
   packingListNo: z.coerce.number().int().nullable().optional(),
@@ -1743,13 +1752,14 @@ router.patch('/goods-receipts/:grId', requireProjectMember, requireEdit('grn'), 
     data: {
       vehicleNumber: b.vehicleNumber ?? undefined, vehicleSize: b.vehicleSize ?? undefined, driverName: b.driverName ?? undefined, deliveryChallanNumber: b.deliveryChallanNumber ?? undefined, remarks: b.remarks ?? undefined,
       siteSupervisor: b.siteSupervisor ?? undefined,
+      clientPoNumber: b.clientPoNumber === undefined ? undefined : b.clientPoNumber,
       invoiceNumber: b.invoiceNumber ?? undefined, ewayBillNumber: b.ewayBillNumber ?? undefined,
       dispatchDate: b.dispatchDate ? new Date(b.dispatchDate) : (b.dispatchDate === null ? null : undefined),
       deliveryDate: b.deliveryDate ? new Date(b.deliveryDate) : (b.deliveryDate === null ? null : undefined),
       ...(b.customColumns && { customColumns: JSON.stringify(b.customColumns) }),
       ...(b.packingListNo !== undefined && { packingListNo: b.packingListNo }),
     },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } } },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, doc: { select: { docNumber: true, type: true, finalAmount: true } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true, clientPos: true } } },
   });
   res.json({ goodsReceipt: serializeGoodsReceipt(updated) });
 }));
@@ -1842,7 +1852,7 @@ router.post('/goods-receipts/:grId/confirm-billing', requireProjectMember, requi
 router.get('/goods-receipts/:grId/pdf', requireProjectMember, requirePage('grn'), asyncHandler(async (req, res) => {
   const gr = await prisma.goodsReceipt.findFirst({
     where: { id: req.params.grId, projectId: req.params.projectId },
-    include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true } }, doc: { select: { docNumber: true, type: true } } },
+    include: { lineItems: { orderBy: { srNo: 'asc' } }, project: { select: { clientName: true, siteLocation: true, clientPoNumber: true, clientPos: true } }, doc: { select: { docNumber: true, type: true } } },
   });
   if (!gr) throw notFound();
   res.setHeader('Content-Type', 'application/pdf');

@@ -384,6 +384,16 @@ export default function DocPaper({ d, setD, editable, vendors, boqHeads = [], bo
                     <input className="w-full rounded border border-slate-200 bg-amber-50/40 px-1 py-0.5 text-[10px] text-slate-600" placeholder="Remark for this line (internal — shown on the internal PDF)" value={l.lineRemark || ''} onChange={(e) => setLine(i, { lineRemark: e.target.value || null })} />
                   ) : (l.lineRemark ? <div className="text-[10px] text-slate-500">📝 {l.lineRemark}</div> : null)}
                 </div>
+                {/* Deposit marker — flags this line as a refundable/adjustable deposit
+                    for the global Deposit Tracking tab. Internal — never on the vendor PDF. */}
+                <div className="mt-1 print:hidden">
+                  {editable ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <button type="button" onClick={() => setLine(i, { isDeposit: !l.isDeposit })} className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${l.isDeposit ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-400 hover:bg-slate-50'}`}>💰 {l.isDeposit ? 'Deposit ✓' : 'Mark as Deposit'}</button>
+                      {l.isDeposit && <input className="min-w-[120px] flex-1 rounded border border-emerald-200 bg-emerald-50/40 px-1 py-0.5 text-[10px] text-slate-600" placeholder="Deposit note (e.g. cylinder deposit — refundable)" value={l.depositNote || ''} onChange={(e) => setLine(i, { depositNote: e.target.value || null })} />}
+                    </div>
+                  ) : (l.isDeposit ? <div className="text-[10px] font-medium text-emerald-700">💰 Deposit{l.depositNote ? ` — ${l.depositNote}` : ''}</div> : null)}
+                </div>
               </td>
               {customCols.map((c) => (
                 <td key={c.key} className={`border ${B} p-1`}><T value={l.customValues?.[c.key] ?? ''} onChange={(x: string) => setCell(i, c.key, x)} className="text-center" /></td>

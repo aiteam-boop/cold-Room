@@ -115,6 +115,7 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/goods-receipts/${grId}`, {
       vehicleNumber: g.vehicleNumber, vehicleSize: g.vehicleSize, remarks: g.remarks, siteSupervisor: g.siteSupervisor,
+      clientPoNumber: g.clientPoNumber ?? null,
       // Packing-list / delivery fields (Amisha 63/64).
       dispatchDate: g.dispatchDate?.slice?.(0, 10) || null, deliveryDate: g.deliveryDate?.slice?.(0, 10) || null,
       ...(g.mode === 'CUSTOM'
@@ -226,6 +227,23 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
             <div className="mb-3 text-sm font-semibold text-slate-600">Against</div>
             <div className="grid gap-3 sm:grid-cols-3">
               <F label="PO / WO Number"><input className="input bg-slate-50 text-slate-600" value={g.doc?.docNumber ?? '—'} disabled readOnly /></F>
+              {/* Client PO Number — which of the project's client POs this GRN is against.
+                  A dropdown when the project has several; else the single value. Prints on the packing list. */}
+              {(() => {
+                const cps: { number: string }[] = Array.isArray(g.project?.clientPos) && g.project.clientPos.length ? g.project.clientPos : (g.project?.clientPoNumber ? [{ number: g.project.clientPoNumber }] : []);
+                return (
+                  <F label="Client PO Number">
+                    {editable && cps.length > 1 ? (
+                      <select className="input" value={g.clientPoNumber ?? ''} onChange={(e) => setG({ ...g, clientPoNumber: e.target.value || null })}>
+                        <option value="">— select client PO —</option>
+                        {cps.map((p, i) => <option key={i} value={p.number}>{p.number}</option>)}
+                      </select>
+                    ) : (
+                      <input className="input bg-slate-50 text-slate-600" value={g.clientPoNumber ?? cps[0]?.number ?? '—'} disabled readOnly />
+                    )}
+                  </F>
+                );
+              })()}
               <F label="Vendor"><input className="input bg-slate-50 text-slate-600" value={g.vendorName ?? '—'} disabled readOnly /></F>
               <F label="Site Address"><input className="input bg-slate-50 text-slate-600" value={g.siteAddress ?? '—'} disabled readOnly /></F>
             </div>

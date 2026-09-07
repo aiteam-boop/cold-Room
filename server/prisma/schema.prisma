@@ -72,8 +72,12 @@ model Project {
   clientName           String?
   siteLocation         String?
   // The client's PO number this project/delivery is booked against — printed on the
-  // packing list (Amisha interview 64). A client may have several; editable.
+  // packing list (Amisha interview 64). `clientPoNumber` is the LEGACY single value
+  // (kept for old projects + fallback); `clientPos` is the newer list of multiple
+  // client POs, each with an optional uploaded proof: JSON [{ number, proofUrl }].
+  // A GRN picks WHICH one it is against (GoodsReceipt.clientPoNumber).
   clientPoNumber       String?
+  clientPos            Json?
   startDate            DateTime?
   targetCompletionDate DateTime?
   status               String          @default("DRAFT")
@@ -461,11 +465,37 @@ model ProcurementLineItem {
   boqItemNames String?
   // Per-line remark shown on the internal PDF, on its own line under the BOQ items.
   lineRemark  String?
+  // Deposit marker — this line is a refundable/adjustable deposit paid to the vendor.
+  // `isDeposit` surfaces it in the global Deposit Tracking tab; the recovery details
+  // (received / status / reference) live in DepositRecovery so a PO re-save (which
+  // deletes+recreates its lines) never wipes them.
+  isDeposit   Boolean @default(false)
+  depositNote String?
 
   grnLines    GRNLineItem[]
 
   @@index([docId])
   @@index([boqItemId])
+}
+
+// Recovery tracking for a PO/WO deposit line — kept OUT of ProcurementLineItem so a
+// PO re-save never wipes it. Keyed by doc id + normalized description so it re-attaches
+// to the same deposit line. amountRequired = the deposit line's total (read live from
+// the line); pending recovery = required − amountReceived.
+model DepositRecovery {
+  id             String   @id @default(cuid()) @map("_id")
+  projectId      String
+  docId          String   // the PO/WO the deposit line belongs to
+  docNumber      String
+  descKey        String   // normalized line description (stable match key)
+  amountReceived Float    @default(0)      // recovered / refunded back so far
+  refDetails     String?                   // payment / receipt reference
+  status         String   @default("HELD") // HELD | REFUNDED | ADJUSTED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([docId, descKey])
+  @@index([projectId])
 }
 
 // Auto-generated from 6-field payment terms (one per non-zero field).
@@ -653,6 +683,10 @@ model GoodsReceipt {
   receivedDate DateTime @default(now())
   vendorName  String?
   siteAddress String?
+  // Which of the project's client PO numbers THIS goods receipt is against — picked
+  // in the "Against" section when the project has several. Falls back to the
+  // project's default client PO. Printed on the packing list.
+  clientPoNumber String?
   raisedById  String?
   vehicleNumber String?
   vehicleSize String?   // e.g. "40 FT" — shown on the packing list

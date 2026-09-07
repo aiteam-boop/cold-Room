@@ -55,7 +55,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
             <tbody>
               {docs.map((d) => (
                 <tr key={d.id} className="border-b border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-2 font-medium text-navy">{d.docNumber}{d.esignApplied && <span className="ml-1 text-xs text-blue-600">✓e-sign</span>}</td>
+                  <td className="px-4 py-2 font-medium text-navy">{d.docNumber}</td>
                   <td className="text-slate-600">{d.vendorName || '—'}</td>
                   {/* Who raised it — the email, so it is obvious who to go back to. */}
                   <td className="text-slate-500">

@@ -89,15 +89,15 @@ const VISION_PROMPT =
   'piValue is the FINAL payable grand total (after taxes), digits only. ' +
   'Use "" for anything not printed. Copy exactly as printed — do not guess or invent.';
 
-async function groqVision(b64: string, mime: string): Promise<string> {
+async function groqVision(b64: string, mime: string, prompt: string = VISION_PROMPT, maxTokens = 300): Promise<string> {
   const model = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
     body: JSON.stringify({
-      model, temperature: 0, max_tokens: 300,
+      model, temperature: 0, max_tokens: maxTokens,
       messages: [{ role: 'user', content: [
-        { type: 'text', text: VISION_PROMPT },
+        { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
       ] }],
     }),
@@ -107,17 +107,30 @@ async function groqVision(b64: string, mime: string): Promise<string> {
   return data.choices?.[0]?.message?.content ?? '';
 }
 
-async function anthropicVision(b64: string, mime: string, isPdf: boolean): Promise<string> {
+// Text-only Groq call (for a digital PDF whose text we already extracted).
+async function groqText(prompt: string, maxTokens = 2000): Promise<string> {
+  const model = process.env.GROQ_TEXT_MODEL || process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: JSON.stringify({ model, temperature: 0, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+  const data: any = await res.json();
+  return data.choices?.[0]?.message?.content ?? '';
+}
+
+async function anthropicVision(b64: string, mime: string, isPdf: boolean, prompt: string = VISION_PROMPT, maxTokens = 400): Promise<string> {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest', max_tokens: 400,
+      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest', max_tokens: maxTokens,
       messages: [{ role: 'user', content: [
         isPdf
           ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
           : { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-        { type: 'text', text: VISION_PROMPT },
+        { type: 'text', text: prompt },
       ] }],
     }),
   });
@@ -167,5 +180,76 @@ export async function extractPiFields(filePath: string, mimeType?: string): Prom
   } catch (err) {
     console.error('[extractPiFields] vision failed:', (err as Error).message);
     return { source: 'none', note: 'Could not read this PI automatically — please fill the fields manually.' };
+  }
+}
+
+// ── Line-item extraction (Description / UOM / Qty / Unit price) ────────────────
+// Best-effort — invoice tables vary a lot, so this fills a DRAFT the user reviews;
+// it never overwrites the PO on its own. Same two paths: text PDF → LLM reads the
+// extracted text; image / scan → a vision model. Never throws.
+export interface PiLineItem { description: string; uom: string; quantity: number; unitPrice: number; }
+
+const numish = (v: unknown): number => { const n = Number(String(v ?? '').replace(/[,\s₹]/g, '')); return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : 0; };
+
+const LINE_ITEMS_PROMPT =
+  'This is a vendor proforma invoice / tax invoice. Extract ONLY the item rows (the goods or services being billed). ' +
+  'Return ONLY a JSON array — each element {"description":string,"uom":string,"quantity":number,"unitPrice":number}. ' +
+  'description = the item text as printed. uom = unit of measure (Nos, Kg, Mtr, Set, etc.) or "" if absent. ' +
+  'quantity = the qty number. unitPrice = the per-unit BASIC rate BEFORE tax (not the line total) as a number. ' +
+  'EXCLUDE any header row, sub-total, tax rows (GST/CGST/SGST/IGST), grand total, discount, freight, round-off and terms. ' +
+  'If there are no item rows, return []. Copy values exactly as printed — never guess or invent.';
+
+/** Parse the model's JSON array through trusted validation (never trust it raw). */
+function linesFromModelJson(raw: string): PiLineItem[] {
+  const arr = raw.match(/\[[\s\S]*\]/)?.[0] ?? raw;
+  let parsed: unknown;
+  try { parsed = JSON.parse(arr); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  const out: PiLineItem[] = [];
+  for (const it of parsed) {
+    if (!it || typeof it !== 'object') continue;
+    const o = it as Record<string, unknown>;
+    const description = typeof o.description === 'string' ? o.description.trim().replace(/\s+/g, ' ').slice(0, 500) : '';
+    const uom = typeof o.uom === 'string' ? o.uom.trim().slice(0, 20) : '';
+    const quantity = numish(o.quantity);
+    const unitPrice = numish(o.unitPrice);
+    if (!description) continue;
+    if (!quantity && !unitPrice) continue; // skip non-item / total rows
+    out.push({ description, uom, quantity, unitPrice });
+  }
+  return out.slice(0, 100);
+}
+
+export async function extractPiLineItems(filePath: string, mimeType?: string): Promise<{ lineItems: PiLineItem[]; source: 'pdf-text' | 'vision' | 'none'; note?: string }> {
+  const isPdf = /pdf$/i.test(filePath) || !!mimeType?.includes('pdf');
+  const groq = !!process.env.GROQ_API_KEY;
+  const anthropic = !!process.env.ANTHROPIC_API_KEY;
+  if (!groq && !anthropic) return { lineItems: [], source: 'none', note: 'No AI key configured — set GROQ_API_KEY to auto-read PI line items.' };
+  try {
+    if (isPdf) {
+      const text = await extractPdfText(filePath, 20000);
+      if (text && text.trim().length > 40) {
+        // Digital PDF: send its text to the LLM (cheap, exact source).
+        const raw = groq
+          ? await groqText(`${LINE_ITEMS_PROMPT}\n\nINVOICE TEXT:\n${text}`)
+          : await anthropicVision(fs.readFileSync(filePath).toString('base64'), 'application/pdf', true, LINE_ITEMS_PROMPT, 2000);
+        const items = linesFromModelJson(raw);
+        return { lineItems: items, source: 'pdf-text', note: items.length ? undefined : 'No line items detected on this PI.' };
+      }
+      // Scanned PDF (no text layer) → only Anthropic can read a PDF document block.
+      if (anthropic) {
+        const raw = await anthropicVision(fs.readFileSync(filePath).toString('base64'), 'application/pdf', true, LINE_ITEMS_PROMPT, 2000);
+        return { lineItems: linesFromModelJson(raw), source: 'vision' };
+      }
+      return { lineItems: [], source: 'none', note: 'Scanned PI (no text layer) — line-item auto-fill needs a text PDF (or ANTHROPIC_API_KEY).' };
+    }
+    // Image → Groq vision (or Anthropic).
+    const b64 = fs.readFileSync(filePath).toString('base64');
+    const mime = mimeType || (/\.png$/i.test(filePath) ? 'image/png' : 'image/jpeg');
+    const raw = anthropic ? await anthropicVision(b64, mime, false, LINE_ITEMS_PROMPT, 2000) : await groqVision(b64, mime, LINE_ITEMS_PROMPT, 2000);
+    return { lineItems: linesFromModelJson(raw), source: 'vision' };
+  } catch (err) {
+    console.error('[extractPiLineItems] failed:', (err as Error).message);
+    return { lineItems: [], source: 'none', note: 'Could not read line items from this PI automatically.' };
   }
 }

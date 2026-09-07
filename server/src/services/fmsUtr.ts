@@ -52,7 +52,9 @@ export function matchPaymentUtr(
   rows: UtrRow[],
 ): { match: UtrMatch | null; reason: string; candidates: UtrRow[] } {
   if (!(p.amount > 0)) return { match: null, reason: 'no amount to match on', candidates: [] };
-  const amtHit = (row: UtrRow) => (row.amount != null && Math.abs(row.amount - p.amount) < 0.5) || (row.amountToPay != null && Math.abs(row.amountToPay - p.amount) < 0.5);
+  // ±1 tolerance: milestone paise (e.g. 3,07,200.5) vs the sheet's rounded rupee
+  // (3,07,201) — an exact-0.5 gap must still match. Under 1 so distinct amounts don't merge.
+  const amtHit = (row: UtrRow) => (row.amount != null && Math.abs(row.amount - p.amount) < 1) || (row.amountToPay != null && Math.abs(row.amountToPay - p.amount) < 1);
   const vendorHit = (row: UtrRow) => Boolean(norm(row.vendor) && norm(p.vendorName) && (norm(row.vendor).includes(norm(p.vendorName)) || norm(p.vendorName).includes(norm(row.vendor))));
   const byAmt = rows.filter(amtHit);
   const byInvAmt = p.invoiceNumber ? byAmt.filter((row) => norm(row.invoice) && norm(row.invoice) === norm(p.invoiceNumber)) : [];

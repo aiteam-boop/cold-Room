@@ -10,12 +10,14 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { Modal } from './ui';
 
+export interface ClientPo { number: string; proofUrl?: string | null }
 export interface EditableProject {
   id: string;
   name: string;
   clientName?: string | null;
   siteLocation?: string | null;
   clientPoNumber?: string | null;
+  clientPos?: ClientPo[] | null;
   startDate?: string | null;
   targetCompletionDate?: string | null;
   status?: string;
@@ -34,12 +36,31 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
     name: project.name ?? '',
     clientName: project.clientName ?? '',
     siteLocation: project.siteLocation ?? '',
-    clientPoNumber: project.clientPoNumber ?? '',
     startDate: day(project.startDate),
     targetCompletionDate: day(project.targetCompletionDate),
     status: project.status ?? 'ACTIVE',
   });
+  // Multiple client PO numbers (each with an optional uploaded proof). Seeded from the
+  // new `clientPos`, else the legacy single `clientPoNumber`, else one blank row.
+  const [pos, setPos] = useState<ClientPo[]>(() => {
+    const arr = Array.isArray(project.clientPos) ? project.clientPos : null;
+    if (arr && arr.length) return arr.map((p) => ({ number: p.number || '', proofUrl: p.proofUrl || null }));
+    if (project.clientPoNumber) return [{ number: project.clientPoNumber, proofUrl: null }];
+    return [{ number: '', proofUrl: null }];
+  });
+  const [uploading, setUploading] = useState<number | null>(null);
   const [err, setErr] = useState('');
+  const setPo = (i: number, patch: Partial<ClientPo>) => setPos((prev) => prev.map((p, j) => (j === i ? { ...p, ...patch } : p)));
+  const addPo = () => setPos((prev) => [...prev, { number: '', proofUrl: null }]);
+  const delPo = (i: number) => setPos((prev) => prev.filter((_, j) => j !== i));
+  const uploadProof = async (i: number, file: File) => {
+    setUploading(i);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const res = await api.post(`/projects/${project.id}/client-po-proof`, fd);
+      setPo(i, { proofUrl: res.data?.fileUrl || null });
+    } catch (e) { setErr(errMsg(e)); } finally { setUploading(null); }
+  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -48,7 +69,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         name: form.name.trim(),
         clientName: form.clientName.trim() || null,
         siteLocation: form.siteLocation.trim() || null,
-        clientPoNumber: form.clientPoNumber.trim() || null,
+        clientPos: pos.filter((p) => p.number.trim()).map((p) => ({ number: p.number.trim(), proofUrl: p.proofUrl || null })),
         startDate: form.startDate || null,
         targetCompletionDate: form.targetCompletionDate || null,
         status: form.status,
@@ -81,7 +102,26 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         <div className="grid gap-3 sm:grid-cols-2">
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={set('clientName')} placeholder="Not set" /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={set('siteLocation')} placeholder="Not set" /></div>
-          <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={set('clientPoNumber')} placeholder="Client's PO (shown on packing list)" /></div>
+        </div>
+
+        {/* Client PO number(s) — a project may have several; each can carry a proof.
+            Shown on the packing list; a GRN picks WHICH one in its "Against" section. */}
+        <div>
+          <label className="label">Client PO Number(s) <span className="text-[10px] font-normal text-slate-400">shown on the packing list · pick per-GRN when there are several</span></label>
+          <div className="space-y-2">
+            {pos.map((p, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                <input className="input min-w-[160px] flex-1" value={p.number} onChange={(e) => setPo(i, { number: e.target.value })} placeholder="Client's PO number" />
+                {p.proofUrl && <a href={p.proofUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 Proof</a>}
+                <label className="cursor-pointer text-xs font-medium text-navy hover:underline">
+                  {uploading === i ? 'Uploading…' : p.proofUrl ? 'Replace' : '⬆ Upload proof'}
+                  <input type="file" className="hidden" accept="application/pdf,.pdf,image/*" disabled={uploading === i} onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadProof(i, f); e.currentTarget.value = ''; }} />
+                </label>
+                {pos.length > 1 && <button type="button" className="text-rose-400 hover:text-rose-600" onClick={() => delPo(i)} title="Remove">✕</button>}
+              </div>
+            ))}
+          </div>
+          <button type="button" className="mt-1.5 text-xs font-medium text-navy hover:underline" onClick={addPo}>+ Add PO number</button>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">

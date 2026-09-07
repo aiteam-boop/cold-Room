@@ -92,7 +92,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
       payGstInclusive: !!d.payGstInclusive,
       customColumns: d.customColumns ?? [],
       payTriggers: d.payTriggers, termsSections: d.termsSections,
-      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null, boqHead: l.boqHead ?? null, boqItemNames: Array.isArray(l.boqItemNames) ? l.boqItemNames : [], lineRemark: l.lineRemark ?? null })),
+      lineItems: d.lineItems.map((l: any, i: number) => ({ srNo: i + 1, description: l.description, uom: l.uom, qty: Number(l.qty), unitPrice: Number(l.unitPrice), totalPrice: l.totalOverride != null ? Number(l.totalPrice) : undefined, isLeadTime: l.isLeadTime, gstExempt: !!l.gstExempt, gstExemptRemark: l.gstExempt ? (l.gstExemptRemark ?? null) : null, gstPct: l.gstExempt ? null : (l.gstPct != null ? Number(l.gstPct) : null), leadTimeText: l.leadTimeText, customValues: l.customValues ?? {}, boqItemId: l.boqItemId ?? null, boqHead: l.boqHead ?? null, boqItemNames: Array.isArray(l.boqItemNames) ? l.boqItemNames : [], lineRemark: l.lineRemark ?? null, isDeposit: !!l.isDeposit, depositNote: l.isDeposit ? (l.depositNote ?? null) : null })),
       // Only sent when amending an approved doc — the server logs it and requires it.
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.doc,
@@ -193,6 +193,22 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
   }
   function addLine(lead = false) { setD((p: any) => ({ ...p, lineItems: [...p.lineItems, { description: '', qty: 0, unitPrice: 0, totalPrice: 0, uom: isWO ? 'Nos.' : null, isLeadTime: lead, leadTimeText: lead ? '7 Days' : null }] })); }
   function delLine(i: number) { setD((p: any) => ({ ...p, lineItems: p.lineItems.filter((_: any, idx: number) => idx !== i) })); }
+  // Fill the PO line items from a PI's auto-extracted rows. Best-effort + user-reviewed
+  // (a confirm before it touches anything; the buyer can edit/delete after). Fills an
+  // empty PO, or appends to existing lines — never silently overwrites.
+  function fillFromPi(lines: any[]) {
+    const mapped = (lines || []).filter((l) => (l?.description || '').trim()).map((l) => ({
+      description: l.description || '', qty: Number(l.quantity) || 0, unitPrice: Number(l.unitPrice) || 0,
+      totalPrice: 0, uom: isWO ? (l.uom || 'Nos.') : (l.uom || null), isLeadTime: false, leadTimeText: null,
+    }));
+    if (!mapped.length) { alert('Is PI se koi line item nahi mila — manually add karein.'); return; }
+    const real = (d.lineItems || []).filter((l: any) => (l.description || '').trim() || Number(l.qty) || Number(l.unitPrice));
+    if (real.length === 0) {
+      if (confirm(`PI se ${mapped.length} line item mile. PO me bhar dun? (aap edit / delete kar sakte ho)`)) setD((p: any) => ({ ...p, lineItems: mapped }));
+    } else if (confirm(`PI se ${mapped.length} item mile. Mojooda ${real.length} line(s) ke SAATH jodein (append)?`)) {
+      setD((p: any) => ({ ...p, lineItems: [...p.lineItems, ...mapped] }));
+    }
+  }
   // "Head then many items" (PRD §5/D2): assign one head to several lines at once.
   // Touches ONLY boqHead — never description/qty/price/link. `onlyEmpty` protects
   // lines that already have a head.
@@ -698,7 +714,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
       {/* Per-payment-term Proforma Invoices — the approver sees these with the PO,
           and a GRN raised for a term auto-fetches its PI. */}
-      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} onUploaded={(key, pi) => setD((prev: any) => ({ ...prev, termPis: { ...(prev?.termPis || {}), [key]: pi } }))} />
+      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} onUploaded={(key, pi) => setD((prev: any) => ({ ...prev, termPis: { ...(prev?.termPis || {}), [key]: pi } }))} onLinesExtracted={fillFromPi} />
     </div>
   );
 }
@@ -898,7 +914,7 @@ const PI_TERMS = [
   { key: 'postCompletion', name: 'Post Completion', pct: 'payPostCompletionPct' },
   { key: 'retention', name: 'Retention', pct: 'payRetentionPct' },
 ] as const;
-function TermPIs({ projectId, docId, doc, editable, onUploaded }: { projectId: string; docId: string; doc: any; editable: boolean; onUploaded: (key: string, pi: any) => void }) {
+function TermPIs({ projectId, docId, doc, editable, onUploaded, onLinesExtracted }: { projectId: string; docId: string; doc: any; editable: boolean; onUploaded: (key: string, pi: any) => void; onLinesExtracted: (lines: any[]) => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const termPis = doc.termPis || {};
   const terms = PI_TERMS.filter((t) => (Number(doc[t.pct]) || 0) > 0);
@@ -911,13 +927,15 @@ function TermPIs({ projectId, docId, doc, editable, onUploaded }: { projectId: s
       // whole document, which would reset the user's unsaved edits (bug fix). The
       // PI is already persisted server-side by the endpoint above.
       onUploaded(key, res.data?.pi ?? null);
+      // If the PI reader found item rows, offer to fill the PO lines from them.
+      if (Array.isArray(res.data?.lineItems) && res.data.lineItems.length) onLinesExtracted(res.data.lineItems);
     } catch (e) { alert(errMsg(e)); } finally { setBusy(null); }
   };
   if (!terms.length) return null;
   return (
     <div className="card p-4">
       <div className="text-sm font-semibold text-slate-600">Proforma Invoices (PI) — per payment term</div>
-      <p className="mb-2 mt-0.5 text-xs text-slate-400">Upload the PI for each payment term. The approver sees these with the PO, and a GRN raised for that term auto-fetches its PI.</p>
+      <p className="mb-2 mt-0.5 text-xs text-slate-400">Upload the PI for each payment term. The approver sees these with the PO, and a GRN raised for that term auto-fetches its PI. <span className="text-emerald-600">Uploading a PI also reads its item rows (Description / UOM / Qty / Unit price) and offers to fill the PO lines — you review before it applies.</span></p>
       <div className="divide-y divide-slate-100">
         {terms.map((t) => {
           const pi = termPis[t.key];

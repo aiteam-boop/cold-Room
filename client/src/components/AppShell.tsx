@@ -35,6 +35,7 @@ export default function AppShell() {
                   approvers (who may lack the page grant) can act on their items. */}
               <NavLink to="/approvals" className={navCls}>Approvals</NavLink>
               {canView('reports') && <NavLink to="/reports" className={navCls}>Reports</NavLink>}
+              {canView('po') && <NavLink to="/deposits" className={navCls}>Deposit Tracking</NavLink>}
               {canView('machinemodels') && <NavLink to="/settings/machine-models" className={navCls}>Machine Models</NavLink>}
               {isAdmin && <NavLink to="/settings/users" className={navCls}>Users</NavLink>}
               {isSuperAdmin && <NavLink to="/settings/api-keys" className={navCls}>API Keys</NavLink>}

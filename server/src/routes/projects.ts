@@ -94,6 +94,7 @@ router.get(
           clientName: p.clientName,
           siteLocation: p.siteLocation,
           clientPoNumber: p.clientPoNumber,
+          clientPos: p.clientPos ?? null,
           status: p.status,
           startDate: p.startDate,
           officialStartDate: p.officialStartDate,
@@ -123,11 +124,14 @@ router.get(
   })
 );
 
+// One client PO the project is booked against, with an optional uploaded proof.
+const clientPoSchema = z.object({ number: z.string().trim().min(1).max(120), proofUrl: z.string().max(1000).nullable().optional() });
 const createSchema = z.object({
   name: z.string().min(1),
   clientName: z.string().optional(),
   siteLocation: z.string().optional(),
   clientPoNumber: z.string().optional(),
+  clientPos: z.array(clientPoSchema).optional(),
   startDate: z.string().datetime().optional().or(z.string().date().optional()),
   targetCompletionDate: z.string().datetime().optional().or(z.string().date().optional()),
 });
@@ -143,7 +147,10 @@ router.post(
         name: body.name,
         clientName: body.clientName,
         siteLocation: body.siteLocation,
-        clientPoNumber: body.clientPoNumber,
+        // Legacy single field stays in sync with the first client PO for consumers
+        // (packing-list default) that still read it.
+        clientPoNumber: body.clientPos?.length ? body.clientPos[0].number : body.clientPoNumber,
+        ...(body.clientPos !== undefined && { clientPos: body.clientPos }),
         startDate: body.startDate ? new Date(body.startDate) : null,
         targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
         createdById: req.user!.sub,
@@ -210,7 +217,8 @@ router.patch(
         ...(body.name !== undefined && { name: body.name }),
         ...(body.clientName !== undefined && { clientName: body.clientName }),
         ...(body.siteLocation !== undefined && { siteLocation: body.siteLocation }),
-        ...(body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
+        ...(body.clientPos !== undefined && { clientPos: body.clientPos, clientPoNumber: body.clientPos?.[0]?.number ?? null }),
+        ...(body.clientPos === undefined && body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
         ...(body.startDate !== undefined && { startDate: body.startDate ? new Date(body.startDate) : null }),
         ...(body.targetCompletionDate !== undefined && {
           targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
@@ -224,6 +232,19 @@ router.patch(
     res.json({ project });
   })
 );
+
+// POST /api/projects/:projectId/client-po-proof — upload a proof (PDF or image) for a
+// client PO. Returns the file URL; the modal stores it on the PO entry, then saves.
+// Admin/CEO only (same as project edit). Does not itself change the project.
+router.post('/:projectId/client-po-proof', upload.single('file'), asyncHandler(async (req, res) => {
+  const canEditProject = isAdmin(req.account!.role) || req.account!.role === 'CEO';
+  if (!canEditProject) throw forbidden('Only an Admin or CEO can edit a project.');
+  if (!req.file) throw badRequest('Please attach the proof (PDF or image).');
+  const exists = await prisma.project.findUnique({ where: { id: req.params.projectId }, select: { id: true } });
+  if (!exists) throw notFound('Project not found');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  res.status(201).json({ ok: true, fileUrl });
+}));
 
 // ── Drawing Approval checklist (Sprint PRD §2.2) ─────────────────────────────
 // Reachable from both project settings and the Gantt view. Editing is gated on

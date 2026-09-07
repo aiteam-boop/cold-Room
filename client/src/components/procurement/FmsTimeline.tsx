@@ -32,9 +32,11 @@ export default function FmsTimeline({
   showMeta?: boolean;          // show the A/C status + VR + UTR footer
 }) {
   const s = fmsStages ?? null;
-  // A UTR or VR number is proof Finance has paid — so the whole Accounts journey is
-  // complete, whether or not we matched the row that carries the per-stage timestamps.
-  const isPaid = Boolean(paid) || Boolean(s?.finance?.actual) || Boolean(s?.vrNo) || Boolean(vrNo) || Boolean(s?.utr) || Boolean(utr);
+  // Finance has paid ONLY when there's a UTR, the Finance-stage timestamp, or the
+  // in-app paid flag. A VR No. alone is NOT proof — it's a voucher assigned DURING
+  // processing (before Finance pays), so it must not force the Accounts stages
+  // complete (that wrongly showed "Paid by Finance" green while payment was pending).
+  const isPaid = Boolean(paid) || Boolean(s?.finance?.actual) || Boolean(s?.utr) || Boolean(utr);
   const steps: Step[] = [
     { label: 'Payment raised', sub: 'Mail sent', at: requestedAt, done: true },
     { label: 'Approved', sub: 'in-app', at: approvedAt, done: Boolean(approved) || isPaid },
