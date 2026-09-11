@@ -91,10 +91,20 @@ export async function notifyCurrentPaymentStep(grn: PayGrn): Promise<void> {
     if (!emails.length) { const cc = approvalCcEmail(); if (cc) emails = [cc]; }
     if (!emails.length) return;
 
-    const po = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { docNumber: true } });
+    const po = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { docNumber: true, basicAmount: true, finalAmount: true, gstEnabled: true, gstPct: true } });
     const link = `${appBaseUrl()}/api/public/payment-approval/${token}?step=${stepOrder}`;
     const piUrl = grn.piPdfUrl ? `${appBaseUrl()}${grn.piPdfUrl.startsWith('/api/') ? signApiPath(grn.piPdfUrl) : grn.piPdfUrl}` : null;
+    const rup = (n: number) => `₹${(Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
     const lines = [`A payment <strong>${grn.grnNumber}</strong>${po?.docNumber ? ` (against ${po.docNumber})` : ''}${grn.vendorName ? ` — ${grn.vendorName}` : ''} needs your decision.`];
+    // Amount actually being paid + the PO value breakup (Basic / GST / Final) so
+    // the approver sees the split, not just one lump figure.
+    const payAmt = grn.amountToPay ?? grn.piValue ?? 0;
+    lines.push(`Amount to pay: <strong>${rup(payAmt)}</strong>`);
+    if (po?.basicAmount != null) {
+      const gstAmt = Math.round(((po.finalAmount ?? 0) - (po.basicAmount ?? 0)) * 100) / 100;
+      const gstBit = po.gstEnabled && po.gstPct != null ? ` &nbsp;·&nbsp; GST (${po.gstPct}%): <strong>${rup(gstAmt)}</strong>` : '';
+      lines.push(`PO value — Basic: <strong>${rup(po.basicAmount)}</strong>${gstBit} &nbsp;·&nbsp; Final (with GST): <strong>${rup(po.finalAmount ?? 0)}</strong>`);
+    }
     if (piUrl) lines.push(`Proforma Invoice${grn.piNumber ? ` (PI ${grn.piNumber})` : ''}: <a href="${piUrl}" style="color:#052379;font-weight:600;text-decoration:none">📄 View PI</a>`);
     // Ledger Head — free-text remark from the Payment, so the approver sees it here.
     const ledger = grn.ledgerHead ?? (await prisma.gRN.findUnique({ where: { id: grn.id }, select: { ledgerHead: true } }).catch(() => null))?.ledgerHead ?? null;

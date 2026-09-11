@@ -44,7 +44,7 @@ export interface WorkspaceData {
 // `view` distinguishes the tabs that share one PageKey — the whole room-wise DPR
 // module is gated by the single 'dpr' grant but renders as one sidebar entry per
 // tab of the original workbook.
-type Item = { key: PageKey; label: string; icon: keyof typeof ICONS; view?: string };
+type Item = { key: PageKey; label: string; icon: keyof typeof ICONS; view?: string; parent?: string };
 type Nav = { key: PageKey; view?: string };
 const navId = (n: Nav) => (n.view ? `${n.key}:${n.view}` : n.key);
 
@@ -63,22 +63,23 @@ const MENU: { group: string; items: Item[] }[] = [
   // register vendor → raise PO/WO → receive goods → release payment → archive.
   { group: 'Procurement (workflow order)', items: [
     { key: 'vendors', label: '1. Vendors', icon: 'users' },
-    { key: 'po', label: '2. Purchase Orders', icon: 'doc' },
-    { key: 'wo', label: '3. Work Orders', icon: 'wrench' },
-    // Transport Order (transporter PO) — same builder/approval flow as a PO, with
-    // freight-specific T&C. Its own 'to' grant, told apart from PO by the page key.
-    { key: 'to', label: '4. Transport Orders', icon: 'truck' },
+    // "2. Orders" is a collapsible sidebar group → PO / WO / TO nested under it
+    // (each keeps its own po/wo/to grant). Transport Order = same builder/approval
+    // flow as a PO, freight-specific T&C.
+    { key: 'po', label: 'Purchase Orders', icon: 'doc', parent: '2. Orders' },
+    { key: 'wo', label: 'Work Orders', icon: 'wrench', parent: '2. Orders' },
+    { key: 'to', label: 'Transport Orders', icon: 'truck', parent: '2. Orders' },
     // The old "GRN" record was really the payment engine (PI, milestone, UTR) —
     // it is surfaced as Payment. The physical goods-receipt register is a separate
     // page below, sharing the same 'grn' grant (told apart by view: 'receipt').
-    { key: 'grn', label: '5. Payment', icon: 'wallet' },
-    { key: 'grn', label: '6. Goods Receipt (GRN)', icon: 'truck', view: 'receipt' },
-    { key: 'pay', label: '7. Payment Pipeline', icon: 'wallet' },
-    { key: 'fms', label: '8. FMS — Vendor Payments', icon: 'wallet' },
-    { key: 'documents', label: '9. Documents', icon: 'folder' },
+    { key: 'grn', label: '3. Payment', icon: 'wallet' },
+    { key: 'grn', label: '4. Goods Receipt (GRN)', icon: 'truck', view: 'receipt' },
+    { key: 'pay', label: '5. Payment Pipeline', icon: 'wallet' },
+    { key: 'fms', label: '6. FMS — Vendor Payments', icon: 'wallet' },
+    { key: 'documents', label: '7. Documents', icon: 'folder' },
     // The registers above stay flat; the PO → GRN → invoice → payment drill-down
     // and vendor outstanding live here (transcript R14/R15).
-    { key: 'reports', label: '10. Reports & Registers', icon: 'chart' },
+    { key: 'reports', label: '8. Reports & Registers', icon: 'chart' },
   ] },
   { group: 'Team', items: [
     { key: 'team', label: 'Team', icon: 'people' },
@@ -118,6 +119,11 @@ export default function ProjectWorkspace() {
   }, [searchParams]);
 
   const [active, setActive] = useState<Nav | null>(deep ? { key: deep.key, view: deep.view } : null);
+  // Which collapsible sidebar groups (e.g. "Orders" → PO/WO/TO) are expanded.
+  // Fully toggle-controlled so it opens/closes freely even while on a child page.
+  // Seed it open when we deep-linked straight to a PO/WO/TO.
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set(deep && ['po', 'wo', 'to'].includes(deep.key) ? ['2. Orders'] : []));
+  const toggleGroup = (name: string) => setOpenGroups((prev) => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project', projectId],
@@ -248,17 +254,46 @@ export default function ProjectWorkspace() {
           {menu.map((g) => (
             <div key={g.group} className="mb-1">
               <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{g.group}</div>
-              {g.items.map((it) => {
-                const nav: Nav = { key: it.key, view: it.view };
-                const on = current != null && navId(current) === navId(nav);
-                return (
-                  <button key={navId(nav)} onClick={() => setActive(nav)}
-                    className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left font-display text-[12.5px] font-semibold transition-colors ${on ? 'bg-navy-50 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
-                    <span className={`shrink-0 ${on ? 'text-navy' : 'text-slate-400'}`}>{ICONS[it.icon]}</span>
-                    <span className="min-w-0 flex-1">{it.label}</span>
-                  </button>
-                );
-              })}
+              {(() => {
+                // Render leaves normally; a contiguous run of items sharing a
+                // `parent` collapses under one clickable header (Spare-AI "More"
+                // style). "2. Orders" → Purchase / Work / Transport Orders.
+                const leaf = (it: Item, nested = false) => {
+                  const nav: Nav = { key: it.key, view: it.view };
+                  const on = current != null && navId(current) === navId(nav);
+                  return (
+                    <button key={navId(nav)} onClick={() => setActive(nav)}
+                      className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md ${nested ? 'pl-9 pr-3' : 'px-3'} py-2 text-left font-display text-[12.5px] font-semibold transition-colors ${on ? 'bg-navy-50 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
+                      <span className={`shrink-0 ${on ? 'text-navy' : 'text-slate-400'}`}>{ICONS[it.icon]}</span>
+                      <span className="min-w-0 flex-1">{it.label}</span>
+                    </button>
+                  );
+                };
+                const out: React.ReactNode[] = [];
+                for (let i = 0; i < g.items.length; i++) {
+                  const it = g.items[i];
+                  if (!it.parent) { out.push(leaf(it)); continue; }
+                  // Collect the whole run of this parent.
+                  const name = it.parent;
+                  const run: Item[] = [];
+                  while (i < g.items.length && g.items[i].parent === name) { run.push(g.items[i]); i++; }
+                  i--;
+                  const childActive = run.some((c) => current != null && navId(current) === navId({ key: c.key, view: c.view }));
+                  const open = openGroups.has(name);
+                  out.push(
+                    <div key={`grp-${name}`}>
+                      <button onClick={() => toggleGroup(name)}
+                        className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left font-display text-[12.5px] font-semibold transition-colors ${childActive ? 'bg-navy-50 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
+                        <span className={`shrink-0 ${childActive ? 'text-navy' : 'text-slate-400'}`}>{ICONS[run[0].icon]}</span>
+                        <span className="min-w-0 flex-1">{name}</span>
+                        <span className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`}>▾</span>
+                      </button>
+                      {open && run.map((c) => leaf(c, true))}
+                    </div>,
+                  );
+                }
+                return out;
+              })()}
             </div>
           ))}
         </nav>

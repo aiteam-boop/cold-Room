@@ -19,6 +19,11 @@ interface ProjectCard {
   status: string;
   startDate?: string | null;
   officialStartDate?: string | null;
+  orderReceiveDate?: string | null;
+  advanceReceiveDate?: string | null;
+  effectiveStartDate?: string | null; // manual start, else latest of PO/drawing/advance
+  startSource?: string | null;        // 'Manual' | 'PO received' | 'Drawing approved' | 'First advance'
+  siteSupervisor?: string | null;
   targetCompletionDate?: string;
   completionPct: number;
   estimatedCompletionDate?: string | null;
@@ -161,7 +166,7 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate font-semibold text-navy">{p.name}</h3>
-          <div className="truncate text-sm text-slate-500">{p.clientName || '—'}</div>
+          <div className="truncate text-sm font-medium text-slate-800">{p.clientName || '—'}</div>
           {p.siteLocation && <div className="truncate text-xs text-slate-400">{p.siteLocation}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -213,7 +218,7 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
       )}
 
       <div className="mt-3 border-t border-slate-100 pt-2 text-xs">
-        <div className="text-slate-500">Start: {fmtDate(p.startDate)} · Target: {fmtDate(p.targetCompletionDate)} · Est: {fmtDate(p.estimatedCompletionDate)}</div>
+        <div className="text-slate-500">Start: {fmtDate(p.effectiveStartDate ?? p.startDate)}{p.startSource && p.startSource !== 'Manual' ? ` (from ${p.startSource})` : ''} · Target: {fmtDate(p.targetCompletionDate)} · Est: {fmtDate(p.estimatedCompletionDate)}</div>
         <div className={overdue ? 'font-medium text-red-600' : 'text-slate-400'}>{daysLabel}</div>
       </div>
     </Link>
@@ -247,7 +252,7 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
               <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50">
                 <td className="px-4 py-2">
                   <div className="max-w-[280px] truncate font-medium text-navy">{p.name}</div>
-                  <div className="max-w-[280px] truncate text-xs text-slate-500" title={`${p.clientName || ''}${p.siteLocation ? ' · ' + p.siteLocation : ''}`}>{p.clientName || '—'}{p.siteLocation ? ` · ${p.siteLocation}` : ''}</div>
+                  <div className="max-w-[280px] truncate text-xs" title={`${p.clientName || ''}${p.siteLocation ? ' · ' + p.siteLocation : ''}`}><span className="font-medium text-slate-800">{p.clientName || '—'}</span>{p.siteLocation ? <span className="text-slate-400"> · {p.siteLocation}</span> : null}</div>
                   {p.pendingDrawingApproval && <div className="mt-0.5 text-[10px] font-medium text-amber-700">{p.drawingApprovalLabel}</div>}
                 </td>
                 <td><span className={`badge ${projectStatusPill(p.status)}`}>{p.status}</span></td>
@@ -260,7 +265,7 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
                 <td className="whitespace-nowrap text-center text-xs"><span className="font-semibold text-green-600">{p.stats.completed}</span> · <span className="font-semibold text-blue-600">{p.stats.inProgress}</span> · <span className="font-semibold text-slate-400">{p.stats.notStarted}</span></td>
                 <td className="text-center"><RiskBadge level={p.delayRisk.level} />{p.gantt.delayed > 0 && <div className="text-[10px] text-red-600">{p.gantt.delayed} delayed</div>}</td>
                 <td className="text-center text-xs text-slate-500">{p.timelinePct != null ? `${p.timelinePct}%` : '—'}</td>
-                <td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(p.startDate)}</td>
+                <td className="whitespace-nowrap text-xs text-slate-500">{fmtDate(p.effectiveStartDate ?? p.startDate)}{p.startSource && p.startSource !== 'Manual' ? <div className="text-[10px] text-slate-400">from {p.startSource}</div> : null}</td>
                 <td className="whitespace-nowrap text-xs">
                   <div className="text-slate-500">{fmtDate(p.targetCompletionDate)}</div>
                   <div className={overdue ? 'font-medium text-red-600' : 'text-slate-400'}>{daysLabel}</div>
@@ -283,13 +288,15 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', clientPoNumber: '', clientGstin: '', startDate: '', targetCompletionDate: '' });
+  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', siteSupervisor: '', clientPoNumber: '', clientGstin: '', startDate: '', targetCompletionDate: '', orderReceiveDate: '', advanceReceiveDate: '' });
   const [err, setErr] = useState('');
   const m = useMutation({
     mutationFn: async () => {
-      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, clientPoNumber: form.clientPoNumber, clientGstin: form.clientGstin || null };
+      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, siteSupervisor: form.siteSupervisor || null, clientPoNumber: form.clientPoNumber, clientGstin: form.clientGstin || null };
       if (form.startDate) payload.startDate = form.startDate;
       if (form.targetCompletionDate) payload.targetCompletionDate = form.targetCompletionDate;
+      if (form.orderReceiveDate) payload.orderReceiveDate = form.orderReceiveDate;
+      if (form.advanceReceiveDate) payload.advanceReceiveDate = form.advanceReceiveDate;
       return (await api.post('/projects', payload)).data;
     },
     onSuccess: onCreated,
@@ -304,12 +311,19 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={(e) => setForm({ ...form, clientName: e.target.value })} /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} /></div>
         </div>
+        <div><label className="label">Site supervisor</label><input className="input" value={form.siteSupervisor} onChange={(e) => setForm({ ...form, siteSupervisor: e.target.value })} placeholder="Site in-charge / supervisor name" /></div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
           <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={(e) => setForm({ ...form, clientGstin: e.target.value })} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>
         </div>
+        {/* The project clock starts on the LATEST of these — PO received, drawing
+            approved (from the drawing checklist) and first advance received. */}
         <div className="grid grid-cols-2 gap-3">
-          <div><label className="label">Start date</label><input className="input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></div>
+          <div><label className="label">PO received date</label><input className="input" type="date" value={form.orderReceiveDate} onChange={(e) => setForm({ ...form, orderReceiveDate: e.target.value })} /></div>
+          <div><label className="label">First advance received</label><input className="input" type="date" value={form.advanceReceiveDate} onChange={(e) => setForm({ ...form, advanceReceiveDate: e.target.value })} /></div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="label">Start date <span className="text-slate-400">(else auto)</span></label><input className="input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></div>
           <div><label className="label">Target completion</label><input className="input" type="date" value={form.targetCompletionDate} onChange={(e) => setForm({ ...form, targetCompletionDate: e.target.value })} /></div>
         </div>
         {err && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}

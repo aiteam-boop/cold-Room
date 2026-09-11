@@ -19,9 +19,17 @@ function parseSheetPayments(json: string | null | undefined): any[] {
 function piLinks(json: string | null | undefined): { term: string; piNumber: string | null; piUrl: string }[] {
   let raw: Record<string, any> = {};
   try { raw = json ? JSON.parse(json) : {}; } catch { return []; }
-  return Object.entries(raw)
-    .filter(([, v]) => v && v.piPdfUrl)
-    .map(([k, v]: [string, any]) => ({ term: TERM_NAMES[k] || k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl }));
+  // A PO now has ONE PI applied to every term — so the same file repeats across
+  // term keys. De-duplicate by file URL: identical PIs collapse to a single "PI"
+  // button; genuinely different PIs (legacy) still show separately.
+  const seen = new Set<string>();
+  const out: { term: string; piNumber: string | null; piUrl: string }[] = [];
+  for (const [k, v] of Object.entries(raw)) {
+    if (!v || !v.piPdfUrl || seen.has(v.piPdfUrl)) continue;
+    seen.add(v.piPdfUrl);
+    out.push({ term: TERM_NAMES[k] || k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl });
+  }
+  return out;
 }
 
 // ── Public, token-authenticated one-click approval (from email links) ────────
@@ -341,10 +349,24 @@ router.get('/approved', requireAuth, asyncHandler(async (req, res) => {
     grByDoc.set(g.docId!, arr);
   }
 
+  // Tax invoices ride on the PAYMENTS (GRN PAY-### records) raised against each
+  // PO/WO. A PO can have several payments, each with its own invoice — some
+  // uploaded, some not. Surface them so the Approved row shows "Invoice x/y"
+  // (x uploaded of y payments) and a popup lists each payment's invoice.
+  const payGrns = docIds.length
+    ? await prisma.gRN.findMany({ where: { docId: { in: docIds } }, orderBy: { createdAt: 'asc' }, select: { id: true, docId: true, grnNumber: true, milestoneName: true, invoiceNumber: true, invoicePdfUrl: true } })
+    : [];
+  const invByDoc = new Map<string, { id: string; number: string; milestone: string | null; invoiceNumber: string | null; invoiceUrl: string | null }[]>();
+  for (const g of payGrns) {
+    const arr = invByDoc.get(g.docId!) ?? [];
+    arr.push({ id: g.id, number: g.grnNumber, milestone: g.milestoneName ?? null, invoiceNumber: g.invoiceNumber ?? null, invoiceUrl: g.invoicePdfUrl ?? null });
+    invByDoc.set(g.docId!, arr);
+  }
+
   const items = [
     // `label` is what the UI shows (PO/WO, or "Payment" for a PAY-### record); `kind`
     // stays PO/WO/GRN so the PDF path + pipeline logic keep working.
-    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, raisedByMe: d.createdById === me.id, raisedBy: (d.createdById && nameById.get(d.createdById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
+    ...docs.map((d) => ({ kind: d.type, label: d.type, docId: d.id, projectId: d.projectId, projectName: d.project?.name, number: d.docNumber, vendorName: d.vendorName, finalAmount: d.finalAmount, basicAmount: d.basicAmount, approvedAt: d.approvedAt, approvedBy: (d.approvedById && nameById.get(d.approvedById)) || null, raisedByMe: d.createdById === me.id, raisedBy: (d.createdById && nameById.get(d.createdById)) || null, pis: piLinks(d.termPis), goodsReceipts: grByDoc.get(d.id) ?? [], invoices: invByDoc.get(d.id) ?? [], sheetPayments: parseSheetPayments(d.sheetPayments) })),
     ...grns.map((g) => ({ kind: 'GRN', label: g.grnNumber.startsWith('PAY') ? 'Payment' : 'GRN', docId: g.id, projectId: g.projectId, projectName: g.project?.name, number: g.grnNumber, vendorName: g.vendorName, finalAmount: g.invoiceValue, basicAmount: g.invoiceValue, approvedAt: g.approvedAt, approvedBy: (g.approvedById && nameById.get(g.approvedById)) || null, raisedByMe: g.raisedById === me.id, raisedBy: (g.raisedById && nameById.get(g.raisedById)) || null, goodsReceipts: [] })),
   ].sort((a, b) => new Date(b.approvedAt ?? 0).getTime() - new Date(a.approvedAt ?? 0).getTime());
 

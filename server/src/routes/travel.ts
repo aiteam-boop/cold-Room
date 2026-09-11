@@ -2,9 +2,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, notFound } from '../lib/errors';
-import { requireAuth, requirePage, requireEdit } from '../middleware/authMiddleware';
+import { requireAuth, requirePage, requireEdit, requireSection, requireAdmin } from '../middleware/authMiddleware';
+import { isAdmin } from '../lib/enums';
 import { upload, UPLOADS_PATH } from '../middleware/upload';
 import path from 'path';
+import fs from 'fs';
+import PDFDocument from 'pdfkit';
+import { readFromDb } from '../lib/fileStore';
 import { extractAadharNumber } from '../services/aadharExtract';
 import { audit } from '../lib/audit';
 import { buildTravelSteps, notifyCurrentTravelStep, buildExpenseSteps, notifyCurrentExpenseStep, travelChainState } from '../services/travelChain';
@@ -61,6 +65,27 @@ async function nextNumber(prefix: string, table: 'travelPlan' | 'travelExpense')
 router.get('/employees', requirePage('travel'), asyncHandler(async (_req, res) => {
   const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, name: true, email: true, mLevel: true, whatsapp: true, employeeCode: true }, orderBy: { name: 'asc' } });
   res.json({ employees: users });
+}));
+
+// ── Travel settings: who does the day-wise expense review (Reviewer / Final) ──
+// Company-wide singleton (projectId = null). Read is open to any travel viewer
+// (the Approvals UI needs it to show who may act); writing is admin-only.
+router.get('/config', requirePage('travel'), asyncHandler(async (_req, res) => {
+  const config = await prisma.travelConfig.findFirst({ where: { projectId: null } });
+  res.json({ config });
+}));
+router.put('/config', requireAdmin, asyncHandler(async (req, res) => {
+  const b = z.object({
+    reviewerId: z.string().nullable().optional(), reviewerName: z.string().nullable().optional(),
+    finalId: z.string().nullable().optional(), finalName: z.string().nullable().optional(),
+  }).parse(req.body ?? {});
+  const existing = await prisma.travelConfig.findFirst({ where: { projectId: null } });
+  const data = { reviewerId: b.reviewerId ?? null, reviewerName: b.reviewerName ?? null, finalId: b.finalId ?? null, finalName: b.finalName ?? null };
+  const config = existing
+    ? await prisma.travelConfig.update({ where: { id: existing.id }, data })
+    : await prisma.travelConfig.create({ data: { projectId: null, ...data } });
+  await audit({ userId: req.user!.sub, action: 'TRAVEL_CONFIG_SET', entity: 'TravelConfig', entityId: config.id, details: { reviewer: data.reviewerName, final: data.finalName } });
+  res.json({ config });
 }));
 
 // ── Next trip number (preview on the New-plan form) ──────────────────────────
@@ -276,6 +301,13 @@ router.post('/:id/tech-entry', requireEdit('travel'), asyncHandler(async (req, r
   const u = req.user!;
   const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
   if (!cur) throw notFound('Travel plan not found');
+  // Ownership: when the traveller IS a CRMCTS user, only THEY (or an admin) may
+  // file this trip's expenses — not any other travel-editor. Non-Crystal / free-
+  // typed travellers have no login, so those are left to any travel-editor (a
+  // coordinator files on their behalf) — unchanged.
+  if (cur.employeeId && cur.employeeId !== u.sub && !isAdmin(req.account!.role)) {
+    throw badRequest('Only the traveller on this trip (or an admin) can file its expenses.');
+  }
   const data: any = {
     actualDayCosts: JSON.stringify(b.actualDayCosts),
     techEntryNotes: b.notes ?? null,
@@ -326,6 +358,17 @@ router.post('/:id/tech-stage-decide', requireEdit('travel'), asyncHandler(async 
   if (cur.techEntryStatus !== 'SUBMITTED') throw badRequest('Only a submitted expense can be reviewed.');
   const s1 = parseJson<any>(cur.techStage1, null);
   if (b.stage === 2 && (!s1 || s1.status !== 'APPROVED')) throw badRequest('Stage 1 (Reviewer) must approve before the final decision.');
+  // Per-stage approver assignment (Travel settings). When a stage's approver is
+  // set, ONLY that user or an admin may sign it; when unset, any travel-editor
+  // may (legacy behaviour, so nothing breaks until an admin assigns people).
+  if (!isAdmin(req.account!.role)) {
+    const cfg = await prisma.travelConfig.findFirst({ where: { projectId: null } });
+    const assignee = b.stage === 1 ? cfg?.reviewerId : cfg?.finalId;
+    if (assignee && assignee !== u.sub) {
+      const who = b.stage === 1 ? (cfg?.reviewerName || 'the assigned Reviewer') : (cfg?.finalName || 'the assigned Final approver');
+      throw badRequest(`Only ${who} (or an admin) can sign the ${b.stage === 1 ? 'Reviewer' : 'Final'} stage.`);
+    }
+  }
   const catTotals = (days: any[]) => days.reduce((a, d) => ({ travel: a.travel + (+d.travel || 0), food: a.food + (+d.food || 0), hotel: a.hotel + (+d.hotel || 0), other: a.other + (+d.other || 0), misc: a.misc + (+d.misc || 0) }), { travel: 0, food: 0, hotel: 0, other: 0, misc: 0 });
   // The per-category override the reviewer typed wins; else sum the grid cells.
   const totals = b.totals ?? catTotals(b.days);
@@ -344,7 +387,11 @@ router.post('/:id/tech-stage-decide', requireEdit('travel'), asyncHandler(async 
 
 // ── Accounts — finalise an approved trip (invoice + indent + payment) ────────
 const accountsBody = z.object({ data: z.record(z.any()).optional(), finalize: z.boolean().optional(), unfinalize: z.boolean().optional() });
-router.post('/:id/tech-accounts', requireEdit('travel'), asyncHandler(async (req, res) => {
+// Accounts finalise / save / reopen — the money-close action. Gated by the
+// dedicated `accountsTeam` flag (same as Petty Cash confirm) so it is SEPARATE
+// from plain travel-edit: a planner/approver with travel edit cannot mark a
+// trip processed; only Accounts (or admin) can.
+router.post('/:id/tech-accounts', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
   const b = accountsBody.parse(req.body);
   const u = req.user!;
   const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
@@ -357,6 +404,93 @@ router.post('/:id/tech-accounts', requireEdit('travel'), asyncHandler(async (req
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
   await audit({ userId: u.sub, action: b.finalize ? 'TRAVEL_ACCOUNTS_FINALISE' : 'TRAVEL_ACCOUNTS_SAVE', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
   res.json({ plan: serializePlan(plan) });
+}));
+
+// ── Advance settlement / reconciliation (Accounts) ───────────────────────────
+// Records how the pre-trip advance was closed — how much cash the technician
+// returned (or that it was fully adjusted against the claim) + a note. Same
+// dedicated `accountsTeam` flag as the finalise action. `settle:false` re-opens.
+const advanceSettleBody = z.object({ receivedBack: z.coerce.number().min(0).optional(), note: z.string().optional(), settle: z.boolean().default(true) });
+router.post('/:id/advance-settle', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
+  const b = advanceSettleBody.parse(req.body ?? {});
+  const u = req.user!;
+  const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!cur) throw notFound('Travel plan not found');
+  if (cur.techEntryStatus !== 'APPROVED') throw badRequest('Settle the advance only after the expense is approved.');
+  const data: any = {};
+  if (b.settle) {
+    data.advanceSettled = true;
+    if (b.receivedBack !== undefined) data.advanceReceivedBack = b.receivedBack;
+    if (b.note !== undefined) data.advanceSettleNote = b.note;
+    data.advanceSettledBy = u.name;
+    data.advanceSettledAt = new Date();
+    data.trail = withTrail(cur, `Advance settled${b.receivedBack !== undefined ? ` — recovered ${b.receivedBack}` : ''}`, u.name);
+  } else {
+    data.advanceSettled = false;
+    data.advanceSettledAt = null;
+    data.trail = withTrail(cur, 'Advance settlement re-opened', u.name);
+  }
+  const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
+  await audit({ userId: u.sub, action: b.settle ? 'TRAVEL_ADVANCE_SETTLE' : 'TRAVEL_ADVANCE_REOPEN', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber, receivedBack: b.receivedBack } });
+  res.json({ plan: serializePlan(plan) });
+}));
+
+// ── All documents combined into one PDF (Accounts convenience) ───────────────
+// Every proof/bill uploaded on this trip — advances, technician bills, ticket,
+// payment proof — collated into a single PDF. Images are embedded a page each;
+// PDF attachments are noted (pdfkit can't inline an existing PDF) so nothing is
+// silently dropped. Read-only — does not touch any data.
+router.get('/:id/documents-pdf', requirePage('travel'), asyncHandler(async (req, res) => {
+  const plan = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
+  if (!plan) throw notFound('Travel plan not found');
+  const advances = parseJson<any[]>(plan.advances, []);
+  const atts = parseJson<any[]>(plan.techAttachments, []);
+  const docs: { label: string; url: string }[] = [];
+  advances.forEach((a, i) => { if (a?.fileUrl) docs.push({ label: `Advance ${i + 1}${a.amount ? ` — Rs. ${a.amount}` : ''}`, url: a.fileUrl }); });
+  atts.forEach((a) => { if (a?.fileUrl) docs.push({ label: `${a.category || 'Bill'}${a.day ? ` · Day ${a.day}` : ''}`, url: a.fileUrl }); });
+  if (plan.ticketFileUrl) docs.push({ label: 'Ticket', url: plan.ticketFileUrl });
+  if (plan.paymentProofUrl) docs.push({ label: 'Payment proof', url: plan.paymentProofUrl });
+
+  const getBuf = async (url: string): Promise<{ fn: string; buf: Buffer | null }> => {
+    const fn = path.basename(String(url).split('?')[0]);
+    let buf = await readFromDb(fn).catch(() => null);
+    if (!buf) { try { buf = fs.readFileSync(path.join(UPLOADS_PATH, fn)); } catch { buf = null; } }
+    return { fn, buf };
+  };
+
+  const doc = new PDFDocument({ autoFirstPage: false, margin: 36 });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c) => chunks.push(c as Buffer));
+  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  // Cover page.
+  doc.addPage();
+  doc.fontSize(16).fillColor('#0a1a4f').text(`Travel documents — ${plan.planNumber}`);
+  doc.moveDown(0.3);
+  doc.fontSize(10).fillColor('#333').text(`Traveller: ${plan.employeeName || '-'}`);
+  doc.text(`Trip: ${plan.origin || '-'} to ${plan.destination || '-'}`);
+  doc.text(`${docs.length} document(s) attached`);
+
+  for (const d of docs) {
+    const { fn, buf } = await getBuf(d.url);
+    doc.addPage();
+    doc.fontSize(11).fillColor('#0a1a4f').text(d.label);
+    doc.moveDown(0.3);
+    if (buf && /\.(jpe?g|png)$/i.test(fn)) {
+      try { doc.image(buf, { fit: [520, 680] }); }
+      catch { doc.fontSize(9).fillColor('#b00000').text('(could not render this image)'); }
+    } else if (/\.pdf$/i.test(fn)) {
+      doc.fontSize(9).fillColor('#666').text(`PDF attachment "${fn}" — open it from the trip's documents (a PDF cannot be inlined here).`);
+    } else {
+      doc.fontSize(9).fillColor('#666').text(buf ? `File: ${fn} (format not previewable).` : `File not found: ${fn}.`);
+    }
+  }
+  if (docs.length === 0) { doc.addPage(); doc.fontSize(11).fillColor('#666').text('No documents were uploaded against this trip.'); }
+  doc.end();
+  const buffer = await done;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${plan.planNumber}-documents.pdf"`);
+  res.send(buffer);
 }));
 
 // ── Delete a DRAFT plan ──────────────────────────────────────────────────────

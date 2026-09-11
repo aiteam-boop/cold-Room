@@ -60,6 +60,7 @@ function publicSerialize(gr: any, signedDocs: any[] = [], invoiceDocs: any[] = [
       id: l.id,
       srNo: l.srNo,
       description: l.description,
+      uom: l.uom ?? null,
       poQty: l.poQty,
       previouslyReceivedQty: l.previouslyReceivedQty,
       remainingToReceive: Math.max((l.poQty || 0) - (l.previouslyReceivedQty || 0), 0),

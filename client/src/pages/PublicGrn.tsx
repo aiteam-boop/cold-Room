@@ -221,6 +221,7 @@ export default function PublicGrn() {
               <thead className="text-xs uppercase text-slate-400">
                 <tr className="border-b border-slate-200">
                   <th className="px-2 py-1 text-left">Description</th>
+                  <th className="w-16 px-1 py-1 text-center">UOM</th>
                   <th className="w-16 px-1 py-1 text-center">PO Qty</th>
                   <th className="w-20 px-1 py-1 text-center">Remaining</th>
                   <th className="w-20 px-1 py-1 text-center">Receipt</th>
@@ -233,6 +234,7 @@ export default function PublicGrn() {
                 {g.lineItems.map((l: any, i: number) => (
                   <tr key={l.id} className="border-b border-slate-100">
                     <td className="py-1 text-xs">{l.description}</td>
+                    <td className="text-center text-slate-500">{l.uom || '—'}</td>
                     <td className="text-center">{l.poQty}</td>
                     <td className="text-center text-slate-500">{l.remainingToReceive}</td>
                     {/* Step 1: 100% received? Yes → full qty auto-filled + photo required.

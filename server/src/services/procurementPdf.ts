@@ -529,7 +529,7 @@ interface PackingListForPdf {
   ewayBillNumber?: string | null;
   siteSupervisor?: string | null;
   customColumns?: { key: string; label: string }[] | null;
-  lineItems: { srNo: number; description: string; receiptQty: number; defectQty?: number; customValues?: Record<string, string> | null }[];
+  lineItems: { srNo: number; description: string; uom?: string | null; receiptQty: number; defectQty?: number; customValues?: Record<string, string> | null }[];
 }
 export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.WritableStream) {
   const pdf = new PDFDocument({ size: 'A4', margin: 28 });
@@ -580,15 +580,16 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
   drawRow([{ label: 'Vehicle No.', value: pl.vehicleNumber || '—' }, { label: 'Vehicle Size', value: pl.vehicleSize || '—' }]);
   drawRow([{ label: 'Date of Invoice / Dispatch', value: dt(pl.dispatchDate) || '—' }, { label: 'Date of Delivery', value: dt(pl.deliveryDate) || '—' }]);
 
-  // ── Item table — S.No | Description | [custom cols…] | Qty (Nos) | Damage ──
+  // ── Item table — S.No | Description | UOM | [custom cols…] | Qty | Damage ──
   // Damage (defect) shown alongside received so "20 received, 1 damage" is explicit.
-  const snoW = 30, qtyW = 46, dmgW = 46;
-  const restW = TW - snoW - qtyW - dmgW;
+  // UOM (Meter / Nos / Set …) comes from the PO line — no longer a hardcoded "Nos".
+  const snoW = 30, uomW = 42, qtyW = 46, dmgW = 46;
+  const restW = TW - snoW - uomW - qtyW - dmgW;
   const descW = cols.length ? Math.max(restW * 0.34, 120) : restW;
   const colW = cols.length ? (restW - descW) / cols.length : 0;
-  const heads = ['S.No.', 'Description', ...cols.map((c) => c.label), 'Qty (Nos)', 'Damage'];
-  const widths = [snoW, descW, ...cols.map(() => colW), qtyW, dmgW];
-  const aligns: ('left' | 'center')[] = ['center', 'left', ...cols.map(() => 'center' as const), 'center', 'center'];
+  const heads = ['S.No.', 'Description', 'UOM', ...cols.map((c) => c.label), 'Qty', 'Damage'];
+  const widths = [snoW, descW, uomW, ...cols.map(() => colW), qtyW, dmgW];
+  const aligns: ('left' | 'center')[] = ['center', 'left', 'center', ...cols.map(() => 'center' as const), 'center', 'center'];
 
   const headH = 18;
   box(L, y, TW, headH, HEAD_BG);
@@ -598,7 +599,7 @@ export function renderPackingListPdf(pl: PackingListForPdf, stream: NodeJS.Writa
 
   let total = 0, totalDmg = 0;
   for (const it of pl.lineItems) {
-    const vals = [String(it.srNo), it.description || '', ...cols.map((c) => it.customValues?.[c.key] ?? ''), String(it.receiptQty ?? ''), String(it.defectQty ?? 0)];
+    const vals = [String(it.srNo), it.description || '', it.uom || '', ...cols.map((c) => it.customValues?.[c.key] ?? ''), String(it.receiptQty ?? ''), String(it.defectQty ?? 0)];
     const rowH = Math.max(16, ...widths.map((w, i) => measure(vals[i], w) + 6));
     if (y + rowH > pdf.page.height - 70) { pdf.addPage(); y = 40; }
     box(L, y, TW, rowH);

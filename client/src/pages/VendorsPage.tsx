@@ -67,7 +67,6 @@ export default function VendorsPage() {
                 <div className="min-w-0 truncate font-semibold text-navy">{v.name}</div>
                 <div className="flex shrink-0 items-center gap-2">
                   {canManage && <button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button>}
-                  {canManage && <button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button>}
                   <span className="badge bg-slate-100 text-slate-600">{v.type}</span>
                 </div>
               </div>
@@ -77,10 +76,10 @@ export default function VendorsPage() {
               {/* Which specific documents are still pending (doesn't touch the % badge):
                   mandatory ones in red with a *, optional ones in grey. Hidden when
                   KYC is complete. */}
-              {v.kyc?.items?.some((it: any) => !it.done) && (
+              {v.kyc?.items?.some((it: any) => !it.done && it.mandatory) && (
                 <div className="mt-1 text-[11px] leading-snug">
                   <span className="text-slate-400">Pending: </span>
-                  {v.kyc.items.filter((it: any) => !it.done).map((it: any, i: number, arr: any[]) => (
+                  {v.kyc.items.filter((it: any) => !it.done && it.mandatory).map((it: any, i: number, arr: any[]) => (
                     <span key={it.key} className={it.mandatory ? 'font-medium text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
                       {it.label}{it.mandatory ? '*' : ''}{i < arr.length - 1 ? ', ' : ''}
                     </span>
@@ -115,10 +114,10 @@ export default function VendorsPage() {
                     <KycBadge kyc={v.kyc} kycStatus={v.kycStatus} />
                     {/* Which specific KYC documents are still pending — same as the
                         cards: mandatory in red with a *, optional in grey. */}
-                    {v.kyc?.items?.some((it: any) => !it.done) && (
+                    {v.kyc?.items?.some((it: any) => !it.done && it.mandatory) && (
                       <div className="mt-1 max-w-[320px] text-[11px] leading-snug">
                         <span className="text-slate-400">Pending: </span>
-                        {v.kyc.items.filter((it: any) => !it.done).map((it: any, i: number, arr: any[]) => (
+                        {v.kyc.items.filter((it: any) => !it.done && it.mandatory).map((it: any, i: number, arr: any[]) => (
                           <span key={it.key} className={it.mandatory ? 'font-medium text-red-600' : 'text-slate-400'} title={it.mandatory ? 'Mandatory' : 'Optional'}>
                             {it.label}{it.mandatory ? '*' : ''}{i < arr.length - 1 ? ', ' : ''}
                           </span>
@@ -127,7 +126,7 @@ export default function VendorsPage() {
                     )}
                   </td>
                   <td className="align-top text-slate-400">{fmtDate(v.createdAt)}</td>
-                  {canManage && <td className="px-2 text-right align-top"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button><button className="text-xs font-medium text-rose-500 hover:underline" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete vendor “${v.name}”? This can't be undone. (Blocked if it has any PO/WO or payment.)`)) del.mutate(v.id); }}>Delete</button></div></td>}
+                  {canManage && <td className="px-2 text-right align-top"><div className="flex justify-end gap-3"><button className="text-xs font-medium text-navy hover:underline" onClick={(e) => { e.stopPropagation(); setEditing(v); }}>Edit</button></div></td>}
                 </tr>
               ))}
             </tbody>

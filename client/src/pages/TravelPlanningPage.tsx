@@ -88,9 +88,12 @@ function CellAttach({ url, title, onUpload, onClear }: { url?: string; title: st
 }
 
 export default function TravelPlanningPage() {
-  const { canEdit } = useAuth();
+  const { canEdit, can, isAdmin } = useAuth();
   const canManage = canEdit('travel');
-  const [tab, setTab] = useState<'plan' | 'planhist' | 'ticket' | 'tech' | 'approvals' | 'accounts'>('planhist');
+  // Accounts money-close (finalise / save / reopen) is a SEPARATE right from
+  // plain travel-edit — same dedicated flag as Petty Cash confirm.
+  const isAccounts = can('accountsTeam');
+  const [tab, setTab] = useState<'plan' | 'planhist' | 'ticket' | 'tech' | 'approvals' | 'accounts' | 'settings'>('planhist');
   const tabCls = (t: string) => `rounded-lg px-4 py-1.5 font-medium ${tab === t ? 'bg-navy text-white' : 'text-slate-600'}`;
 
   return (
@@ -106,12 +109,14 @@ export default function TravelPlanningPage() {
         <button onClick={() => setTab('tech')} className={tabCls('tech')}>📝 Tech entry</button>
         <button onClick={() => setTab('approvals')} className={tabCls('approvals')}>✅ Approvals</button>
         <button onClick={() => setTab('accounts')} className={tabCls('accounts')}>💳 Accounts</button>
+        {isAdmin && <button onClick={() => setTab('settings')} className={tabCls('settings')}>⚙ Settings</button>}
       </div>
       {tab === 'plan' && canManage ? <NewSanctionTab onDone={() => setTab('planhist')} />
         : tab === 'ticket' ? <TicketRequestTab canManage={canManage} />
         : tab === 'tech' ? <TechEntryTab canManage={canManage} />
         : tab === 'approvals' ? <ApprovalsTab canManage={canManage} />
-        : tab === 'accounts' ? <AccountsTab canManage={canManage} />
+        : tab === 'accounts' ? <AccountsTab canManage={canManage} isAccounts={isAccounts} />
+        : tab === 'settings' && isAdmin ? <SettingsTab />
         : <HistoryTab kind="PLAN" canManage={canManage} />}
     </div>
   );
@@ -137,6 +142,7 @@ function TicketRequestTab({ canManage }: { canManage: boolean }) {
 type ActualDay = { day: number; date: string; bus: number; auto: number; food: number; hotel: number; other: number; misc: number; notes: string };
 const CATS = ['bus', 'auto', 'food', 'hotel', 'other', 'misc'] as const;
 const CAT_LABEL: Record<string, string> = { bus: 'Bus', auto: 'Auto', food: 'Food', hotel: 'Hotel', other: 'Other', misc: 'Misc' };
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function buildActuals(days: number, fromDate: string, prev: ActualDay[]): ActualDay[] {
   const out: ActualDay[] = [];
   for (let i = 0; i < days; i++) {
@@ -154,8 +160,11 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
   const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
   const [open, setOpen] = useState<string | null>(null);
   const [tech, setTech] = useState('');
-  const [month, setMonth] = useState('');
-  const [year, setYear] = useState('');
+  // Default the Month/Year filter to the CURRENT month + year (switch to "All"
+  // to see older trips).
+  const nowD = new Date();
+  const [month, setMonth] = useState(String(nowD.getMonth()));
+  const [year, setYear] = useState(String(nowD.getFullYear()));
   if (plansQ.isLoading) return <Spinner label="Loading closed trips…" />;
   const allClosed = (plansQ.data ?? []).filter((p) => p.status === 'CLOSED');
   const closed = allClosed.filter((p) => {
@@ -166,7 +175,7 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
     return true;
   });
   const techs = [...new Set(allClosed.map((p) => p.employeeName))];
-  const years = [...new Set(allClosed.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean))].sort((a, b) => b - a);
+  const years = [...new Set([nowD.getFullYear(), ...allClosed.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean)])].sort((a, b) => b - a);
   const filed = closed.filter((p) => p.techEntryStatus === 'SUBMITTED' || p.techEntryStatus === 'APPROVED').length;
 
   return (
@@ -174,9 +183,9 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
         <div><div className="font-semibold text-navy">Closed trips — file your expenses</div><div className="text-xs text-slate-400">What did each finished trip actually cost, and where is it in review?</div></div>
         <div className="flex items-center gap-2 text-xs">
-          <select className="input h-8 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
-          <select className="input h-8 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
-          <select className="input h-8 text-xs" value={tech} onChange={(e) => setTech(e.target.value)}><option value="">All technicians</option>{techs.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+          <select className="input h-8 w-28 py-0 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
+          <select className="input h-8 w-24 py-0 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          <select className="input h-8 py-0 text-xs" value={tech} onChange={(e) => setTech(e.target.value)}><option value="">All technicians</option>{techs.map((t) => <option key={t} value={t}>{t}</option>)}</select>
           <span className="text-slate-400">{closed.length} trip(s) · {filed} submission(s)</span>
         </div>
       </div>
@@ -205,7 +214,12 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
 }
 
 function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
-  const readOnly = !canManage || plan.techEntryStatus === 'APPROVED';
+  const { user, isAdmin } = useAuth();
+  // When the traveller is a CRMCTS user, only THEY (or an admin) may file this
+  // trip's expenses — not any other travel-editor. Non-Crystal travellers (no
+  // login, no employeeId) stay open to the coordinator, so nothing breaks.
+  const notMyTrip = !!plan.employeeId && plan.employeeId !== user?.id && !isAdmin;
+  const readOnly = !canManage || notMyTrip || plan.techEntryStatus === 'APPROVED';
   const pc = plan.planCosts || {};
   const from = plan.fromDate ? new Date(plan.fromDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
   const [rows, setRows] = useState<ActualDay[]>(() => plan.actualDayCosts?.length ? plan.actualDayCosts.map((d: any, i: number) => ({ day: i + 1, date: d.date || '', bus: +d.bus || 0, auto: +d.auto || 0, food: +d.food || 0, hotel: +d.hotel || 0, other: +d.other || 0, misc: +d.misc || 0, notes: d.notes || '' })) : buildActuals(plan.days || 1, from, []));
@@ -296,6 +310,10 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
           <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✈ {plan.techEntryStatus === 'SUBMITTED' ? 'Resubmit' : 'Submit'}</button>
         </div>
       )}
+      {/* Someone else's trip — only the traveller (or an admin) can file it. */}
+      {notMyTrip && plan.techEntryStatus !== 'APPROVED' && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">👁 View only — only <span className="font-medium">{plan.employeeName || 'the traveller'}</span> (or an admin) can file this trip's expenses.</div>
+      )}
     </div>
   );
 }
@@ -309,11 +327,14 @@ function ApprovalsTab({ canManage }: { canManage: boolean }) {
   const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
   const [open, setOpen] = useState<string | null>(null);
   const [status, setStatus] = useState('');
-  const [month, setMonth] = useState<string>(''); // '' = all
-  const [year, setYear] = useState<string>('');
+  // Default the Month/Year filter to the CURRENT month + year (switch to "All"
+  // to see older submissions).
+  const nowD = new Date();
+  const [month, setMonth] = useState<string>(String(nowD.getMonth()));
+  const [year, setYear] = useState<string>(String(nowD.getFullYear()));
   if (plansQ.isLoading) return <Spinner label="Loading…" />;
   const all = (plansQ.data ?? []).filter((p) => ['SUBMITTED', 'APPROVED', 'REJECTED'].includes(p.techEntryStatus));
-  const years = [...new Set(all.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean))].sort((a, b) => b - a);
+  const years = [...new Set([nowD.getFullYear(), ...all.map((p) => new Date(p.fromDate).getFullYear()).filter(Boolean)])].sort((a, b) => b - a);
   const rows = all.filter((p) => {
     if (status && p.techEntryStatus !== status) return false;
     const d = new Date(p.fromDate);
@@ -327,9 +348,9 @@ function ApprovalsTab({ canManage }: { canManage: boolean }) {
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
         <div><div className="font-semibold text-navy">Submitted expenses — awaiting a decision</div><div className="text-xs text-slate-400">What did each technician claim, and who still has to sign it off?</div></div>
         <div className="flex items-center gap-2 text-xs">
-          <select className="input h-8 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
-          <select className="input h-8 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
-          <select className="input h-8 text-xs" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option value="SUBMITTED">Awaiting decision</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select>
+          <select className="input h-8 w-28 py-0 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}><option value="">All months</option>{MONTHS.map((m, i) => <option key={m} value={i}>{m}</option>)}</select>
+          <select className="input h-8 w-24 py-0 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          <select className="input h-8 py-0 text-xs" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option value="SUBMITTED">Awaiting decision</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select>
           <span className="text-slate-400">{rows.length} entry(s)</span>
         </div>
       </div>
@@ -370,7 +391,21 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
   const decided = plan.techEntryStatus === 'APPROVED' || plan.techEntryStatus === 'REJECTED';
   const stage1Done = !!s1 && s1.status === 'APPROVED';
   const currentStage: 1 | 2 | null = decided ? null : (stage1Done ? 2 : 1);
-  const readOnly = !canManage || currentStage == null;
+  // Per-stage approver assignment (Travel → Settings). If this stage has an
+  // assigned approver, only that user (or an admin) may sign it.
+  const { user, isAdmin } = useAuth();
+  const cfgQ = useQuery({ queryKey: ['travel-config'], queryFn: async () => (await api.get('/travel/config')).data.config as any });
+  const assignedId = currentStage === 1 ? cfgQ.data?.reviewerId : currentStage === 2 ? cfgQ.data?.finalId : null;
+  const assignedName = currentStage === 1 ? cfgQ.data?.reviewerName : currentStage === 2 ? cfgQ.data?.finalName : null;
+  const blockedByAssignee = !!assignedId && assignedId !== user?.id && !isAdmin;
+  // Names to display per stage. A stage that's ALREADY signed keeps the person
+  // who actually signed it (historical record) — so changing the approver in
+  // Settings never rewrites who approved a past trip. A stage still PENDING shows
+  // the CURRENTLY assigned approver from Settings (who will approve it).
+  const revName = s1?.by || cfgQ.data?.reviewerName || null;
+  const finalActual = s2?.by || (plan.techEntryStatus === 'APPROVED' ? plan.techApprovedBy : null);
+  const finName = finalActual || cfgQ.data?.finalName || null;
+  const readOnly = !canManage || currentStage == null || blockedByAssignee;
   const m0 = (n: any) => `₹${Math.round(+n || 0).toLocaleString('en-IN')}`;
   const atts: any[] = plan.techAttachments || [];
   const [comment, setComment] = useState('');
@@ -441,7 +476,7 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
 
       {/* Day-wise 2-stage approval grid */}
       <div className="rounded-lg border border-slate-200 bg-white p-2">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="text-xs font-semibold text-navy">Day-wise approval · each cell shows Advance / Technician / Reviewer / Final</div>{currentStage && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">You are editing the {stageLabel(currentStage)} row</span>}</div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="text-xs font-semibold text-navy">Day-wise approval · each cell shows Advance / Technician / <span className="text-green-700">Reviewer{revName ? ` (${revName})` : ''}</span> / <span className="text-amber-700">Final{finName ? ` (${finName})` : ''}</span></div>{currentStage && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">You are editing the {stageLabel(currentStage)} row</span>}</div>
         <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-sm">
           <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th>{APPR_CATS.map((c) => <th key={c}>{APPR_LABEL[c]}</th>)}<th>Day total</th></tr></thead>
           <tbody>
@@ -483,9 +518,11 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
       {/* Approval chain */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
         <span className="font-semibold text-slate-500">Approval chain:</span>
-        <span>1. Reviewer {chainBadge(stage1Done, currentStage === 1)}{stage1Done && s1Sum ? ` ${m0(catGrand(s1Sum))}` : ''}</span>
+        {/* Show WHO acted on each stage (from the stored `by`) so it's always
+            clear who signed — even if the assigned approver changes later. */}
+        <span>1. Reviewer{revName ? <span className="font-medium text-slate-600"> ({revName})</span> : ''} {chainBadge(stage1Done, currentStage === 1)}{stage1Done && s1Sum ? ` ${m0(catGrand(s1Sum))}` : ''}</span>
         <span className="text-slate-300">→</span>
-        <span>2. Final {chainBadge(plan.techEntryStatus === 'APPROVED', currentStage === 2)}</span>
+        <span>2. Final{finName ? <span className="font-medium text-slate-600"> ({finName})</span> : ''} {chainBadge(plan.techEntryStatus === 'APPROVED', currentStage === 2)}</span>
         {!decided && <span className="ml-auto font-medium text-amber-600">{stage1Done ? 'Awaiting Final' : 'Awaiting Reviewer'}</span>}
       </div>
 
@@ -522,18 +559,37 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
           <button className="btn-primary" disabled={decide.isPending || (verdict === 'REJECTED' && !comment.trim())} onClick={() => decide.mutate()}>{verdict === 'APPROVED' ? `✓ Approve as ${currentStage ? stageLabel(currentStage) : ''}` : '✗ Reject'}</button>
         </div>
       )}
+      {/* Assigned to someone else — tell the viewer who must sign this stage. */}
+      {!decided && blockedByAssignee && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">👁 View only — only <span className="font-medium">{assignedName || 'the assigned approver'}</span> (or an admin) can sign the {currentStage ? stageLabel(currentStage) : ''} stage.</div>
+      )}
     </div>
   );
 }
 
 // ── Accounts: finalise an approved trip (invoice + indent + payment) ─────────
-function AccountsTab({ canManage }: { canManage: boolean }) {
+function AccountsTab({ canManage, isAccounts }: { canManage: boolean; isAccounts: boolean }) {
   const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState<'pending' | 'finalized' | 'all'>('pending');
+  // Month / Year filter on the trip's From date — default to the CURRENT month
+  // and year (like the reference); the user can switch to "All" to see the rest.
+  const nowD = new Date();
+  const [month, setMonth] = useState<string>(String(nowD.getMonth()));
+  const [year, setYear] = useState<string>(String(nowD.getFullYear()));
   if (plansQ.isLoading) return <Spinner label="Loading…" />;
   const approved = (plansQ.data ?? []).filter((p) => p.techEntryStatus === 'APPROVED');
-  const rows = approved.filter((p) => filter === 'all' || (filter === 'finalized' ? p.accountsFinalized : !p.accountsFinalized));
+  // Years present in the data (for the dropdown) plus the current year, newest first.
+  const years = [...new Set([nowD.getFullYear(), ...approved.map((p) => (p.fromDate ? new Date(p.fromDate).getFullYear() : null)).filter(Boolean) as number[]])].sort((a, b) => b - a);
+  const inPeriod = (p: any) => {
+    if (month === 'all' && year === 'all') return true;
+    if (!p.fromDate) return false;
+    const d = new Date(p.fromDate);
+    if (year !== 'all' && d.getFullYear() !== Number(year)) return false;
+    if (month !== 'all' && d.getMonth() !== Number(month)) return false;
+    return true;
+  };
+  const rows = approved.filter((p) => filter === 'all' || (filter === 'finalized' ? p.accountsFinalized : !p.accountsFinalized)).filter(inPeriod);
   const fbtn = (t: string) => `rounded-full px-3 py-0.5 text-xs font-medium ${filter === t ? 'bg-navy text-white' : 'text-slate-500'}`;
 
   return (
@@ -541,8 +597,18 @@ function AccountsTab({ canManage }: { canManage: boolean }) {
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
         <div><div className="font-semibold text-navy">Approved trips — ready to pay</div><div className="text-xs text-slate-400">What has been signed off, and what still needs an invoice?</div></div>
         <div className="flex items-center gap-2 text-xs">
+          {/* Month / Year filter (on the trip's From date) — compact so the whole
+              filter row stays on one line. */}
+          <select className="input h-7 w-28 py-0 text-xs" value={month} onChange={(e) => setMonth(e.target.value)}>
+            <option value="all">All months</option>
+            {MONTH_NAMES.map((mn, i) => <option key={i} value={i}>{mn}</option>)}
+          </select>
+          <select className="input h-7 w-24 py-0 text-xs" value={year} onChange={(e) => setYear(e.target.value)}>
+            <option value="all">All years</option>
+            {years.map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
           <div className="flex gap-1 rounded-full bg-slate-100 p-0.5">{(['pending', 'finalized', 'all'] as const).map((t) => <button key={t} className={fbtn(t)} onClick={() => setFilter(t)}>{t}</button>)}</div>
-          <span className="text-slate-400">{rows.length} entry(s)</span>
+          <span className="whitespace-nowrap text-slate-400">{rows.length} entry(s)</span>
         </div>
       </div>
       {rows.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">Nothing here. Trips appear once <span className="font-medium">Approvals</span> signs them off.</div> : (
@@ -556,7 +622,7 @@ function AccountsTab({ canManage }: { canManage: boolean }) {
                 {p.accountsFinalized && <span className="badge bg-green-100 text-green-700">✓ Processed</span>}
                 <span className="ml-auto font-semibold text-navy">{inr(p.techApproved ? catGrand(p.techApproved) : 0)}</span>
               </button>
-              {open === p.id && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><AccountsEditor plan={p} canManage={canManage} onDone={() => { setOpen(null); plansQ.refetch(); }} /></div>}
+              {open === p.id && <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3"><AccountsEditor plan={p} canManage={canManage} isAccounts={isAccounts} onDone={() => { setOpen(null); plansQ.refetch(); }} /></div>}
             </div>
           ))}
         </div>
@@ -572,9 +638,11 @@ const ACC_FIELDS: { k: string; label: string; type?: string }[] = [
   { k: 'paymentMode', label: 'Payment Mode' }, { k: 'bankRef', label: 'Bank Account Ref' }, { k: 'paymentDate', label: 'Payment Date', type: 'date' }, { k: 'notes', label: 'Notes' },
 ];
 
-function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
+function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: boolean; isAccounts: boolean; onDone: () => void }) {
   const finalized = !!plan.accountsFinalized;
-  const readOnly = !canManage || finalized;
+  // Only the Accounts team (accountsTeam flag) may edit / finalise — not everyone
+  // with travel-edit. Finalised rows are read-only until re-opened.
+  const readOnly = !isAccounts || finalized;
   const m0 = (n: any) => `₹${Math.round(+n || 0).toLocaleString('en-IN')}`;
   const pc = plan.planCosts || {};
   const planGrand = (+pc.travel || 0) + (+pc.food || 0) + (+pc.hotel || 0) + (+pc.other || 0);
@@ -597,6 +665,8 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
   // Documents open in an in-page popup viewer (PDF/image inline + Download), not a
   // new tab. One combined list so the popup can page prev/next across every doc.
   const [viewIdx, setViewIdx] = useState<number | null>(null);
+  const [allDocsOpen, setAllDocsOpen] = useState(false); // combined "All documents (PDF)" viewer
+  const [oneDoc, setOneDoc] = useState<ViewFile | null>(null); // a single cell's bill (📎), opened alone
   const norm = (u: string) => (u.startsWith('/api/') ? u.replace(/^\/api/, '') : u);
   const vfName = (u?: string) => (u ? decodeURIComponent(u.split('/').pop() || 'file') : 'file');
   const toVF = (url: string, label: string): ViewFile => ({ url: norm(url), name: vfName(url), authed: url.startsWith('/api/'), label });
@@ -613,6 +683,18 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
   });
   const reopen = useMutation({ mutationFn: async () => api.post(`/travel/${plan.id}/tech-accounts`, { unfinalize: true }), onSuccess: onDone });
 
+  // Advance settlement — how the pre-trip advance was recovered / adjusted.
+  const advSettled = !!plan.advanceSettled;
+  const [recvBack, setRecvBack] = useState<string>(plan.advanceReceivedBack != null ? String(plan.advanceReceivedBack) : '');
+  const [settleNote, setSettleNote] = useState<string>(plan.advanceSettleNote || '');
+  const settleAdv = useMutation({
+    mutationFn: async (settle: boolean) => api.post(`/travel/${plan.id}/advance-settle`, settle ? { receivedBack: recvBack === '' ? undefined : Number(recvBack), note: settleNote, settle: true } : { settle: false }),
+    onSuccess: onDone, onError: (e) => setErr(errMsg(e)),
+  });
+
+  // Who signed each stage (for the money-trail cards) — the actual signer.
+  const revBy = plan.techStage1?.by || null;
+  const finBy = plan.techStage2?.by || plan.techApprovedBy || null;
   const card = (label: string, val: any, sub: string, cls: string) => (<div className={`rounded-lg border p-2.5 ${cls}`}><div className="text-[11px] text-slate-500">{label}</div><div className="text-lg font-bold">{m0(val)}</div><div className="text-[10px] text-slate-400">{sub}</div></div>);
   const toneCls = (t?: string) => t === 'amber' ? 'text-amber-700' : t === 'emerald' ? 'text-emerald-700' : t === 'rose' ? 'text-rose-700' : 'text-slate-700';
   const mrow = (label: string, v: number, opts?: { tone?: string; note?: string }) => (
@@ -627,10 +709,86 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {card('Plan (sanctioned)', planGrand, 'Budget set when planned', 'border-blue-200 bg-blue-50')}
         {card('Tech entered', techGrand, 'What the technician claimed', 'border-slate-200 bg-slate-50')}
-        {card('Reviewer approved', revGrand ?? 0, 'Stage 1 sign-off', 'border-emerald-200 bg-emerald-50')}
-        {card('Final', finalGrand, 'Final sign-off — what we pay', 'border-green-200 bg-green-50')}
+        {card('Reviewer approved', revGrand ?? 0, `Stage 1 sign-off${revBy ? ` · by ${revBy}` : ''}`, 'border-emerald-200 bg-emerald-50')}
+        {card('Final', finalGrand, `Final sign-off — what we pay${finBy ? ` · by ${finBy}` : ''}`, 'border-green-200 bg-green-50')}
         {card('Advance paid', advPaid, 'Handed over before the trip', 'border-amber-200 bg-amber-50')}
       </div>
+
+      {/* Day-wise claim vs the sanctioned per-day plan (the "slab"). Cells that
+          went over the planned amount for that category are flagged amber, so
+          Accounts can see exactly where the technician claimed over budget.
+          Bus + Auto share the local-travel slab (like the reference). */}
+      {(() => {
+        const actualDays: any[] = plan.actualDayCosts || [];
+        if (actualDays.length === 0) return null;
+        const planDays: any[] = plan.planDayCosts || [];
+        const nDays = plan.days || actualDays.length || 1;
+        const slabFor = (i: number) => {
+          const pd = planDays[i];
+          if (pd) return { travel: +pd.travel || 0, food: +pd.food || 0, hotel: +pd.hotel || 0, other: +pd.other || 0 };
+          return { travel: (+pc.travel || 0) / nDays, food: (+pc.food || 0) / nDays, hotel: (+pc.hotel || 0) / nDays, other: (+pc.other || 0) / nDays };
+        };
+        // Per-cell over-slab flags + a total count of amber cells.
+        let overCells = 0;
+        const meta = actualDays.map((d, i) => {
+          const s = slabFor(i);
+          const trip = (+d.bus || 0) + (+d.auto || 0);
+          const o = { travel: trip > s.travel + 0.01, food: (+d.food || 0) > s.food + 0.01, hotel: (+d.hotel || 0) > s.hotel + 0.01, other: (+d.other || 0) > s.other + 0.01 };
+          if (o.travel) overCells += 2; // bus + auto share the travel slab
+          if (o.food) overCells += 1;
+          if (o.hotel) overCells += 1;
+          if (o.other) overCells += 1;
+          return { s, o };
+        });
+        const over = (on: boolean) => on ? 'bg-amber-50 font-semibold text-amber-700' : '';
+        const tot = (k: string) => actualDays.reduce((s, d) => s + (+d[k] || 0), 0);
+        const money = (n: number) => (n ? `₹${Math.round(n).toLocaleString('en-IN')}` : '0');
+        // Per-cell bill the technician uploaded (day + category) — a 📎 that opens
+        // it in the in-app viewer, so Accounts sees the proof right in the row.
+        const attMap = new Map<string, string>();
+        (atts || []).forEach((a: any) => { if (a?.fileUrl) attMap.set(`${a.day}:${a.category}`, a.fileUrl); });
+        const clip = (i: number, cat: string) => { const u = attMap.get(`${actualDays[i].day ?? i + 1}:${cat}`); return u ? <button type="button" onClick={() => setOneDoc(toVF(u, `${CAT_LABEL[cat] || cat} · Day ${actualDays[i].day ?? i + 1}`))} className="ml-1 align-middle text-navy hover:underline" title="View uploaded bill">📎</button> : null; };
+        return (
+          <div className="rounded-lg border border-slate-200 bg-white p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-700">Day-wise claim</span>
+              <span className="text-[11px] text-slate-400">{actualDays.length} day(s)</span>
+              {overCells > 0
+                ? <span className="badge bg-amber-100 text-amber-700">⚠ Over slab on {overCells} cell(s)</span>
+                : <span className="badge bg-emerald-100 text-emerald-700">✓ Within slab</span>}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs [&_td]:px-2 [&_td]:py-1 [&_th]:px-2 [&_th]:py-1">
+                <thead className="bg-slate-50 text-left text-[10px] uppercase text-slate-400">
+                  <tr><th>Day</th><th>Date</th><th className="text-right">Bus</th><th className="text-right">Auto</th><th className="text-right">Food</th><th className="text-right">Hotel</th><th className="text-right">Other</th><th className="text-right">Misc</th><th className="text-right">Day total</th><th>Notes</th></tr>
+                </thead>
+                <tbody>
+                  {actualDays.map((d, i) => (
+                    <tr key={i} className="border-t border-slate-100">
+                      <td className="text-slate-500">{d.day ?? i + 1}</td>
+                      <td className="whitespace-nowrap text-slate-500">{d.date || '—'}</td>
+                      <td className={`whitespace-nowrap text-right ${over(meta[i].o.travel)}`} title={meta[i].o.travel ? `Bus+Auto over slab (≤ ${money(meta[i].s.travel)}/day)` : ''}>{money(+d.bus || 0)}{clip(i, 'bus')}</td>
+                      <td className={`whitespace-nowrap text-right ${over(meta[i].o.travel)}`} title={meta[i].o.travel ? `Bus+Auto over slab (≤ ${money(meta[i].s.travel)}/day)` : ''}>{money(+d.auto || 0)}{clip(i, 'auto')}</td>
+                      <td className={`whitespace-nowrap text-right ${over(meta[i].o.food)}`} title={meta[i].o.food ? `Food over slab (≤ ${money(meta[i].s.food)}/day)` : ''}>{money(+d.food || 0)}{clip(i, 'food')}</td>
+                      <td className={`whitespace-nowrap text-right ${over(meta[i].o.hotel)}`} title={meta[i].o.hotel ? `Hotel over slab (≤ ${money(meta[i].s.hotel)}/day)` : ''}>{money(+d.hotel || 0)}{clip(i, 'hotel')}</td>
+                      <td className={`whitespace-nowrap text-right ${over(meta[i].o.other)}`} title={meta[i].o.other ? `Other over slab (≤ ${money(meta[i].s.other)}/day)` : ''}>{money(+d.other || 0)}{clip(i, 'other')}</td>
+                      <td className="whitespace-nowrap text-right text-slate-500" title="No slab for misc">{money(+d.misc || 0)}{clip(i, 'misc')}</td>
+                      <td className="text-right font-semibold text-navy">{money(dayActualTotal(d))}</td>
+                      <td className="max-w-[200px] truncate text-slate-400" title={d.notes || ''}>{d.notes || ''}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t border-slate-200 bg-slate-50 font-semibold">
+                    <td colSpan={2} className="text-slate-500">Total</td>
+                    <td className="text-right">{money(tot('bus'))}</td><td className="text-right">{money(tot('auto'))}</td><td className="text-right">{money(tot('food'))}</td><td className="text-right">{money(tot('hotel'))}</td><td className="text-right">{money(tot('other'))}</td><td className="text-right">{money(tot('misc'))}</td>
+                    <td className="text-right text-navy">{money(actualDays.reduce((s, d) => s + dayActualTotal(d), 0))}</td><td></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-1 text-[10px] text-slate-400">Slab = the day-wise sanctioned plan{planDays.length === 0 ? ' (trip total ÷ days, no day-wise plan set)' : ''}. Amber cells went over it; Bus + Auto share one local-travel slab. Misc has no slab.</div>
+          </div>
+        );
+      })()}
 
       {/* Net payable */}
       <div className="rounded-lg border border-green-200 bg-green-50/60 p-3">
@@ -643,6 +801,13 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
         <div className="flex flex-wrap gap-2 text-[10px]">
           {advs.map((a, i) => a.fileUrl && <button type="button" key={`a${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700 hover:bg-amber-100">💰 Advance {inr(a.amount)}</button>)}
           {atts.map((a, i) => a.fileUrl && <button type="button" key={`t${i}`} onClick={() => openDoc(a.fileUrl)} className="rounded border border-slate-200 bg-white px-2 py-1 text-slate-500 hover:bg-slate-50">🧾 {CAT_LABEL[a.category] || a.category} · Day {a.day}</button>)}
+        </div>
+      )}
+
+      {/* All uploaded proofs/bills collated into one PDF (opens in-app). */}
+      {(atts.some((a) => a.fileUrl) || advs.some((a) => a.fileUrl) || plan.ticketFileUrl || plan.paymentProofUrl) && (
+        <div className="flex justify-end">
+          <button type="button" onClick={() => setAllDocsOpen(true)} className="rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">📄 All documents (PDF)</button>
         </div>
       )}
 
@@ -718,10 +883,41 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
         </div>
       </fieldset>
 
+      {/* Advance settlement — close the pre-trip advance (Accounts). Sits just
+          above the finalize buttons. Only shown when an advance was handed over. */}
+      {advPaid > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-[10px] font-semibold uppercase text-amber-800">Advance settlement</div>
+            {advSettled
+              ? <span className="badge bg-green-100 text-green-700">✓ Settled</span>
+              : <span className="badge bg-amber-100 text-amber-700">Pending</span>}
+            <span className="ml-auto text-xs text-slate-500">Advance paid <span className="font-semibold text-amber-700">{m0(advPaid)}</span> · Balance (final − advance) <span className={`font-semibold ${bal < 0 ? 'text-rose-700' : bal > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{m0(bal)}</span></span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">{bal < 0 ? 'Advance exceeded the claim — recover the balance from the technician.' : bal > 0 ? 'Advance was less than the claim — still payable to the technician.' : 'Advance matches the claim.'}</div>
+
+          {advSettled ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+              <span>✓ Advance settled{plan.advanceReceivedBack != null ? ` · recovered ${m0(plan.advanceReceivedBack)}` : ''}{plan.advanceSettledBy ? ` · by ${plan.advanceSettledBy}` : ''}{plan.advanceSettledAt ? ` · ${fmtDate(plan.advanceSettledAt)}` : ''}.</span>
+              {plan.advanceSettleNote && <span className="w-full text-[11px] text-slate-500">“{plan.advanceSettleNote}”</span>}
+              {isAccounts && <button className="btn-outline ml-auto text-xs" disabled={settleAdv.isPending} onClick={() => settleAdv.mutate(false)}>↻ Re-open</button>}
+            </div>
+          ) : isAccounts ? (
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              <div><label className="label">Recovered from technician (₹)</label><input type="number" className="input h-9 text-sm" value={recvBack} placeholder="0 = fully adjusted" onChange={(e) => setRecvBack(e.target.value)} /></div>
+              <div className="sm:col-span-2"><label className="label">Note (optional)</label><input className="input h-9 text-sm" value={settleNote} placeholder="e.g. ₹500 returned by UPI, rest adjusted against claim" onChange={(e) => setSettleNote(e.target.value)} /></div>
+              <div><button className="btn-primary" disabled={settleAdv.isPending} onClick={() => settleAdv.mutate(true)}>✓ Mark advance settled</button></div>
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-slate-400">Only the Accounts team can settle the advance.</div>
+          )}
+        </div>
+      )}
+
       {finalized ? (
         <div className="flex items-center justify-between gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
           <span>✓ Processed{plan.accountsFinalizedBy ? ` by ${plan.accountsFinalizedBy}` : ''}{plan.accountsFinalizedAt ? ` · ${fmtDate(plan.accountsFinalizedAt)}` : ''}.</span>
-          {canManage && <button className="btn-outline text-xs" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
+          {isAccounts && <button className="btn-outline text-xs" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
         </div>
       ) : !readOnly && (
         <div className="flex gap-2">
@@ -732,6 +928,12 @@ function AccountsEditor({ plan, canManage, onDone }: { plan: any; canManage: boo
 
       {viewIdx !== null && docItems.length > 0 && (
         <FileViewerModal items={docItems} startIndex={viewIdx} title="Trip document" onClose={() => setViewIdx(null)} />
+      )}
+      {allDocsOpen && (
+        <FileViewerModal items={[{ url: `/travel/${plan.id}/documents-pdf`, name: `${plan.planNumber}-documents.pdf`, authed: true }]} startIndex={0} title="All documents (PDF)" onClose={() => setAllDocsOpen(false)} />
+      )}
+      {oneDoc && (
+        <FileViewerModal items={[oneDoc]} startIndex={0} title={oneDoc.label || 'Bill'} onClose={() => setOneDoc(null)} />
       )}
     </div>
   );
@@ -1691,6 +1893,54 @@ function ExpenseRow({ exp, chain, canManage, onDone }: { exp: any; chain: any; c
       </div>
       <div className="mt-1 text-[11px] text-slate-500">{(exp.items ?? []).length} line(s){exp.items?.some((it: any) => it.paymentMode === 'Cash') ? ' · incl. cash' : ''}</div>
       {chain && <div className="mt-2"><ChainView chain={chain} status={exp.status} /></div>}
+    </div>
+  );
+}
+
+// ── Settings (admin): who signs the day-wise expense review (Reviewer / Final) ─
+// Assign any user to each stage. When a stage's approver is set, ONLY that user
+// (or an admin) may sign it; leave blank to let any travel-editor sign (legacy).
+function SettingsTab() {
+  const qc = useQueryClient();
+  const cfgQ = useQuery({ queryKey: ['travel-config'], queryFn: async () => (await api.get('/travel/config')).data.config as any });
+  const empQ = useQuery({ queryKey: ['travel-employees'], queryFn: async () => (await api.get('/travel/employees')).data.employees as { id: string; name: string; email?: string }[] });
+  const [reviewerId, setReviewerId] = useState('');
+  const [finalId, setFinalId] = useState('');
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { if (cfgQ.data) { setReviewerId(cfgQ.data.reviewerId || ''); setFinalId(cfgQ.data.finalId || ''); } }, [cfgQ.data]);
+  const emps = empQ.data ?? [];
+  const nameOf = (id: string) => emps.find((e) => e.id === id)?.name || null;
+  const save = useMutation({
+    mutationFn: async () => api.put('/travel/config', { reviewerId: reviewerId || null, reviewerName: nameOf(reviewerId), finalId: finalId || null, finalName: nameOf(finalId) }),
+    onSuccess: () => { setSaved(true); qc.invalidateQueries({ queryKey: ['travel-config'] }); setTimeout(() => setSaved(false), 2500); },
+    onError: (e) => alert(errMsg(e)),
+  });
+  if (cfgQ.isLoading || empQ.isLoading) return <Spinner label="Loading settings…" />;
+
+  return (
+    <div className="max-w-2xl rounded-xl border border-slate-200 bg-white p-5">
+      <div className="mb-1 font-semibold text-navy">Expense review approvers</div>
+      <p className="mb-4 text-xs text-slate-500">Who signs the day-wise expense review. <span className="font-medium">Reviewer</span> signs first (Stage 1), then <span className="font-medium">Final</span> (Stage 2). When set, only that person (or an admin) can sign that stage. Leave blank to let anyone with travel-edit sign it.</p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div>
+          <label className="label">Reviewer (Stage 1)</label>
+          <select className="input" value={reviewerId} onChange={(e) => setReviewerId(e.target.value)}>
+            <option value="">— Anyone with travel edit —</option>
+            {emps.map((e) => <option key={e.id} value={e.id}>{e.name}{e.email ? ` · ${e.email}` : ''}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="label">Final approver (Stage 2)</label>
+          <select className="input" value={finalId} onChange={(e) => setFinalId(e.target.value)}>
+            <option value="">— Anyone with travel edit —</option>
+            {emps.map((e) => <option key={e.id} value={e.id}>{e.name}{e.email ? ` · ${e.email}` : ''}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="mt-4 flex items-center gap-3">
+        <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save'}</button>
+        {saved && <span className="text-xs font-medium text-emerald-600">✓ Saved</span>}
+      </div>
     </div>
   );
 }

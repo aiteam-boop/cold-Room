@@ -16,11 +16,15 @@ export interface EditableProject {
   name: string;
   clientName?: string | null;
   siteLocation?: string | null;
+  siteSupervisor?: string | null;
   clientPoNumber?: string | null;
   clientPos?: ClientPo[] | null;
   clientGstin?: string | null;
   startDate?: string | null;
   targetCompletionDate?: string | null;
+  orderReceiveDate?: string | null;
+  advanceReceiveDate?: string | null;
+  officialStartDate?: string | null; // drawing-approved date (from the checklist) — read-only
   status?: string;
 }
 
@@ -37,9 +41,12 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
     name: project.name ?? '',
     clientName: project.clientName ?? '',
     siteLocation: project.siteLocation ?? '',
+    siteSupervisor: project.siteSupervisor ?? '',
     clientGstin: project.clientGstin ?? '',
     startDate: day(project.startDate),
     targetCompletionDate: day(project.targetCompletionDate),
+    orderReceiveDate: day(project.orderReceiveDate),
+    advanceReceiveDate: day(project.advanceReceiveDate),
     status: project.status ?? 'ACTIVE',
   });
   // Multiple client PO numbers (each with an optional uploaded proof). Seeded from the
@@ -71,10 +78,13 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         name: form.name.trim(),
         clientName: form.clientName.trim() || null,
         siteLocation: form.siteLocation.trim() || null,
+        siteSupervisor: form.siteSupervisor.trim() || null,
         clientGstin: form.clientGstin.trim() || null,
         clientPos: pos.filter((p) => p.number.trim()).map((p) => ({ number: p.number.trim(), proofUrl: p.proofUrl || null })),
         startDate: form.startDate || null,
         targetCompletionDate: form.targetCompletionDate || null,
+        orderReceiveDate: form.orderReceiveDate || null,
+        advanceReceiveDate: form.advanceReceiveDate || null,
         status: form.status,
       };
       return (await api.patch(`/projects/${project.id}`, payload)).data;
@@ -105,6 +115,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         <div className="grid gap-3 sm:grid-cols-2">
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={set('clientName')} placeholder="Not set" /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={set('siteLocation')} placeholder="Not set" /></div>
+          <div><label className="label">Site supervisor</label><input className="input" value={form.siteSupervisor} onChange={set('siteSupervisor')} placeholder="Site in-charge / supervisor name" /></div>
           <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={set('clientGstin')} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>
         </div>
 
@@ -129,7 +140,12 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          <div><label className="label">Start date</label><input className="input" type="date" value={form.startDate} onChange={set('startDate')} /></div>
+          <div><label className="label">PO received date</label><input className="input" type="date" value={form.orderReceiveDate} onChange={set('orderReceiveDate')} /></div>
+          <div><label className="label">First advance received</label><input className="input" type="date" value={form.advanceReceiveDate} onChange={set('advanceReceiveDate')} /></div>
+          {/* Drawing-approved date is computed from the drawing checklist — shown
+              here read-only so all three start-clock dates are visible together. */}
+          <div><label className="label">Drawing approved date <span className="text-[10px] font-normal text-slate-400">(from drawing checklist)</span></label><input className="input bg-slate-50 text-slate-500" type="date" value={day(project.officialStartDate)} disabled readOnly /></div>
+          <div><label className="label">Start date <span className="text-[10px] font-normal text-slate-400">(else auto = latest of PO / drawing / advance)</span></label><input className="input" type="date" value={form.startDate} onChange={set('startDate')} /></div>
           <div><label className="label">Target completion</label><input className="input" type="date" value={form.targetCompletionDate} onChange={set('targetCompletionDate')} /></div>
         </div>
 

@@ -80,7 +80,17 @@ router.get(
         const daysRemaining = target ? Math.ceil((target.getTime() - now.getTime()) / MS_DAY) : null;
 
         // Mini-bar: how far through the planned calendar we are, start → target.
-        const start = p.officialStartDate ?? p.startDate;
+        // If a manual Start date is set it wins; otherwise the clock starts on the
+        // LATEST of PO received / Drawing approved / First advance — and we record
+        // WHICH one, so the card can label it ("from PO received", etc.).
+        const startCands = ([
+          { d: p.orderReceiveDate, label: 'PO received' },
+          { d: p.officialStartDate, label: 'Drawing approved' },
+          { d: p.advanceReceiveDate, label: 'First advance' },
+        ].filter((x) => x.d) as { d: Date; label: string }[]);
+        const maxCand = startCands.length ? startCands.reduce((a, b) => (b.d.getTime() > a.d.getTime() ? b : a)) : null;
+        const start = p.startDate ?? (maxCand?.d ?? null);
+        const startSource = p.startDate ? 'Manual' : (maxCand?.label ?? null);
         let timelinePct: number | null = null;
         if (start && target && target.getTime() > start.getTime()) {
           const raw = ((now.getTime() - start.getTime()) / (target.getTime() - start.getTime())) * 100;
@@ -93,12 +103,17 @@ router.get(
           name: p.name,
           clientName: p.clientName,
           siteLocation: p.siteLocation,
+          siteSupervisor: p.siteSupervisor ?? null,
           clientPoNumber: p.clientPoNumber,
           clientPos: p.clientPos ?? null,
           clientGstin: p.clientGstin ?? null,
           status: p.status,
           startDate: p.startDate,
           officialStartDate: p.officialStartDate,
+          orderReceiveDate: p.orderReceiveDate,
+          advanceReceiveDate: p.advanceReceiveDate,
+          effectiveStartDate: start,
+          startSource,
           targetCompletionDate: target,
           boqLocked: p.boqLocked,
           counts: p._count,
@@ -131,11 +146,14 @@ const createSchema = z.object({
   name: z.string().min(1),
   clientName: z.string().optional(),
   siteLocation: z.string().optional(),
+  siteSupervisor: z.string().trim().max(120).nullable().optional(),
   clientPoNumber: z.string().optional(),
   clientPos: z.array(clientPoSchema).optional(),
   clientGstin: z.string().trim().max(20).nullable().optional(),
   startDate: z.string().datetime().optional().or(z.string().date().optional()),
   targetCompletionDate: z.string().datetime().optional().or(z.string().date().optional()),
+  orderReceiveDate: z.string().nullable().optional(),
+  advanceReceiveDate: z.string().nullable().optional(),
 });
 
 // POST /api/projects — ADMIN only (FR-PM-01).
@@ -149,6 +167,7 @@ router.post(
         name: body.name,
         clientName: body.clientName,
         siteLocation: body.siteLocation,
+        siteSupervisor: body.siteSupervisor ?? null,
         // Legacy single field stays in sync with the first client PO for consumers
         // (packing-list default) that still read it.
         clientPoNumber: body.clientPos?.length ? body.clientPos[0].number : body.clientPoNumber,
@@ -156,6 +175,8 @@ router.post(
         clientGstin: body.clientGstin ?? null,
         startDate: body.startDate ? new Date(body.startDate) : null,
         targetCompletionDate: body.targetCompletionDate ? new Date(body.targetCompletionDate) : null,
+        orderReceiveDate: body.orderReceiveDate ? new Date(body.orderReceiveDate) : null,
+        advanceReceiveDate: body.advanceReceiveDate ? new Date(body.advanceReceiveDate) : null,
         createdById: req.user!.sub,
         members: { create: { userId: req.user!.sub, role: 'ADMIN' } },
       },
@@ -220,6 +241,7 @@ router.patch(
         ...(body.name !== undefined && { name: body.name }),
         ...(body.clientName !== undefined && { clientName: body.clientName }),
         ...(body.siteLocation !== undefined && { siteLocation: body.siteLocation }),
+        ...(body.siteSupervisor !== undefined && { siteSupervisor: body.siteSupervisor }),
         ...(body.clientPos !== undefined && { clientPos: body.clientPos, clientPoNumber: body.clientPos?.[0]?.number ?? null }),
         ...(body.clientPos === undefined && body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
         ...(body.clientGstin !== undefined && { clientGstin: body.clientGstin }),

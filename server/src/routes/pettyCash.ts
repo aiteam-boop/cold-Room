@@ -210,7 +210,7 @@ router.post('/:id/submit', requireEdit('pettycash'), asyncHandler(async (req, re
 }));
 
 // ── Confirm (Accounts) — optional partial sanction ───────────────────────────
-router.post('/:id/confirm', requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
+router.post('/:id/confirm', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
   const b = z.object({ sanctionedAmount: z.coerce.number().nonnegative().optional(), remark: z.string().optional() }).parse(req.body ?? {});
   const e = await loadEntry(req.params.id);
   if (e.type !== 'EXPENSE') throw badRequest('Only an expense can be confirmed.');
@@ -222,7 +222,7 @@ router.post('/:id/confirm', requireSection('canMarkPaid'), asyncHandler(async (r
 }));
 
 // ── Reject & resend to custodian (Accounts) ──────────────────────────────────
-router.post('/:id/reject', requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
+router.post('/:id/reject', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
   const b = z.object({ remark: z.string().min(1, 'Say what needs correcting.') }).parse(req.body);
   const e = await loadEntry(req.params.id);
   if (e.status === 'VOID') throw badRequest('This entry is voided.');
@@ -233,7 +233,7 @@ router.post('/:id/reject', requireSection('canMarkPaid'), asyncHandler(async (re
 }));
 
 // ── Strike off / void (Accounts) ─────────────────────────────────────────────
-router.post('/:id/void', requireSection('canMarkPaid'), asyncHandler(async (req, res) => {
+router.post('/:id/void', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
   const b = z.object({ remark: z.string().optional() }).parse(req.body ?? {});
   const e = await loadEntry(req.params.id);
   const u = req.user!;

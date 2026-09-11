@@ -23,7 +23,7 @@ const dmy = (d: unknown) => (d ? new Date(d as string).toLocaleDateString('en-GB
 async function loadByToken(token: string) {
   const gr = await prisma.gRN.findFirst({ where: { releaseToken: token } });
   if (!gr) return null;
-  const doc = await prisma.procurementDoc.findUnique({ where: { id: gr.docId }, select: { docNumber: true, vendorId: true, vendorName: true, finalAmount: true } });
+  const doc = await prisma.procurementDoc.findUnique({ where: { id: gr.docId }, select: { docNumber: true, vendorId: true, vendorName: true, finalAmount: true, basicAmount: true, gstEnabled: true, gstPct: true } });
   const project = await prisma.project.findUnique({ where: { id: gr.projectId }, select: { name: true } });
   const vendorId = doc?.vendorId ?? null;
   let vendorEmail = '';
@@ -81,7 +81,9 @@ function page(data: NonNullable<Awaited<ReturnType<typeof loadByToken>>>, token:
         ${row('PI Number', esc(gr.piNumber ?? '—'))}
         ${row('PI Value', gr.piValue != null ? rs(gr.piValue) : '—')}
         ${row('Amount to Pay', gr.amountToPay != null ? rs(gr.amountToPay) : '—')}
-        ${row('PO Total', doc?.finalAmount != null ? rs(doc.finalAmount) : '—')}
+        ${doc?.basicAmount != null
+          ? row('PO Value', `Basic: ${rs(doc.basicAmount)}${(doc.gstEnabled && doc.gstPct != null) ? ` &nbsp;·&nbsp; GST (${doc.gstPct}%): ${rs(Math.round(((doc.finalAmount ?? 0) - (doc.basicAmount ?? 0)) * 100) / 100)}` : ''} &nbsp;·&nbsp; Total (with GST): ${rs(doc.finalAmount ?? 0)}`)
+          : row('PO Total', doc?.finalAmount != null ? rs(doc.finalAmount) : '—')}
         ${row('Payment Status', esc(gr.paymentStatus ?? '—'))}
         ${gr.ledgerHead ? row('Ledger Head', esc(gr.ledgerHead)) : ''}
         ${row('Documents', `${link('PO', poPdf)} &nbsp; ${link('PI', piUrl)} &nbsp; ${link('Payment / GRN', grnPdf)} &nbsp; ${link(`KYC (${kycCount})`, kycUrl)}`)}

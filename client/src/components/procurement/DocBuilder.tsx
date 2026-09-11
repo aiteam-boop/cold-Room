@@ -714,7 +714,7 @@ export default function DocBuilder({ projectId, docId, onClose }: { projectId: s
 
       {/* Per-payment-term Proforma Invoices — the approver sees these with the PO,
           and a GRN raised for a term auto-fetches its PI. */}
-      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} onUploaded={(key, pi) => setD((prev: any) => ({ ...prev, termPis: { ...(prev?.termPis || {}), [key]: pi } }))} onLinesExtracted={fillFromPi} />
+      <TermPIs projectId={projectId} docId={docId} doc={d} editable={editable} onUploaded={(patch) => setD((prev: any) => ({ ...prev, termPis: { ...(prev?.termPis || {}), ...patch } }))} onLinesExtracted={fillFromPi} />
     </div>
   );
 }
@@ -914,48 +914,47 @@ const PI_TERMS = [
   { key: 'postCompletion', name: 'Post Completion', pct: 'payPostCompletionPct' },
   { key: 'retention', name: 'Retention', pct: 'payRetentionPct' },
 ] as const;
-function TermPIs({ projectId, docId, doc, editable, onUploaded, onLinesExtracted }: { projectId: string; docId: string; doc: any; editable: boolean; onUploaded: (key: string, pi: any) => void; onLinesExtracted: (lines: any[]) => void }) {
-  const [busy, setBusy] = useState<string | null>(null);
+function TermPIs({ projectId, docId, doc, editable, onUploaded, onLinesExtracted }: { projectId: string; docId: string; doc: any; editable: boolean; onUploaded: (patch: Record<string, any>) => void; onLinesExtracted: (lines: any[]) => void }) {
+  const [busy, setBusy] = useState(false);
   const termPis = doc.termPis || {};
   const terms = PI_TERMS.filter((t) => (Number(doc[t.pct]) || 0) > 0);
-  const upload = async (key: string, file: File) => {
-    setBusy(key);
+  // A PO has ONE PI — show the single PI (whichever term already carries it).
+  const pi = terms.map((t) => termPis[t.key]).find((p) => p?.piPdfUrl) || null;
+  // Upload once → server applies it to every active term ('all'), so a GRN raised
+  // for any term still auto-fetches this PI.
+  const upload = async (file: File) => {
+    setBusy(true);
     try {
       const fd = new FormData(); fd.append('file', file);
-      const res = await api.post(`/projects/${projectId}/procurement/docs/${docId}/term-pi/${key}`, fd);
-      // Merge ONLY this term's PI into the parent form state — never refetch the
-      // whole document, which would reset the user's unsaved edits (bug fix). The
-      // PI is already persisted server-side by the endpoint above.
-      onUploaded(key, res.data?.pi ?? null);
+      const res = await api.post(`/projects/${projectId}/procurement/docs/${docId}/term-pi/all`, fd);
+      // Merge the PI into EVERY active term in the parent form state — never refetch
+      // the whole document (that would drop unsaved edits). Persisted server-side.
+      const uploaded = res.data?.pi ?? null;
+      const patch: Record<string, any> = {};
+      (res.data?.keys?.length ? res.data.keys : terms.map((t) => t.key)).forEach((k: string) => { patch[k] = uploaded; });
+      onUploaded(patch);
       // If the PI reader found item rows, offer to fill the PO lines from them.
       if (Array.isArray(res.data?.lineItems) && res.data.lineItems.length) onLinesExtracted(res.data.lineItems);
-    } catch (e) { alert(errMsg(e)); } finally { setBusy(null); }
+    } catch (e) { alert(errMsg(e)); } finally { setBusy(false); }
   };
   if (!terms.length) return null;
   return (
     <div className="card p-4">
-      <div className="text-sm font-semibold text-slate-600">Proforma Invoices (PI) — per payment term</div>
-      <p className="mb-2 mt-0.5 text-xs text-slate-400">Upload the PI for each payment term. The approver sees these with the PO, and a GRN raised for that term auto-fetches its PI. <span className="text-emerald-600">Uploading a PI also reads its item rows (Description / UOM / Qty / Unit price) and offers to fill the PO lines — you review before it applies.</span></p>
-      <div className="divide-y divide-slate-100">
-        {terms.map((t) => {
-          const pi = termPis[t.key];
-          return (
-            <div key={t.key} className="flex items-center justify-between gap-3 py-2 text-sm">
-              <div className="font-medium text-slate-700">{t.name} <span className="text-xs text-slate-400">{Number(doc[t.pct]) || 0}%</span></div>
-              <div className="flex items-center gap-3">
-                {pi?.piNumber && <span className="text-xs text-slate-500">PI {pi.piNumber}{pi.piValue != null ? ` · ₹${Number(pi.piValue).toLocaleString('en-IN')}` : ''}</span>}
-                {pi?.piPdfUrl && <a href={pi.piPdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View PI</a>}
-                {!pi?.piPdfUrl && <span className="text-xs text-slate-300">no PI yet</span>}
-                {editable && (
-                  <label className="cursor-pointer text-xs font-medium text-navy hover:underline">
-                    {busy === t.key ? 'Uploading…' : pi?.piPdfUrl ? 'Replace' : '⬆ Upload PI'}
-                    <input type="file" className="hidden" accept="application/pdf,.pdf" disabled={busy === t.key} onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(t.key, f); e.currentTarget.value = ''; }} />
-                  </label>
-                )}
-              </div>
-            </div>
-          );
-        })}
+      <div className="text-sm font-semibold text-slate-600">Proforma Invoice (PI)</div>
+      <p className="mb-2 mt-0.5 text-xs text-slate-400">One PI for the whole PO — it covers all payment terms ({terms.map((t) => `${t.name} ${Number(doc[t.pct]) || 0}%`).join(' · ')}). The approver sees it with the PO, and any GRN auto-fetches it. <span className="text-emerald-600">Uploading a PI also reads its item rows (Description / UOM / Qty / Unit price) and offers to fill the PO lines — you review before it applies.</span></p>
+      <div className="flex items-center justify-between gap-3 py-1 text-sm">
+        <div className="flex items-center gap-3">
+          {pi?.piNumber && <span className="text-xs text-slate-500">PI {pi.piNumber}{pi.piValue != null ? ` · ₹${Number(pi.piValue).toLocaleString('en-IN')}` : ''}</span>}
+          {pi?.piPdfUrl
+            ? <a href={pi.piPdfUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">📄 View PI</a>
+            : <span className="text-xs text-slate-300">no PI yet</span>}
+        </div>
+        {editable && (
+          <label className="cursor-pointer rounded-lg border border-navy/30 bg-navy/5 px-3 py-1 text-xs font-medium text-navy hover:bg-navy/10">
+            {busy ? 'Uploading…' : pi?.piPdfUrl ? 'Replace PI' : '⬆ Upload PI'}
+            <input type="file" className="hidden" accept="application/pdf,.pdf" disabled={busy} onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.currentTarget.value = ''; }} />
+          </label>
+        )}
       </div>
     </div>
   );

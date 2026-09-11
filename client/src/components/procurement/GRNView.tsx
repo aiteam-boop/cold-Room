@@ -248,6 +248,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
       piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, paymentDueDate: g.paymentDueDate?.slice?.(0, 10) || null, piValue: g.piValue != null && g.piValue !== '' ? Number(g.piValue) : null,
       amountToPay: g.amountToPay != null && g.amountToPay !== '' ? Number(g.amountToPay) : null,
       ledgerHead: g.ledgerHead ?? null,
+      lrNumber: g.lrNumber ?? null,
       lineItems: g.lineItems.map((l: any) => ({ id: l.id, receiptQty: Number(l.receiptQty), defectQty: Number(l.defectQty || 0), remarks: l.remarks })),
       ...(amending ? { amendmentRemark: amendRemark } : {}),
     })).data.grn,
@@ -291,6 +292,12 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
   const uploadPhoto = useMutation({
     mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/photo`, fd); },
     onSuccess: () => { setMsg('Photo uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
+  // LR (Lorry Receipt) — only shown for a Transport Order payment (see below).
+  const uploadLr = useMutation({
+    mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/lr`, fd); },
+    onSuccess: (r) => { setG({ ...g, lrPdfUrl: r?.data?.lrPdfUrl ?? g.lrPdfUrl }); setMsg('LR uploaded.'); },
     onError: (e) => setMsg(errMsg(e)),
   });
   const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }, onError: (e) => setMsg(errMsg(e)) });
@@ -397,6 +404,9 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
   // milestoneId used to misfire and fall back to the old goods-receipt layout
   // (Delivery Details / Receipt Line Items) and skip the payment approval chain.
   const isPaymentGrn = !!g.milestoneId || g.piValue != null || !!g.piNumber || /^PAY-/i.test(g.grnNumber || '');
+  // A payment raised against a Transport Order (TO) — the transporter's Lorry
+  // Receipt (LR) applies here (and ONLY here, never for a PO/WO payment).
+  const isTransportPayment = g.doc?.type === 'TO';
   const canRecordPaid = canMarkPaid && approved && payStatus === 'TRIGGERED';
   const paidButOpen = payStatus === 'PAID';
   const paymentClosed = payStatus === 'CLOSED';
@@ -804,6 +814,21 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
           <F label="Ledger Head (remark)">
             <input className="input" disabled={!editable} value={g.ledgerHead ?? ''} placeholder="e.g. Blast & Freezer (BOQ 1.1A) — note for accounts / approver" onChange={(e) => setG({ ...g, ledgerHead: e.target.value })} />
           </F>
+
+          {/* Lorry Receipt (LR) — ONLY for a Transport Order (TO) payment. The
+              transporter's consignment document; uploaded like the PI (PDF only).
+              Never shown for a PO/WO payment. */}
+          {isTransportPayment && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <G label="LR (Lorry Receipt) Number" v={g.lrNumber} on={(x) => setG({ ...g, lrNumber: x })} ed={editable} />
+              <F label="LR (Lorry Receipt) PDF *">
+                {g.lrPdfUrl
+                  ? <a className="text-sm text-navy hover:underline" href={g.lrPdfUrl} target="_blank" rel="noreferrer">📄 View LR</a>
+                  : <span className="text-xs text-slate-400">Not uploaded</span>}
+                {editable && <input className="input mt-1 text-xs" type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && uploadLr.mutate(e.target.files[0])} />}
+              </F>
+            </div>
+          )}
 
           {/* Attachments — the PI drives the payment; the tax invoice lives in its
               own card above; the PO this GRN is against is one click away. */}

@@ -71,6 +71,7 @@ model Project {
   name                 String
   clientName           String?
   siteLocation         String?
+  siteSupervisor       String?         // site supervisor / in-charge name
   // The client's PO number this project/delivery is booked against — printed on the
   // packing list (Amisha interview 64). `clientPoNumber` is the LEGACY single value
   // (kept for old projects + fallback); `clientPos` is the newer list of multiple
@@ -584,6 +585,11 @@ model GRN {
   paymentDueDate DateTime?
   piValue       Float?
   piPdfUrl      String?
+  // Lorry Receipt (LR) — the transporter's consignment document. Only relevant
+  // when this payment is raised against a Transport Order (TO); uploaded like the
+  // PI (PDF only). Stays null/unused for PO/WO payments.
+  lrNumber      String?
+  lrPdfUrl      String?
   // The amount to release for this milestone (editable; may be partial). Balance
   // is derived = piValue − advance already paid on the PO − amountToPay.
   amountToPay   Float?
@@ -1598,6 +1604,20 @@ model PettyCashConfig {
 // upload → expense approval (docType 'TRAVEL_EXPENSE') → employee notified + PDF.
 // The traveller is either a CRMCTS User (mLevel auto-filled) or a free-typed
 // "Other / Non-Crystal Group" person.
+// Company-wide travel settings — who does the day-wise expense review. A single
+// row (projectId = null). When a stage's approver is set, ONLY that user (or an
+// admin) may sign that stage; when unset, any travel-editor can (legacy fallback).
+model TravelConfig {
+  id            String    @id @default(cuid()) @map("_id")
+  projectId     String?                          // null = company-wide singleton
+  reviewerId    String?                          // User.id — Stage 1 (Reviewer)
+  reviewerName  String?
+  finalId       String?                          // User.id — Stage 2 (Final)
+  finalName     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
 model TravelPlan {
   id            String    @id @default(cuid()) @map("_id")
   planNumber    String    @unique              // TRV-YYYYMMDD-#### (per-day sequence)
@@ -1698,6 +1718,15 @@ model TravelPlan {
   accountsFinalized Boolean     @default(false)
   accountsFinalizedBy String?
   accountsFinalizedAt DateTime?
+  // ── Advance settlement / reconciliation (Accounts) ──────────────────────────
+  // How the pre-trip advance was closed: recovered from the technician, or
+  // adjusted against the claim. Kept SEPARATE from finalisation so the cash
+  // trail can be settled on its own. Gated by the accountsTeam flag.
+  advanceSettled       Boolean   @default(false)
+  advanceReceivedBack  Float?                       // cash the technician returned (0 = fully adjusted against the claim)
+  advanceSettleNote    String?
+  advanceSettledBy     String?
+  advanceSettledAt     DateTime?
   // JSON [{ day, category, fileUrl }] — bill / proof per day-cell.
   techAttachments  String?
   // JSON [{ jo, fileUrl }] — JO closure proof.

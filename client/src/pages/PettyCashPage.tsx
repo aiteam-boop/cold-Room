@@ -47,7 +47,7 @@ export default function PettyCashPage() {
   const qc = useQueryClient();
   const { canEdit, can } = useAuth();
   const canManage = canEdit('pettycash'); // custodian records / tops up / submits
-  const isAccounts = can('canMarkPaid');   // Accounts confirm / reject / void
+  const isAccounts = can('accountsTeam');  // Accounts confirm / reject / void (own flag, separate from FMS canMarkPaid)
 
   const [type, setType] = useState('');
   const [status, setStatus] = useState('');
@@ -228,8 +228,13 @@ export default function PettyCashPage() {
                     </td>
                     <td className={`whitespace-nowrap text-right font-medium ${e.type === 'TOPUP' ? 'text-emerald-700' : 'text-slate-700'}`}>{e.type === 'TOPUP' ? '+' : '−'}{inr(e.amount)}</td>
                     <td>
-                      <span className={`badge ${STATUS_PILL[e.status] || 'bg-slate-100 text-slate-600'}`}>{statusLabel(e.status)}</span>
-                      {e.recordedByName && <div className="mt-0.5 text-[10px] text-slate-400">{e.recordedByName}{e.status === 'CONFIRMED' ? ' ✓' : ''}</div>}
+                      {/* Who entered this — small uppercase label above the status. */}
+                      {e.recordedByName && <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Entry by {e.recordedByName}</div>}
+                      <span className={`badge mt-0.5 ${STATUS_PILL[e.status] || 'bg-slate-100 text-slate-600'}`}>{e.status === 'CONFIRMED' ? '✓ ' : ''}{statusLabel(e.status)}</span>
+                      {/* Who confirmed / rejected it. */}
+                      {e.decidedBy && (e.status === 'CONFIRMED' || e.status === 'REJECTED') && (
+                        <div className="mt-0.5 text-[10px] text-slate-400">{e.decidedBy} {e.status === 'CONFIRMED' ? '✓' : '✕'}</div>
+                      )}
                     </td>
                     <td>
                       <div className="flex flex-wrap items-center gap-1">

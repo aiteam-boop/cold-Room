@@ -272,6 +272,7 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
                   <thead className="text-xs uppercase text-slate-400">
                     <tr>
                       <th className="text-left">Description</th>
+                      <th className="w-20 text-center">UOM</th>
                       <th className="w-20 text-center">PO Qty</th>
                       <th className="w-24 text-center">Prev Recd</th>
                       <th className="w-24 text-center">Remaining</th>
@@ -288,6 +289,7 @@ function GoodsReceiptForm({ projectId, grId, onClose }: { projectId: string; grI
                       return (
                       <tr key={l.id} className="border-b border-slate-100">
                         <td className="py-1 text-xs">{l.description}</td>
+                        <td className="text-center text-slate-500">{l.uom || '—'}</td>
                         <td className="text-center">{l.poQty}</td>
                         <td className="text-center">{l.previouslyReceivedQty}</td>
                         <td className="text-center text-slate-500">{l.remainingToReceive ?? Math.max(l.poQty - l.previouslyReceivedQty, 0)}</td>

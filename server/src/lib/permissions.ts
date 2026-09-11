@@ -60,13 +60,18 @@ export const PAGE_LABELS: Record<PageKey, string> = {
 // Entering the budget and FREEZING it are deliberately two different rights: the
 // costing may be typed by one person and locked by whoever owns the number.
 // Freezing is what makes the budget the benchmark, so it is the stronger right.
-export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;
+export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'accountsTeam', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
   hideFinancials: 'Hide pricing & financial data',
   canApprove: 'Can approve (PO/WO, GRN, progress entries)',
   canMarkPaid: 'Can mark payment milestones paid (Accounts)',
+  // Dedicated Petty-Cash + Travel accounts right — kept SEPARATE from
+  // canMarkPaid (vendor/FMS payments) so the two can be granted to different
+  // people. Covers: Petty Cash confirm/reject/void AND Travel accounts
+  // finalise (Mark processed / Save / Re-open) + advance settlement.
+  accountsTeam: 'Accounts actions — Petty Cash + Travel (confirm, finalize, settle)',
   canEditBudget: 'Can enter the BOQ budget (costing)',
   canFreezeBudget: 'Can FREEZE the budget (locks it for everyone)',
   seeAllApprovals: 'See ALL raised documents in Approvals (everyone\'s, not just their own)',

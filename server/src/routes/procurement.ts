@@ -198,8 +198,9 @@ router.get('/docs', requireProjectMember, requireAnyPage(...DOC_PAGES), asyncHan
         pendingWith: pendingBy.get(d.id)?.approverName ?? null,
         pendingWithRole: pendingBy.get(d.id)?.approverRole ?? null,
         ...chainOf(d.id),
-        // Proforma Invoices uploaded on this PO/WO (per term) — shown as a link.
-        pis: Object.entries(parseJson(d.termPis, {}) as Record<string, any>).filter(([, v]) => v && v.piPdfUrl).map(([k, v]) => ({ term: k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl as string })),
+        // The PO's PI (one file, applied to every term) — de-duplicated by URL so
+        // it shows once, not once per payment term.
+        pis: (() => { const seen = new Set<string>(); const out: { term: string; piNumber: string | null; piUrl: string }[] = []; for (const [k, v] of Object.entries(parseJson(d.termPis, {}) as Record<string, any>)) { if (!v || !v.piPdfUrl || seen.has(v.piPdfUrl)) continue; seen.add(v.piPdfUrl); out.push({ term: k, piNumber: v.piNumber ?? null, piUrl: v.piPdfUrl as string }); } return out; })(),
         goodsReceipts: grByDoc.get(d.id) ?? [],
         // UTR(s) backfilled from the Accounts sheet (paid via the form) — shown inline.
         sheetPayments: parseJson(d.sheetPayments, []),
@@ -788,9 +789,14 @@ router.get('/docs/:docId/pdf', requireProjectMember, requireAnyPage(...DOC_PAGES
 // payment term (advance | beforeDelivery | …). Stored on the PO under termPis so
 // the approver sees each term's PI and a GRN raised for that term auto-fetches it.
 const TERM_KEYS = ['advance', 'beforeDelivery', 'running', 'postDelivery', 'postCompletion', 'retention'];
+// Which pct field on the doc gates each term (0% = term not used).
+const TERM_PCT: Record<string, string> = { advance: 'payAdvancePct', beforeDelivery: 'payBeforeDeliveryPct', running: 'payRunningPct', postDelivery: 'payPostDeliveryPct', postCompletion: 'payPostCompletionPct', retention: 'payRetentionPct' };
 router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdit(...DOC_PAGES), uploadPdf.single('file'), asyncHandler(async (req, res) => {
   const termKey = req.params.termKey;
-  if (!TERM_KEYS.includes(termKey)) throw badRequest('Unknown payment term.');
+  // 'all' = one PI for the whole PO (applied to every active term) — a PO has one
+  // PI, so the buyer uploads once instead of once per term. A specific key still
+  // works for backward compatibility.
+  if (termKey !== 'all' && !TERM_KEYS.includes(termKey)) throw badRequest('Unknown payment term.');
   if (!req.file) throw badRequest('Only PDF files are allowed for the PI — please upload a PDF (images / JPEG are not accepted).');
   const doc = await prisma.procurementDoc.findFirst({ where: { id: req.params.docId, projectId: req.params.projectId } });
   if (!doc) throw notFound('Document not found');
@@ -802,12 +808,21 @@ router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdi
   // user — never auto-applied; does NOT touch the doc's saved line items here.
   const lineItems = await extractPiLineItems(req.file.path, req.file.mimetype).catch(() => null);
   const termPis = parseJson(doc.termPis, {}) as Record<string, any>;
-  termPis[termKey] = {
+  // Terms to set: for 'all', every active term (pct > 0); else the one term.
+  let targetKeys: string[];
+  if (termKey === 'all') {
+    targetKeys = TERM_KEYS.filter((k) => (Number((doc as any)[TERM_PCT[k]]) || 0) > 0);
+    if (!targetKeys.length) targetKeys = [...TERM_KEYS]; // no terms set yet → cover all so any GRN finds it
+  } else {
+    targetKeys = [termKey];
+  }
+  const pi = {
     piPdfUrl: fileUrl,
-    piNumber: extracted?.piNumber ?? termPis[termKey]?.piNumber ?? null,
-    piDate: extracted?.piDate ?? termPis[termKey]?.piDate ?? null,
-    piValue: extracted?.piValue ?? termPis[termKey]?.piValue ?? null,
+    piNumber: extracted?.piNumber ?? null,
+    piDate: extracted?.piDate ?? null,
+    piValue: extracted?.piValue ?? null,
   };
+  for (const k of targetKeys) termPis[k] = { ...pi };
   await prisma.procurementDoc.update({ where: { id: doc.id }, data: { termPis: JSON.stringify(termPis) } });
   await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'PROFORMA_INVOICE', fileName: req.file.originalname, fileUrl, linkedDocNumber: doc.docNumber, vendorName: doc.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
   // The approval email carries the per-term PIs, but it is sent when the approver
@@ -820,7 +835,7 @@ router.post('/docs/:docId/term-pi/:termKey', requireProjectMember, requireAnyEdi
       await remindCurrent(doc.type as DocType, doc.id, actor);
     } catch { /* email is best-effort; the PI is saved regardless */ }
   }
-  res.json({ ok: true, termKey, pi: termPis[termKey], extracted, lineItems: lineItems?.lineItems ?? [], lineItemsNote: lineItems?.note ?? null });
+  res.json({ ok: true, termKey, keys: targetKeys, pi, extracted, lineItems: lineItems?.lineItems ?? [], lineItemsNote: lineItems?.note ?? null });
 }));
 
 // ── Payment milestones ──────────────────────────────────────────────────────
@@ -1179,6 +1194,8 @@ const grnUpdate = z.object({
   piNumber: z.string().nullable().optional(), piDate: z.string().nullable().optional(), paymentDueDate: z.string().nullable().optional(), piValue: z.coerce.number().nullable().optional(),
   amountToPay: z.coerce.number().nullable().optional(),
   ledgerHead: z.string().nullable().optional(),
+  // Lorry Receipt number — only used for a Transport Order (TO) payment.
+  lrNumber: z.string().nullable().optional(),
   lineItems: z.array(z.object({ id: z.string(), receiptQty: z.coerce.number().catch(0), defectQty: z.coerce.number().nullable().optional(), remarks: z.string().nullable().optional() })).optional(),
   // Required to amend an APPROVED GRN — the reason for the post-approval change.
   amendmentRemark: z.string().trim().max(2000).optional(),
@@ -1221,6 +1238,7 @@ router.patch('/grns/:grnId', requireProjectMember, requireEdit('grn'), asyncHand
       ...(b.piNumber !== undefined && { piNumber: b.piNumber }), ...(b.piDate !== undefined && { piDate: b.piDate ? new Date(b.piDate) : null }), ...(b.paymentDueDate !== undefined && { paymentDueDate: b.paymentDueDate ? new Date(b.paymentDueDate) : null }), ...(b.piValue !== undefined && { piValue: b.piValue }),
       ...(b.amountToPay !== undefined && { amountToPay: b.amountToPay }),
       ...(b.ledgerHead !== undefined && { ledgerHead: b.ledgerHead }),
+      ...(b.lrNumber !== undefined && { lrNumber: b.lrNumber }),
       ...(amendments !== undefined && { amendments }),
     },
     include: { lineItems: { orderBy: { srNo: 'asc' }, include: { lineItem: { select: { unitPrice: true, totalPrice: true } } } } },
@@ -1265,6 +1283,17 @@ router.post('/grns/:grnId/pi', requireProjectMember, requireEdit('grn'), uploadP
   const extracted = await extractPiFields(req.file.path, req.file.mimetype);
   scheduleSheetSync(); // reflect the new PI (link + read values) onto the FMS sheet
   res.json({ ok: true, piPdfUrl: grn.piPdfUrl, extracted });
+}));
+
+// Upload the Lorry Receipt (LR) — the transporter's consignment document. Only
+// meaningful for a payment raised against a Transport Order (TO); the client only
+// shows this control for a TO. PDF only, like the PI.
+router.post('/grns/:grnId/lr', requireProjectMember, requireEdit('grn'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the LR — please upload a PDF (images / JPEG are not accepted).');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { lrPdfUrl: fileUrl } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'LR', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.json({ ok: true, lrPdfUrl: grn.lrPdfUrl });
 }));
 
 // Upload a photo of the received material (optional — Sprint PRD §7.2).
@@ -1638,7 +1667,7 @@ export function packingListShape(gr: any) {
     ewayBillNumber: gr.ewayBillNumber,
     siteSupervisor: gr.siteSupervisor || null,
     customColumns: parseJson(gr.customColumns, []),
-    lineItems: (gr.lineItems || []).map((l: any) => ({ srNo: l.srNo, description: l.description, receiptQty: l.receiptQty, defectQty: l.defectQty, customValues: parseJson(l.customValues, {}) })),
+    lineItems: (gr.lineItems || []).map((l: any) => ({ srNo: l.srNo, description: l.description, uom: l.uom ?? null, receiptQty: l.receiptQty, defectQty: l.defectQty, customValues: parseJson(l.customValues, {}) })),
   };
 }
 
