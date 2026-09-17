@@ -16,8 +16,41 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma';
 import { resolveAutoChain } from './fixedChain';
 import { parseApprover } from '../lib/permissions';
-import { sendEmail, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml, escapeHtml } from './email';
+import { sendEmail, appBaseUrl, appClientUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml, escapeHtml } from './email';
 import { signApiPath } from '../lib/signedUrl';
+
+// Email the person who RAISED a payment that it has been PAID — with the term,
+// amount, UTR and (if known) the VR No. Mirrors the "PO approved" mail so the
+// raiser gets the same closure notification for a payment. Best-effort.
+export async function notifyPaymentPaid(grnId: string, utr: string, paidAt: Date, vrNo?: string | null): Promise<void> {
+  try {
+    if (!isEmailEnabled()) return;
+    const grn = await prisma.gRN.findUnique({ where: { id: grnId } });
+    if (!grn?.raisedById) return;
+    const user = await prisma.user.findUnique({ where: { id: grn.raisedById }, select: { name: true, email: true } });
+    if (!user?.email) return;
+    const po = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { docNumber: true } });
+    const rup = (n: number | null | undefined) => `₹${(Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+    // Term with its % (e.g. "Advance 20%") — pull the percentage from the milestone.
+    let termText = grn.milestoneName || '';
+    if (grn.milestoneId) { const m = await prisma.paymentMilestone.findUnique({ where: { id: grn.milestoneId }, select: { percentage: true } }).catch(() => null); if (m?.percentage != null) termText = `${termText} ${m.percentage}%`.trim(); }
+    const heading = `Payment done — ${grn.grnNumber}`;
+    const lines = [
+      `Hi ${user.name || 'there'},`,
+      `Payment <b>${grn.grnNumber}</b>${po?.docNumber ? ` (against ${po.docNumber})` : ''}${grn.vendorName ? ` — ${grn.vendorName}` : ''} has been <b>PAID</b>.`,
+      termText ? `Payment term: <b>${escapeHtml(termText)}</b>` : '',
+      `Amount paid: <b>${rup(grn.amountToPay ?? grn.piValue ?? 0)}</b>`,
+      `UTR / Ref: <b>${escapeHtml(utr)}</b>${vrNo ? ` &nbsp;·&nbsp; VR No.: <b>${escapeHtml(vrNo)}</b>` : ''}`,
+      `Paid on: ${new Date(paidAt).toLocaleDateString('en-GB')}`,
+    ].filter(Boolean);
+    await sendEmail({
+      to: user.email,
+      cc: approvalCcEmail(),
+      subject: heading,
+      html: approvalEmailHtml({ heading, lines, actionUrl: `${appClientUrl()}/projects/${grn.projectId}`, actionLabel: 'Open in CRMCTS' }),
+    });
+  } catch { /* email is best-effort — never break the pay flow */ }
+}
 
 export interface PayGrn {
   id: string; grnNumber: string; docId: string; projectId: string; vendorName: string | null;

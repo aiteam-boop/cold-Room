@@ -11,14 +11,14 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma';
 import { resolveAutoChain } from './fixedChain';
 import { parseApprover } from '../lib/permissions';
-import { sendEmail, appBaseUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from './email';
+import { sendEmail, appBaseUrl, appClientUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from './email';
 
 const TRAVEL = 'TRAVEL';
 const TRAVEL_EXPENSE = 'TRAVEL_EXPENSE';
 
 // ── Generic step machinery (shared by both chains) ───────────────────────────
 
-async function buildSteps(docType: string, docId: string, projectId: string, amount: number): Promise<number> {
+export async function buildSteps(docType: string, docId: string, projectId: string, amount: number): Promise<number> {
   const auto = await resolveAutoChain(docType as any, projectId || '', amount).catch(() => null);
   const groups = auto?.groups ?? [];
   await prisma.approvalStep.deleteMany({ where: { docType, docId } });
@@ -50,7 +50,7 @@ async function buildSteps(docType: string, docId: string, projectId: string, amo
 
 /** Emails for the CURRENT pending step (any one can approve). Falls back to the
  *  whole resolved chain, then the auditor CC. */
-async function currentStepEmails(docType: string, docId: string, projectId: string, amount: number): Promise<{ emails: string[]; stepOrder: number }> {
+export async function currentStepEmails(docType: string, docId: string, projectId: string, amount: number): Promise<{ emails: string[]; stepOrder: number }> {
   const steps = await prisma.approvalStep.findMany({ where: { docType, docId }, orderBy: { order: 'asc' } });
   const pending = steps.filter((s) => s.status === 'PENDING');
   if (pending.length) {
@@ -71,7 +71,7 @@ export type StepOutcome = 'ADVANCED' | 'COMPLETED' | 'ON_HOLD' | 'STALE' | 'NO_C
 
 /** Record a decision on the current step. Returns the outcome; the caller mirrors
  *  the release* fields + status onto the plan/expense. */
-async function decideStep(docType: string, docId: string, decision: 'APPROVED' | 'ON_HOLD', remark: string | null, linkStep?: number | null): Promise<StepOutcome> {
+export async function decideStep(docType: string, docId: string, decision: 'APPROVED' | 'ON_HOLD', remark: string | null, linkStep?: number | null): Promise<StepOutcome> {
   const steps = await prisma.approvalStep.findMany({ where: { docType, docId }, orderBy: { order: 'asc' } });
   const pending = steps.filter((s) => s.status === 'PENDING');
 
@@ -119,7 +119,7 @@ interface PlanLike {
   fromDate: Date; toDate: Date; totalAdvance: number; releaseToken: string | null;
   // Optional richer fields (Ticket-Request style) surfaced in the approval email.
   mLevel?: string | null; designation?: string | null; department?: string | null; origin?: string | null; purpose?: string | null;
-  travelMode?: string | null; ticketPrice?: number | null; ticketFileUrl?: string | null; days?: number | null; isNonCrystal?: boolean;
+  travelMode?: string | null; tripType?: string | null; ticketPrice?: number | null; ticketFileUrl?: string | null; days?: number | null; isNonCrystal?: boolean;
 }
 
 export async function buildTravelSteps(plan: PlanLike): Promise<number> {
@@ -146,6 +146,7 @@ export async function notifyCurrentTravelStep(plan: PlanLike): Promise<void> {
       `Dates: <strong>${win}</strong>`,
     ];
     if (plan.travelMode) lines.push(`Mode: <strong>${plan.travelMode}</strong>`);
+    if (plan.tripType) lines.push(`Ticket for: <strong>${plan.tripType === 'going' ? 'Going only' : plan.tripType === 'return' ? 'Return only' : 'Going + Return'}</strong>`);
     if (plan.ticketPrice != null && plan.ticketPrice > 0) lines.push(`Ticket price: <strong>₹${Math.round(plan.ticketPrice).toLocaleString('en-IN')}</strong>`);
     if (plan.totalAdvance > 0) lines.push(`Advance requested: <strong>₹${Math.round(plan.totalAdvance).toLocaleString('en-IN')}</strong>`);
     if (plan.ticketFileUrl) lines.push(`Ticket: <a href="${appBaseUrl()}${plan.ticketFileUrl}" style="color:#052379;font-weight:600;text-decoration:none">📎 View ticket</a>`);
@@ -153,6 +154,58 @@ export async function notifyCurrentTravelStep(plan: PlanLike): Promise<void> {
     lines.push('Open the Approval Form to review the trip and Approve or put it On Hold.');
     const html = approvalEmailHtml({ heading: `Travel approval needed — ${plan.planNumber}`, lines, actionUrl: link, actionLabel: 'Open Travel Approval Form' });
     try { await sendEmail({ to: [...new Set(to)].join(', '), cc: approvalCcEmail(), subject: `Travel approval needed — ${plan.planNumber} · ${plan.employeeName}`, html }); } catch { /* best-effort */ }
+  } catch { /* best-effort */ }
+}
+
+// After the tech entry's FINAL approval, tell the traveller what was approved —
+// "your expenses are approved, ₹X will be reimbursed/adjusted." Best-effort.
+export async function notifyEmployeeTechApproved(planId: string): Promise<void> {
+  if (!isEmailEnabled()) return;
+  try {
+    const plan = await prisma.travelPlan.findUnique({ where: { id: planId } });
+    if (!plan?.employeeId) return;
+    const user = await prisma.user.findUnique({ where: { id: plan.employeeId }, select: { email: true, name: true } });
+    if (!user?.email) return;
+    const t = ((): any => { try { return plan.techApproved ? JSON.parse(plan.techApproved) : {}; } catch { return {}; } })();
+    const grand = ['travel', 'food', 'hotel', 'other', 'misc'].reduce((s, k) => s + (Number(t[k]) || 0), 0);
+    const adv = Number(plan.totalAdvance) || 0;
+    const rupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+    const lines = [
+      `Hi ${user.name},`,
+      `Your trip expenses for <strong>${plan.planNumber}</strong> have been <strong>approved</strong>.`,
+      `Approved amount: <strong>${rupee(grand)}</strong>`,
+    ];
+    if (adv > 0) { const net = grand - adv; lines.push(`Advance already taken: <strong>${rupee(adv)}</strong>`); lines.push(net >= 0 ? `To be reimbursed to you: <strong>${rupee(net)}</strong>` : `To be recovered from you: <strong>${rupee(Math.abs(net))}</strong>`); }
+    const html = approvalEmailHtml({ heading: `Trip expenses approved — ${plan.planNumber}`, lines, actionUrl: `${appClientUrl()}/travel`, actionLabel: 'Open Travel' });
+    await sendEmail({ to: user.email, subject: `Trip expenses approved — ${plan.planNumber} · ${rupee(grand)}`, html });
+  } catch { /* best-effort */ }
+}
+
+// When Stage 2 approves and a Stage-3 (Final approval / Sir) approver is set, email
+// them that a trip's expenses await their final approval. In-app decision (they open
+// Travel → Approvals), so this is a heads-up with a link. Best-effort.
+export async function notifyTechStage3Approver(planId: string): Promise<void> {
+  if (!isEmailEnabled()) return;
+  try {
+    const plan = await prisma.travelPlan.findUnique({ where: { id: planId } });
+    if (!plan) return;
+    const cfg = await prisma.travelConfig.findFirst({ where: { projectId: null } });
+    if (!cfg?.stage3Id) return;
+    const user = await prisma.user.findUnique({ where: { id: cfg.stage3Id }, select: { email: true, name: true } });
+    if (!user?.email) return;
+    const t = ((): any => { try { return plan.techStage2 ? JSON.parse(plan.techStage2) : {}; } catch { return {}; } })();
+    const totals = t?.totals || {};
+    const grand = ['travel', 'food', 'hotel', 'other', 'misc'].reduce((s, k) => s + (Number(totals[k]) || 0), 0);
+    const rupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+    const lines = [
+      `Hi ${user.name},`,
+      `A trip's expenses need your <strong>final approval</strong>.`,
+      `Trip: <strong>${plan.planNumber}</strong> · ${plan.employeeName}`,
+      `Amount approved so far (Stage 2): <strong>${rupee(grand)}</strong>`,
+      `Open Travel → Approvals to review and give the final approval.`,
+    ];
+    const html = approvalEmailHtml({ heading: `Final approval needed — ${plan.planNumber}`, lines, actionUrl: `${appClientUrl()}/travel`, actionLabel: 'Open Travel → Approvals' });
+    await sendEmail({ to: user.email, subject: `Final approval needed — ${plan.planNumber} · ${plan.employeeName}`, html });
   } catch { /* best-effort */ }
 }
 

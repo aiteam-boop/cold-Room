@@ -11,8 +11,10 @@ import PDFDocument from 'pdfkit';
 import { readFromDb } from '../lib/fileStore';
 import { extractAadharNumber } from '../services/aadharExtract';
 import { audit } from '../lib/audit';
-import { buildTravelSteps, notifyCurrentTravelStep, buildExpenseSteps, notifyCurrentExpenseStep, travelChainState } from '../services/travelChain';
+import { buildTravelSteps, notifyCurrentTravelStep, buildExpenseSteps, notifyCurrentExpenseStep, travelChainState, notifyEmployeeTechApproved, notifyTechStage3Approver } from '../services/travelChain';
 import { buildTravelExpensePdf } from '../services/travelPdf';
+import { travelEntitlement } from '../lib/travelEntitlements';
+import { buildAllCashInHand, buildPersonStatement } from '../services/cashInHand';
 
 // ── Travel Planning & Booking ────────────────────────────────────────────────
 // One connected flow per trip: request → approval (docType 'TRAVEL') → booking →
@@ -67,6 +69,14 @@ router.get('/employees', requirePage('travel'), asyncHandler(async (_req, res) =
   res.json({ employees: users });
 }));
 
+// ── Per-day entitlement (TA/DA) for a traveller's M-Level + destination city ──
+// Drives the New-plan auto-fill (Hotel/Food/Other per day) + allowed travel mode.
+router.get('/entitlement', requirePage('travel'), asyncHandler(async (req, res) => {
+  const mLevel = typeof req.query.mLevel === 'string' ? req.query.mLevel : null;
+  const city = typeof req.query.city === 'string' ? req.query.city : null;
+  res.json({ entitlement: travelEntitlement(mLevel, city) });
+}));
+
 // ── Travel settings: who does the day-wise expense review (Reviewer / Final) ──
 // Company-wide singleton (projectId = null). Read is open to any travel viewer
 // (the Approvals UI needs it to show who may act); writing is admin-only.
@@ -78,9 +88,10 @@ router.put('/config', requireAdmin, asyncHandler(async (req, res) => {
   const b = z.object({
     reviewerId: z.string().nullable().optional(), reviewerName: z.string().nullable().optional(),
     finalId: z.string().nullable().optional(), finalName: z.string().nullable().optional(),
+    stage3Id: z.string().nullable().optional(), stage3Name: z.string().nullable().optional(),
   }).parse(req.body ?? {});
   const existing = await prisma.travelConfig.findFirst({ where: { projectId: null } });
-  const data = { reviewerId: b.reviewerId ?? null, reviewerName: b.reviewerName ?? null, finalId: b.finalId ?? null, finalName: b.finalName ?? null };
+  const data = { reviewerId: b.reviewerId ?? null, reviewerName: b.reviewerName ?? null, finalId: b.finalId ?? null, finalName: b.finalName ?? null, stage3Id: b.stage3Id ?? null, stage3Name: b.stage3Name ?? null };
   const config = existing
     ? await prisma.travelConfig.update({ where: { id: existing.id }, data })
     : await prisma.travelConfig.create({ data: { projectId: null, ...data } });
@@ -115,6 +126,33 @@ router.post('/upload-aadhar', requireEdit('travel'), upload.single('file'), asyn
 }));
 
 // ── List plans ───────────────────────────────────────────────────────────────
+// ── Technician Cash in Hand (Accounts) — derived, read-only ──────────────────
+// Who is holding company money right now, across travel advances + petty cash.
+// Accounts-only (accountsTeam flag; admin bypasses).
+router.get('/cash-in-hand', requireSection('accountsTeam'), asyncHandler(async (_req, res) => {
+  res.json(await buildAllCashInHand());
+}));
+router.get('/cash-in-hand/:key', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
+  const data = await buildPersonStatement(req.params.key);
+  if (!data) throw notFound('No cash history for this person.');
+  res.json(data);
+}));
+
+// GET /travel/person-advance/:employeeId — the traveller's ACTIVE raised advances
+// (New Advance), so the tech entry can reflect "this person already holds ₹X".
+router.get('/person-advance/:employeeId', requirePage('travel'), asyncHandler(async (req, res) => {
+  const rows = await prisma.pettyCashEntry.findMany({
+    where: { personId: req.params.employeeId, category: 'Advance to Technician' },
+    orderBy: { date: 'desc' },
+  });
+  const active = rows.filter((r) => !['VOID', 'REJECTED', 'PENDING_APPROVAL'].includes(r.status));
+  const total = active.reduce((s, r) => s + (Number(r.sanctionedAmount ?? r.amount) || 0), 0);
+  res.json({
+    total, count: active.length,
+    entries: active.map((r) => ({ entryNumber: r.entryNumber, amount: Number(r.sanctionedAmount ?? r.amount) || 0, date: r.date, status: r.status })),
+  });
+}));
+
 router.get('/', requirePage('travel'), asyncHandler(async (req, res) => {
   const q = req.query as Record<string, string>;
   const where: any = {};
@@ -138,8 +176,29 @@ router.get('/', requirePage('travel'), asyncHandler(async (req, res) => {
     const s = q.search.toLowerCase();
     plans = plans.filter((p) => [p.planNumber, p.employeeName, p.destination, p.origin, p.purpose].some((v) => (v || '').toLowerCase().includes(s)));
   }
-  res.json({ plans: plans.map(serializePlan) });
+  // Attach each traveller's ACTIVE New-Advance balance (from the New Advance module)
+  // so the trip's advance figure can reflect it: effectiveAdvance = plan advance +
+  // what the person already holds. Display-only — never changes stored totalAdvance.
+  const advMap = await personAdvanceMap(plans.map((p) => p.employeeId).filter((id): id is string => !!id));
+  res.json({ plans: plans.map((p) => { const personAdvance = p.employeeId ? (advMap.get(p.employeeId) || 0) : 0; return { ...serializePlan(p), personAdvance, effectiveAdvance: (Number(p.totalAdvance) || 0) + personAdvance }; }) });
 }));
+
+// Map of userId → their ACTIVE raised New-Advance total (category 'Advance to
+// Technician', excluding void/rejected/pending-approval). One query for a set of ids.
+async function personAdvanceMap(ids: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const uniq = [...new Set(ids)];
+  if (!uniq.length) return map;
+  const rows = await prisma.pettyCashEntry.findMany({
+    where: { personId: { in: uniq }, category: 'Advance to Technician' },
+    select: { personId: true, amount: true, sanctionedAmount: true, status: true },
+  });
+  for (const r of rows) {
+    if (!r.personId || ['VOID', 'REJECTED', 'PENDING_APPROVAL'].includes(r.status)) continue;
+    map.set(r.personId, (map.get(r.personId) || 0) + (Number(r.sanctionedAmount ?? r.amount) || 0));
+  }
+  return map;
+}
 
 // ── One plan (+ expenses + chain state) ──────────────────────────────────────
 router.get('/:id', requirePage('travel'), asyncHandler(async (req, res) => {
@@ -195,7 +254,8 @@ const planBody = z.object({
   aadharNo: z.string().optional().nullable(), aadharFileUrl: z.string().optional().nullable(),
   fromDate: z.string(), toDate: z.string(), days: z.coerce.number().min(1).default(1),
   origin: z.string().optional().nullable(), destination: z.string().optional().nullable(), purpose: z.string().optional().nullable(),
-  travelMode: z.string().optional().nullable(), requestedTicketUrl: z.string().optional().nullable(),
+  travelMode: z.string().optional().nullable(), tripType: z.enum(['going', 'return', 'both']).optional().nullable(),
+  requestedTicketUrl: z.string().optional().nullable(), requestedTicketUrls: z.array(z.string()).optional().nullable(),
   ticketPrice: z.coerce.number().optional().nullable(), ticketFileUrl: z.string().optional().nullable(), paymentProofUrl: z.string().optional().nullable(),
   remarks: z.string().optional().nullable(),
   projectId: z.string().optional().nullable(),
@@ -218,7 +278,10 @@ router.post('/', requireEdit('travel'), asyncHandler(async (req, res) => {
       senderName: b.senderName || null,
       appliedById: u.sub, appliedByName: u.name,
       designation: b.designation || null, department: b.department || null, grade: b.grade || null, aadharNo: b.aadharNo || null, aadharFileUrl: b.aadharFileUrl || null,
-      travelMode: b.travelMode || null, requestedTicketUrl: b.requestedTicketUrl || null, ticketPrice: b.ticketPrice ?? null, ticketFileUrl: b.ticketFileUrl || null, paymentProofUrl: b.paymentProofUrl || null, remarks: b.remarks || null,
+      travelMode: b.travelMode || null, tripType: b.tripType || null,
+      requestedTicketUrl: b.requestedTicketUrls?.length ? b.requestedTicketUrls[0] : (b.requestedTicketUrl || null),
+      requestedTicketUrls: b.requestedTicketUrls?.length ? b.requestedTicketUrls : (b.requestedTicketUrl ? [b.requestedTicketUrl] : []),
+      ticketPrice: b.ticketPrice ?? null, ticketFileUrl: b.ticketFileUrl || null, paymentProofUrl: b.paymentProofUrl || null, remarks: b.remarks || null,
       fromDate: new Date(b.fromDate), toDate: new Date(b.toDate), days: b.days,
       origin: b.origin || null, destination: b.destination || null, purpose: b.purpose || null, projectId: b.projectId || null,
       jobOrders: JSON.stringify(b.jobOrders ?? []), planCosts: JSON.stringify(b.planCosts ?? {}), planDayCosts: JSON.stringify(b.planDayCosts ?? []),
@@ -240,9 +303,10 @@ router.patch('/:id', requireEdit('travel'), asyncHandler(async (req, res) => {
   if (!cur) throw notFound('Travel plan not found');
   const data: any = {};
   for (const k of ['employeeId', 'employeeName', 'employeeEmail', 'employeePhone', 'senderName', 'mLevel', 'origin', 'destination', 'purpose', 'projectId',
-    'designation', 'department', 'grade', 'aadharNo', 'aadharFileUrl', 'travelMode', 'requestedTicketUrl', 'ticketFileUrl', 'paymentProofUrl', 'remarks', 'senderName', 'linkedTripNumber'] as const) {
+    'designation', 'department', 'grade', 'aadharNo', 'aadharFileUrl', 'travelMode', 'tripType', 'requestedTicketUrl', 'ticketFileUrl', 'paymentProofUrl', 'remarks', 'senderName', 'linkedTripNumber'] as const) {
     if (b[k] !== undefined) data[k] = (b as any)[k] || null;
   }
+  if (b.requestedTicketUrls !== undefined) { data.requestedTicketUrls = b.requestedTicketUrls ?? []; if (b.requestedTicketUrls?.length) data.requestedTicketUrl = b.requestedTicketUrls[0]; }
   if (b.ticketPrice !== undefined) data.ticketPrice = b.ticketPrice ?? null;
   if (b.status) data.status = b.status;   // Active ↔ Closed for sanctioning plans
   if (b.isNonCrystal !== undefined) data.isNonCrystal = !!b.isNonCrystal;
@@ -349,39 +413,50 @@ router.post('/:id/tech-decide', requireEdit('travel'), asyncHandler(async (req, 
 // ── Two-stage day-wise review (Reviewer → Final) ─────────────────────────────
 const stageDay = z.object({ day: z.coerce.number().default(1), travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0), remark: z.string().optional().nullable() });
 const stageCats = z.object({ travel: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0) });
-const stageBody = z.object({ stage: z.union([z.literal(1), z.literal(2)]), status: z.enum(['APPROVED', 'REJECTED']), days: z.array(stageDay).default([]), totals: stageCats.optional(), comment: z.string().optional().nullable() });
+const stageBody = z.object({ stage: z.union([z.literal(1), z.literal(2), z.literal(3)]), status: z.enum(['APPROVED', 'REJECTED']), days: z.array(stageDay).default([]), totals: stageCats.optional(), comment: z.string().optional().nullable() });
 router.post('/:id/tech-stage-decide', requireEdit('travel'), asyncHandler(async (req, res) => {
   const b = stageBody.parse(req.body);
   const u = req.user!;
   const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
   if (!cur) throw notFound('Travel plan not found');
   if (cur.techEntryStatus !== 'SUBMITTED') throw badRequest('Only a submitted expense can be reviewed.');
+  const cfg = await prisma.travelConfig.findFirst({ where: { projectId: null } });
+  // Stage 3 (Final approval / Sir) is OPTIONAL — active only when configured. Until
+  // then the chain stays 2-stage (Reviewer → Final) exactly as before.
+  const hasStage3 = !!cfg?.stage3Id;
+  const finalStage = hasStage3 ? 3 : 2;
   const s1 = parseJson<any>(cur.techStage1, null);
-  if (b.stage === 2 && (!s1 || s1.status !== 'APPROVED')) throw badRequest('Stage 1 (Reviewer) must approve before the final decision.');
+  const s2 = parseJson<any>(cur.techStage2, null);
+  if (b.stage === 2 && (!s1 || s1.status !== 'APPROVED')) throw badRequest('Stage 1 (Reviewer) must approve before Stage 2.');
+  if (b.stage === 3 && (!s2 || s2.status !== 'APPROVED')) throw badRequest('Stage 2 (Final) must approve before the Final approval.');
+  if (b.stage === 3 && !hasStage3) throw badRequest('No Stage-3 (Final approval) approver is configured.');
   // Per-stage approver assignment (Travel settings). When a stage's approver is
-  // set, ONLY that user or an admin may sign it; when unset, any travel-editor
-  // may (legacy behaviour, so nothing breaks until an admin assigns people).
+  // set, ONLY that user or an admin may sign it; when unset, any travel-editor may.
   if (!isAdmin(req.account!.role)) {
-    const cfg = await prisma.travelConfig.findFirst({ where: { projectId: null } });
-    const assignee = b.stage === 1 ? cfg?.reviewerId : cfg?.finalId;
+    const assignee = b.stage === 1 ? cfg?.reviewerId : b.stage === 2 ? cfg?.finalId : cfg?.stage3Id;
     if (assignee && assignee !== u.sub) {
-      const who = b.stage === 1 ? (cfg?.reviewerName || 'the assigned Reviewer') : (cfg?.finalName || 'the assigned Final approver');
-      throw badRequest(`Only ${who} (or an admin) can sign the ${b.stage === 1 ? 'Reviewer' : 'Final'} stage.`);
+      const who = b.stage === 1 ? (cfg?.reviewerName || 'the assigned Reviewer') : b.stage === 2 ? (cfg?.finalName || 'the assigned Final approver') : (cfg?.stage3Name || 'the assigned Final-approval approver');
+      throw badRequest(`Only ${who} (or an admin) can sign the ${b.stage === 1 ? 'Reviewer' : b.stage === 2 ? 'Final' : 'Final-approval'} stage.`);
     }
   }
   const catTotals = (days: any[]) => days.reduce((a, d) => ({ travel: a.travel + (+d.travel || 0), food: a.food + (+d.food || 0), hotel: a.hotel + (+d.hotel || 0), other: a.other + (+d.other || 0), misc: a.misc + (+d.misc || 0) }), { travel: 0, food: 0, hotel: 0, other: 0, misc: 0 });
-  // The per-category override the reviewer typed wins; else sum the grid cells.
+  // The per-category override the approver typed wins; else sum the grid cells.
   const totals = b.totals ?? catTotals(b.days);
   const stageObj = { status: b.status, by: u.name, at: new Date().toISOString(), comment: b.comment ?? null, days: b.days, totals };
   const data: any = { trail: withTrail(cur, `Expenses ${b.status === 'APPROVED' ? 'approved' : 'rejected'} (stage ${b.stage})`, u.name, b.comment) };
   if (b.stage === 1) data.techStage1 = JSON.stringify(stageObj);
-  else data.techStage2 = JSON.stringify(stageObj);
+  else if (b.stage === 2) data.techStage2 = JSON.stringify(stageObj);
+  else data.techStage3 = JSON.stringify(stageObj);
   if (b.status === 'REJECTED') { data.techEntryStatus = 'REJECTED'; data.techApproveComment = b.comment ?? null; data.techApprovedBy = u.name; data.techApprovedAt = new Date(); }
-  else if (b.stage === 2) { // final approval
+  else if (b.stage === finalStage) { // the LAST configured stage is the final approval
     data.techEntryStatus = 'APPROVED'; data.techApproved = JSON.stringify(totals); data.techApprovedBy = u.name; data.techApprovedAt = new Date();
   }
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
   await audit({ userId: u.sub, action: `TRAVEL_TECH_STAGE${b.stage}_${b.status}`, entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
+  if (b.status === 'APPROVED') {
+    if (b.stage === finalStage) notifyEmployeeTechApproved(cur.id).catch(() => {});         // final → tell the traveller
+    else if (b.stage === 2 && hasStage3) notifyTechStage3Approver(cur.id).catch(() => {});   // stage 2 done → email the Stage-3 (Final approval) approver
+  }
   res.json({ plan: serializePlan(plan) });
 }));
 

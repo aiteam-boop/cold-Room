@@ -7,6 +7,7 @@ import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
 import { startFmsReverseSyncPoll } from './services/sheetsSync';
 import { startApprovalReminderPoll } from './services/approvalChain';
 import { startPackingListReminderPoll } from './services/grnReminders';
+import { startPendingDepositReminderPoll } from './services/depositReminders';
 import type { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { HttpError } from './lib/errors';
@@ -46,6 +47,7 @@ import paymentApprovalRoutes from './routes/paymentApproval';
 import invoiceApprovalRoutes from './routes/invoiceApproval';
 import travelRoutes from './routes/travel';
 import travelApprovalRoutes from './routes/travelApproval';
+import advanceApprovalRoutes from './routes/advanceApproval';
 import depositRoutes from './routes/deposits';
 
 const app = express();
@@ -91,6 +93,7 @@ app.use('/api/public/payment-approval', paymentApprovalRoutes);
 app.use('/api/public/invoice-approval', invoiceApprovalRoutes);
 // Public no-login Travel "Approval Form" (request + expense), linked from the email.
 app.use('/api/public/travel-approval', travelApprovalRoutes);
+app.use('/api/public/advance-approval', advanceApprovalRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);
@@ -155,6 +158,8 @@ app.listen(PORT, () => {
   startApprovalReminderPoll();
   // Nudge site engineers whose signed packing list is still pending. Off when GRN_REMINDERS=off.
   startPackingListReminderPoll();
+  // Weekly nudge to each project's site supervisor about pending deposit recovery. Off when DEPOSIT_REMINDERS=off.
+  startPendingDepositReminderPoll();
 });
 
 async function ensureCappedApiLog() {

@@ -44,7 +44,7 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   travel: 'Travel Planning',
 };
 
-export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'accountsTeam', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;
+export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'accountsTeam', 'raiseAdvance', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
@@ -52,6 +52,7 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
   canApprove: 'Can approve (PO/WO, GRN, progress entries)',
   canMarkPaid: 'Can mark payment milestones paid (Accounts)',
   accountsTeam: 'Accounts actions — Petty Cash + Travel (confirm, finalize, settle)',
+  raiseAdvance: 'Can raise (issue) advances to people — New Advance',
   canEditBudget: 'Can enter the BOQ budget (costing)',
   canFreezeBudget: 'Can FREEZE the budget (locks it for everyone)',
   seeAllApprovals: 'See ALL raised documents in Approvals (not just their own)',
@@ -62,6 +63,7 @@ export const SECTION_HINTS: Record<SectionKey, string> = {
   canApprove: 'Enables approve / reject on PO/WO, GRNs and progress entries.',
   canMarkPaid: 'Allows marking triggered payment milestones as paid (FMS / vendor payments).',
   accountsTeam: 'The Accounts money-close right across Petty Cash AND Travel: Confirm / Reject / Void Petty Cash expenses, and in Travel → Accounts, Mark processed / Save / Re-open a finalised trip plus settle the advance. Separate from “mark payment paid” so this and vendor/FMS payments can go to different people.',
+  raiseAdvance: 'The single right to ISSUE (raise) a fresh advance to a technician/person in New Advance — pick the person, the site and the amount. Everyone else with New Advance can still record expenses and see the ledger, but only this user hands out new advances.',
   canEditBudget: 'Lets this user enter and edit the BOQ budget (the internal costing), until it is frozen.',
   canFreezeBudget: 'Lets this user FREEZE the budget. Once frozen it is locked for everyone and becomes the benchmark every PO is judged against.',
   seeAllApprovals: 'On the Approvals page, shows EVERYONE\'s raised PO/WO/Payments (pending + approved), not only the ones this user raised. View-only for documents they are not the approver of.',

@@ -20,7 +20,7 @@ const descKey = (s: string) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim
 router.get('/', requirePage('po'), asyncHandler(async (_req, res) => {
   const lines = await prisma.procurementLineItem.findMany({
     where: { isDeposit: true },
-    include: { doc: { select: { id: true, docNumber: true, type: true, vendorName: true, projectId: true, docDate: true, createdAt: true, project: { select: { name: true } } } } },
+    include: { doc: { select: { id: true, docNumber: true, type: true, vendorName: true, projectId: true, docDate: true, createdAt: true, project: { select: { name: true, siteSupervisor: true, siteSupervisorId: true } } } } },
     orderBy: { doc: { createdAt: 'desc' } },
   });
   const recs = await prisma.depositRecovery.findMany({});
@@ -34,6 +34,7 @@ router.get('/', requirePage('po'), asyncHandler(async (_req, res) => {
       return {
         lineId: l.id, docId: l.docId, docNumber: l.doc!.docNumber, type: l.doc!.type,
         projectId: l.doc!.projectId, projectName: l.doc!.project?.name ?? null,
+        siteSupervisor: l.doc!.project?.siteSupervisor ?? null,
         vendorName: l.doc!.vendorName ?? null, description: l.description, note: l.depositNote ?? null,
         qty: l.qty, unitPrice: l.unitPrice,
         amountRequired: required, amountReceived: received, pending: Math.round((required - received) * 100) / 100,

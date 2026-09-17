@@ -9,7 +9,7 @@ import { fmtDate, inr } from '../lib/format';
 // with its recovery: required (from the line), received back, pending, ref + status.
 interface Deposit {
   lineId: string; docId: string; docNumber: string; type: string;
-  projectId: string; projectName: string | null; vendorName: string | null;
+  projectId: string; projectName: string | null; siteSupervisor: string | null; vendorName: string | null;
   description: string; note: string | null; qty: number; unitPrice: number;
   amountRequired: number; amountReceived: number; pending: number;
   refDetails: string | null; status: string; date: string;
@@ -79,9 +79,9 @@ export default function DepositTracking() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-center text-xs uppercase text-slate-400">
               {tab === 'pending' ? (
-                <tr><th className="px-3 py-2">PO/WO</th><th>Project</th><th>Vendor</th><th>Item</th><th>Qty</th><th>Rate</th><th>Required</th><th>Payment / Receipt</th><th>Action</th></tr>
+                <tr><th className="px-3 py-2">PO/WO</th><th>Project</th><th>Site Supervisor</th><th>Vendor</th><th>Item</th><th>Qty</th><th>Rate</th><th>Required</th><th>Payment / Receipt</th><th>Action</th></tr>
               ) : (
-                <tr><th className="px-3 py-2">PO/WO</th><th>Project</th><th>Vendor</th><th>Item</th><th>Qty</th><th>Rate</th><th>Required</th><th>Received</th><th>Payment / Receipt</th><th>Status</th>{editable && <th></th>}</tr>
+                <tr><th className="px-3 py-2">PO/WO</th><th>Project</th><th>Site Supervisor</th><th>Vendor</th><th>Item</th><th>Qty</th><th>Rate</th><th>Required</th><th>Received</th><th>Payment / Receipt</th><th>Status</th>{editable && <th></th>}</tr>
               )}
             </thead>
             <tbody>
@@ -102,6 +102,7 @@ function LeadCells({ d, money }: { d: Deposit; money: (n: number | null | undefi
     <>
       <td className="whitespace-nowrap px-3 py-2 text-center font-medium text-navy">{d.docNumber} <span className="text-[10px] font-normal text-slate-400">{d.type}</span></td>
       <td className="text-center text-slate-600">{d.projectName || '—'}</td>
+      <td className="text-center text-slate-600">{d.siteSupervisor || <span className="text-slate-300">—</span>}</td>
       <td className="text-center text-slate-600">{d.vendorName || '—'}</td>
       <td className="text-center"><div className="font-medium text-slate-700">{d.description}</div>{d.note && <div className="text-[11px] text-slate-400">💰 {d.note}</div>}</td>
       <td className="text-center text-slate-600">{d.qty}</td>

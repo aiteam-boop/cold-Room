@@ -6,9 +6,19 @@
 // rendered for users who can actually save.
 
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg } from '../lib/api';
 import { Modal } from './ui';
+
+// Active users for the "Site supervisor" dropdown — the picked user's id is stored
+// so the weekly pending-deposit email can reach them.
+interface SupervisorOption { id: string; name: string; email: string | null }
+function useSupervisors() {
+  return useQuery({
+    queryKey: ['site-supervisors'],
+    queryFn: async () => (await api.get('/projects/site-supervisors')).data.users as SupervisorOption[],
+  });
+}
 
 export interface ClientPo { number: string; proofUrl?: string | null }
 export interface EditableProject {
@@ -17,6 +27,7 @@ export interface EditableProject {
   clientName?: string | null;
   siteLocation?: string | null;
   siteSupervisor?: string | null;
+  siteSupervisorId?: string | null;
   clientPoNumber?: string | null;
   clientPos?: ClientPo[] | null;
   clientGstin?: string | null;
@@ -37,11 +48,13 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
   onSaved?: () => void;
 }) {
   const qc = useQueryClient();
+  const { data: supervisors } = useSupervisors();
   const [form, setForm] = useState({
     name: project.name ?? '',
     clientName: project.clientName ?? '',
     siteLocation: project.siteLocation ?? '',
     siteSupervisor: project.siteSupervisor ?? '',
+    siteSupervisorId: project.siteSupervisorId ?? '',
     clientGstin: project.clientGstin ?? '',
     startDate: day(project.startDate),
     targetCompletionDate: day(project.targetCompletionDate),
@@ -79,6 +92,7 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         clientName: form.clientName.trim() || null,
         siteLocation: form.siteLocation.trim() || null,
         siteSupervisor: form.siteSupervisor.trim() || null,
+        siteSupervisorId: form.siteSupervisorId || null,
         clientGstin: form.clientGstin.trim() || null,
         clientPos: pos.filter((p) => p.number.trim()).map((p) => ({ number: p.number.trim(), proofUrl: p.proofUrl || null })),
         startDate: form.startDate || null,
@@ -115,7 +129,19 @@ export default function ProjectEditModal({ project, onClose, onSaved }: {
         <div className="grid gap-3 sm:grid-cols-2">
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={set('clientName')} placeholder="Not set" /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={set('siteLocation')} placeholder="Not set" /></div>
-          <div><label className="label">Site supervisor</label><input className="input" value={form.siteSupervisor} onChange={set('siteSupervisor')} placeholder="Site in-charge / supervisor name" /></div>
+          <div>
+            <label className="label">Site supervisor</label>
+            <select className="input" value={form.siteSupervisorId} onChange={(e) => {
+              const u = supervisors?.find((s) => s.id === e.target.value);
+              setForm({ ...form, siteSupervisorId: e.target.value, siteSupervisor: u?.name ?? '' });
+            }}>
+              <option value="">— Not set —</option>
+              {/* Legacy: a name was typed before this became a dropdown and no user is linked. */}
+              {form.siteSupervisor && !form.siteSupervisorId && <option value="" disabled>Currently: {form.siteSupervisor} (re-select to enable email)</option>}
+              {supervisors?.map((s) => <option key={s.id} value={s.id}>{s.name}{s.email ? ` (${s.email})` : ''}</option>)}
+            </select>
+            <p className="mt-1 text-[11px] text-slate-400">Responsible for deposit recovery — gets the weekly pending-deposit email.</p>
+          </div>
           <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={set('clientGstin')} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>
         </div>
 

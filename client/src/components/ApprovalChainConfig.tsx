@@ -18,6 +18,7 @@ const DOC_TYPES = [
   { key: 'PAYMENT', label: 'Vendor Payments' },
   { key: 'TRAVEL', label: 'Travel Request' },
   { key: 'TRAVEL_EXPENSE', label: 'Travel Expense' },
+  { key: 'ADVANCE', label: 'Advance' },
 ] as const;
 
 interface Candidate { id: string; name: string; email: string; approvalRole: string | null; level: number }

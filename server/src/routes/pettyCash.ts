@@ -6,6 +6,7 @@ import { requireAuth, requirePage, requireEdit, requireSection } from '../middle
 import { upload } from '../middleware/upload';
 import { audit } from '../lib/audit';
 import { renderPettyCashPdf } from '../services/pettyCashPdf';
+import { buildAdvanceSteps, notifyCurrentAdvanceStep, advanceChainState } from '../services/advanceChain';
 
 // ── Petty Cash — site-manager cash float + expense ledger ────────────────────
 // The custodian records expenses (RECORDED) and submits them to Accounts
@@ -97,7 +98,22 @@ router.get('/', requirePage('pettycash'), asyncHandler(async (req, res) => {
     return row;
   });
 
-  res.json({ entries: entries.map(serialize), summary, monthly, categories: PETTY_CATEGORIES });
+  // Attach the approval-chain summary to raised advances still awaiting approval
+  // (one batched query) so the ledger row can show "X/Y done · pending with …".
+  const pendingAdvIds = entries.filter((e) => e.category === 'Advance to Technician' && e.status === 'PENDING_APPROVAL').map((e) => e.id);
+  const chainByDoc = new Map<string, { total: number; approved: number; pendingWith: string[] }>();
+  if (pendingAdvIds.length) {
+    const steps = await prisma.approvalStep.findMany({ where: { docType: 'ADVANCE', docId: { in: pendingAdvIds } }, orderBy: { order: 'asc' } });
+    for (const s of steps) {
+      const g = chainByDoc.get(s.docId) ?? { total: 0, approved: 0, pendingWith: [] };
+      g.total++;
+      if (s.status === 'APPROVED' || s.status === 'SKIPPED') g.approved++;
+      if (s.status === 'PENDING' && s.approverName) g.pendingWith.push(s.approverName);
+      chainByDoc.set(s.docId, g);
+    }
+  }
+  const serialized = entries.map((e) => { const c = chainByDoc.get(e.id); return c ? { ...serialize(e), chain: c } : serialize(e); });
+  res.json({ entries: serialized, summary, monthly, categories: PETTY_CATEGORIES });
 }));
 
 // ── Bulk: submit every RECORDED expense to accounts at once ───────────────────
@@ -148,12 +164,21 @@ router.put('/config', requireEdit('pettycash'), asyncHandler(async (req, res) =>
 
 // ── Record an expense (custodian) — 3 optional file uploads ──────────────────
 const expenseFiles = upload.fields([{ name: 'invoice', maxCount: 1 }, { name: 'budget', maxCount: 1 }, { name: 'payment', maxCount: 1 }]);
+// ── People for the "for whom / recipient" dropdown ───────────────────────────
+// Active users, so an advance/top-up is tied to a real person (personId) — this is
+// what powers the per-person ledger (and, later, direct advance settlement).
+router.get('/people', requirePage('pettycash'), asyncHandler(async (_req, res) => {
+  const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, name: true, email: true }, orderBy: { name: 'asc' } });
+  res.json({ people: users });
+}));
+
 router.post('/expense', requireEdit('pettycash'), expenseFiles, asyncHandler(async (req, res) => {
   const b = z.object({
     category: z.string().min(1),
     amount: z.coerce.number().positive(),
     date: z.string().optional(),
     technician: z.string().optional(),
+    personId: z.string().nullable().optional(),
     paidTo: z.string().optional(),
     projectId: z.string().nullable().optional(),
     jobOrder: z.string().optional(),
@@ -169,7 +194,7 @@ router.post('/expense', requireEdit('pettycash'), expenseFiles, asyncHandler(asy
   const entry = await prisma.pettyCashEntry.create({
     data: {
       entryNumber: await nextPettyNumber(), type: 'EXPENSE', date: b.date ? new Date(b.date) : new Date(),
-      category: b.category, amount: b.amount, technician: b.technician || null, paidTo: b.paidTo || null,
+      category: b.category, amount: b.amount, technician: b.technician || null, personId: b.personId || null, paidTo: b.paidTo || null,
       projectId: b.projectId || null, jobOrder: b.jobOrder || null, description: b.description,
       invoiceUrl: fileUrl('invoice'), budgetUrl: fileUrl('budget'), paymentUrl: fileUrl('payment'),
       documents: docs.length ? JSON.stringify(docs) : null,
@@ -184,18 +209,79 @@ router.post('/expense', requireEdit('pettycash'), expenseFiles, asyncHandler(asy
 
 // ── Add a float top-up (money handed to the custodian) ───────────────────────
 router.post('/topup', requireEdit('pettycash'), asyncHandler(async (req, res) => {
-  const b = z.object({ amount: z.coerce.number().positive(), reason: z.string().optional(), date: z.string().optional(), utrNumber: z.string().optional(), description: z.string().optional() }).parse(req.body);
+  const b = z.object({ amount: z.coerce.number().positive(), reason: z.string().optional(), date: z.string().optional(), utrNumber: z.string().optional(), description: z.string().optional(), technician: z.string().optional(), personId: z.string().nullable().optional() }).parse(req.body);
   const u = req.user!;
   const entry = await prisma.pettyCashEntry.create({
     data: {
       entryNumber: await nextPettyNumber(), type: 'TOPUP', date: b.date ? new Date(b.date) : new Date(),
       amount: b.amount, reason: b.reason || 'Float', utrNumber: b.utrNumber || null, description: b.description || null,
+      technician: b.technician || null, personId: b.personId || null,
       status: 'CONFIRMED', recordedById: u.sub, recordedByName: u.name,
       trail: JSON.stringify([{ at: new Date().toISOString(), action: 'Top-up added', byName: u.name, remark: b.reason || null }]),
     },
   });
   await audit({ userId: u.sub, action: 'PETTY_TOPUP', entity: 'PettyCashEntry', entityId: entry.id, details: { entryNumber: entry.entryNumber, amount: b.amount } });
   res.status(201).json({ entry: serialize(entry) });
+}));
+
+// ── Raise an advance to a person (New Advance) ───────────────────────────────
+// Only the authorized raiser (raiseAdvance flag; admin bypasses) may hand out a
+// fresh advance. It is a person + site tagged "Advance to Technician" entry, so it
+// flows straight into the per-person ledger + cash-in-hand and, once the person is
+// on a trip, shows as their outstanding advance in the tech entry.
+router.post('/advance', requireSection('raiseAdvance'), asyncHandler(async (req, res) => {
+  const b = z.object({
+    personId: z.string().min(1, 'Pick the person the advance is for.'),
+    technician: z.string().min(1),
+    amount: z.coerce.number().positive(),
+    projectId: z.string().nullable().optional(),
+    date: z.string().optional(),
+    description: z.string().optional(),
+  }).parse(req.body);
+  const cfg = await prisma.pettyCashConfig.findFirst({ where: { projectId: null } });
+  const u = req.user!;
+  const entry = await prisma.pettyCashEntry.create({
+    data: {
+      entryNumber: await nextPettyNumber(), type: 'EXPENSE', date: b.date ? new Date(b.date) : new Date(),
+      category: 'Advance to Technician', amount: b.amount,
+      technician: b.technician, personId: b.personId, projectId: b.projectId || null,
+      description: b.description || `Advance issued to ${b.technician}`,
+      status: 'PENDING_APPROVAL', custodianName: cfg?.custodianName ?? null, custodianEmail: cfg?.custodianEmail ?? null,
+      recordedById: u.sub, recordedByName: u.name,
+      trail: JSON.stringify([{ at: new Date().toISOString(), action: 'Advance raised — sent for approval', byName: u.name, remark: null }]),
+    },
+  });
+  // Build the approval chain (docType 'ADVANCE'). No chain configured → nothing to
+  // approve, so the advance is active immediately. Otherwise notify the first step.
+  const steps = await buildAdvanceSteps(entry as any);
+  if (steps === 0) {
+    // No chain configured → nothing to approve; goes straight to Accounts-pending.
+    await prisma.pettyCashEntry.update({ where: { id: entry.id }, data: { status: 'APPROVED', approvalStatus: 'APPROVED' } });
+  } else {
+    await notifyCurrentAdvanceStep(entry as any);
+  }
+  await audit({ userId: u.sub, projectId: b.projectId || undefined, action: 'PETTY_ADVANCE_RAISE', entity: 'PettyCashEntry', entityId: entry.id, details: { entryNumber: entry.entryNumber, amount: b.amount, personId: b.personId } });
+  const fresh = await prisma.pettyCashEntry.findUnique({ where: { id: entry.id } });
+  res.status(201).json({ entry: serialize(fresh) });
+}));
+
+// GET /petty-cash/:id/chain — approval chain state for a raised advance.
+router.get('/:id/chain', asyncHandler(async (req, res) => {
+  res.json(await advanceChainState(req.params.id));
+}));
+
+// POST /petty-cash/advance-fms-sync — pull VR/UTR the FMS team entered in the
+// "Advance Account FMS" sheet back into the app now (VPS auto-polls; this lets
+// Accounts trigger it on demand — e.g. to test). Refreshes the sheet too.
+router.post('/advance-fms-sync', requireSection('accountsTeam'), asyncHandler(async (_req, res) => {
+  try {
+    const { exportAdvanceAccountFms, sheetsEnabled } = await import('../services/sheetsSync');
+    if (!sheetsEnabled()) { res.json({ ok: false, message: 'Google Sheets not configured on this server.' }); return; }
+    const rows = await exportAdvanceAccountFms();
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.json({ ok: false, message: (e as Error)?.message || 'Sync failed' });
+  }
 }));
 
 // ── Submit to accounts (custodian) ───────────────────────────────────────────

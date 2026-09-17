@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode, type ChangeEvent } from 'react';
+import { Fragment, useEffect, useMemo, useState, type ReactNode, type ChangeEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errMsg, downloadFile } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { EmptyState, Spinner } from '../components/ui';
 import { FileViewerModal, type ViewFile } from '../components/FileViewer';
 import { fmtDate, inr } from '../lib/format';
+import PettyCashPage from './PettyCashPage';
 
 // ── Travel Planning & Booking ────────────────────────────────────────────────
 // One connected flow per trip: request → approval (Approval Chains: docType
@@ -88,12 +89,15 @@ function CellAttach({ url, title, onUpload, onClear }: { url?: string; title: st
 }
 
 export default function TravelPlanningPage() {
-  const { canEdit, can, isAdmin } = useAuth();
+  const { canEdit, can, canView, isAdmin } = useAuth();
   const canManage = canEdit('travel');
   // Accounts money-close (finalise / save / reopen) is a SEPARATE right from
   // plain travel-edit — same dedicated flag as Petty Cash confirm.
   const isAccounts = can('accountsTeam');
-  const [tab, setTab] = useState<'plan' | 'planhist' | 'ticket' | 'tech' | 'approvals' | 'accounts' | 'settings'>('planhist');
+  // New Advance is now the first tab here (merged in). Shown only to users who
+  // can view the petty-cash / New-Advance module.
+  const canAdvance = canView('pettycash');
+  const [tab, setTab] = useState<'advance' | 'plan' | 'planhist' | 'ticket' | 'tech' | 'approvals' | 'accounts' | 'settings'>('planhist');
   const tabCls = (t: string) => `rounded-lg px-4 py-1.5 font-medium ${tab === t ? 'bg-navy text-white' : 'text-slate-600'}`;
 
   return (
@@ -103,6 +107,7 @@ export default function TravelPlanningPage() {
         <p className="text-sm text-slate-500">Who is travelling, what we sanctioned, and what it actually cost — request → approval → booking → expenses.</p>
       </div>
       <div className="mb-4 flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1 text-sm w-fit">
+        {canAdvance && <button onClick={() => setTab('advance')} className={tabCls('advance')}>₹ New Advance</button>}
         {canManage && <button onClick={() => setTab('plan')} className={tabCls('plan')}>+ New plan</button>}
         <button onClick={() => setTab('planhist')} className={tabCls('planhist')}>Plan history</button>
         <button onClick={() => setTab('ticket')} className={tabCls('ticket')}>✈ Ticket request</button>
@@ -111,7 +116,8 @@ export default function TravelPlanningPage() {
         <button onClick={() => setTab('accounts')} className={tabCls('accounts')}>💳 Accounts</button>
         {isAdmin && <button onClick={() => setTab('settings')} className={tabCls('settings')}>⚙ Settings</button>}
       </div>
-      {tab === 'plan' && canManage ? <NewSanctionTab onDone={() => setTab('planhist')} />
+      {tab === 'advance' && canAdvance ? <PettyCashPage />
+        : tab === 'plan' && canManage ? <NewSanctionTab onDone={() => setTab('planhist')} />
         : tab === 'ticket' ? <TicketRequestTab canManage={canManage} />
         : tab === 'tech' ? <TechEntryTab canManage={canManage} />
         : tab === 'approvals' ? <ApprovalsTab canManage={canManage} />
@@ -199,7 +205,7 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
                 <span className="text-sm text-slate-500">· {p.employeeName} · {fmtDate(p.fromDate)} → {fmtDate(p.toDate)} <span className="text-xs">({p.days}d · {(p.jobOrders ?? []).filter((j: any) => j.jo).length} projects)</span></span>
                 <span className="badge ml-1 bg-slate-200 text-slate-600">CLOSED</span>
                 <span className="ml-auto flex items-center gap-2 text-xs">
-                  <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700">Adv {inr(p.totalAdvance || 0)}</span>
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}` : undefined}>Adv {inr(p.effectiveAdvance ?? p.totalAdvance ?? 0)}{p.personAdvance ? <span className="text-[9px] text-indigo-500"> (+NA)</span> : null}</span>
                   {(() => { const spent = (p.actualDayCosts || []).reduce((s: number, d: any) => s + dayActualTotal(d), 0); return spent > 0 ? <span className="font-medium text-slate-700">Spent {inr(spent)}</span> : null; })()}
                   <span className={`badge ${techPill(p.techEntryStatus)}`}>{techLabel(p.techEntryStatus)}</span>
                 </span>
@@ -231,9 +237,31 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
   const act = { travel: rows.reduce((s, d) => s + (+d.bus || 0) + (+d.auto || 0), 0), food: rows.reduce((s, d) => s + (+d.food || 0), 0), hotel: rows.reduce((s, d) => s + (+d.hotel || 0), 0), other: rows.reduce((s, d) => s + (+d.other || 0) + (+d.misc || 0), 0) };
   const actGrand = act.travel + act.food + act.hotel + act.other;
   const planGrand = (+pc.travel || 0) + (+pc.food || 0) + (+pc.hotel || 0) + (+pc.other || 0);
-  const advReceived = plan.totalAdvance || 0;
-  const balance = advReceived - actGrand;
+  const planAdv = plan.totalAdvance || 0;
   const m0 = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+  // The traveller's ACTIVE raised advances (New Advance) — reflected here so they
+  // see "you already hold ₹X" against this trip. 0 when none.
+  const raisedQ = useQuery({
+    queryKey: ['person-advance', plan.employeeId],
+    queryFn: async () => (await api.get(`/travel/person-advance/${plan.employeeId}`)).data as { total: number; count: number; entries: any[] },
+    enabled: !!plan.employeeId,
+  });
+  const raisedAdvance = raisedQ.data?.total || 0;
+  // Advance the person holds against this trip = plan advance + New-Advance balance.
+  const advReceived = planAdv + raisedAdvance;
+  const balance = advReceived - actGrand;
+
+  // Per-day policy slab (M-Level + destination city): one combined cap spendable on
+  // anything that day; the day's total over the cap is flagged as over-slab.
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', plan.mLevel, plan.destination],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(plan.destination || '')}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number },
+    enabled: !!plan.mLevel,
+  });
+  const ent = entQ.data;
+  const dailyCap = ent ? (ent.hotel + ent.food + ent.other) : 0;
+  const overageTotal = dailyCap > 0 ? rows.reduce((s, d) => s + Math.max(0, dayActualTotal(d) - dailyCap), 0) : 0;
 
   const save = useMutation({
     mutationFn: async (submit: boolean) => {
@@ -256,6 +284,16 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{pvA('Travel', +pc.travel || 0, act.travel)}{pvA('Food', +pc.food || 0, act.food)}{pvA('Hotel', +pc.hotel || 0, act.hotel)}{pvA('Other', +pc.other || 0, act.other)}<div className="rounded-lg border border-navy/20 bg-navy/5 p-2.5"><div className="text-[10px] uppercase text-navy/60">Grand</div><div className="text-xs">Plan: <span className="font-medium">{m0(planGrand)}</span></div><div className="text-xs">Act: <span className="font-bold text-navy">{m0(actGrand)}</span></div></div></div>
       </div>
 
+      {/* Per-day policy slab (combined cap, spendable on anything that day). */}
+      {dailyCap > 0 && ent && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+          <span className="font-semibold text-amber-800">Per-day limit</span>
+          <span className="text-slate-600">{plan.mLevel ? `${plan.mLevel} · ` : ''}{plan.destination || '—'} · Grade {ent.group} · Cat {ent.category}</span>
+          <span className="ml-auto text-slate-700">Hotel <b>{m0(ent.hotel)}</b> · Food <b>{m0(ent.food)}</b> · Other <b>{m0(ent.other)}</b> = <b className="text-navy">{m0(dailyCap)}/day</b></span>
+          <span className="w-full text-[11px] text-amber-600">Spend the {m0(dailyCap)}/day on anything (hotel, food, travel…). A day over this limit is flagged over-slab.{overageTotal > 0 ? <> Total over-slab: <b className="text-rose-600">{m0(overageTotal)}</b>.</> : null}</span>
+        </div>
+      )}
+
       {/* Day-wise actual grid */}
       <fieldset disabled={readOnly}>
       <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm">
@@ -274,7 +312,11 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
                 </td>
               ); })}
               <td className="pr-2"><input className="input h-8 text-xs" value={d.notes} onChange={(e) => set(i, { notes: e.target.value })} placeholder="—" /></td>
-              <td className="pr-2 text-right font-medium">{m0(dayActualTotal(d))}</td>
+              <td className="pr-2 text-right font-medium">
+                {(() => { const dt = dayActualTotal(d); const over = dailyCap > 0 ? dt - dailyCap : 0; return (
+                  <><span className={over > 0 ? 'text-rose-600' : ''}>{m0(dt)}</span>{over > 0 && <div className="text-[10px] font-normal text-rose-500">+{m0(over)} over</div>}</>
+                ); })()}
+              </td>
             </tr>
           ))}
           <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td colSpan={2} className="py-2">Total</td>{CATS.map((c) => <td key={c} className="text-right">{m0(rows.reduce((s, d) => s + (+d[c] || 0), 0))}</td>)}<td></td><td className="pr-2 text-right">{m0(actGrand)}</td></tr>
@@ -285,8 +327,17 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
 
       {/* Advance reconciliation */}
       <div><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">Advance reconciliation</div>
+        {/* The traveller's outstanding advance from the New Advance module (0 = none). */}
+        {plan.employeeId && (
+          <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
+            <span className="font-semibold text-indigo-800">💰 New Advance in hand</span>
+            <span className="text-slate-600">{plan.employeeName}</span>
+            <span className="ml-auto text-lg font-bold text-indigo-800">{m0(raisedAdvance)}</span>
+            {raisedQ.data?.count ? <span className="w-full text-[11px] text-indigo-500">{raisedQ.data.count} active advance(s) raised to this person. Trip spend is booked against it.</span> : <span className="w-full text-[11px] text-slate-400">No advance raised to this person yet.</span>}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div></div>
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div>{raisedAdvance > 0 && <div className="text-[10px] text-blue-500">Plan {m0(planAdv)} + New Advance {m0(raisedAdvance)}</div>}</div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"><div className="text-xs text-slate-600">Actual spent</div><div className="text-lg font-bold text-slate-700">{m0(actGrand)}</div></div>
           <div className={`rounded-lg border p-2.5 ${balance < 0 ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}><div className="text-xs text-amber-700">Balance</div><div className="text-lg font-bold text-amber-800">{m0(Math.abs(balance))}</div><div className="text-[10px] text-amber-500">{balance < 0 ? 'reimburse to tech' : 'due back to company'}</div></div>
           <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-lg font-bold text-slate-700">{techLabel(plan.techEntryStatus)}</div></div>
@@ -387,24 +438,36 @@ const catSum = (days: any[]): StageCats => days.reduce((a: StageCats, d: any) =>
 function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManage: boolean; onDone: () => void }) {
   const rows: any[] = plan.actualDayCosts || [];
   const planDays: any[] = plan.planDayCosts || [];
-  const s1 = plan.techStage1; const s2 = plan.techStage2;
+  const s1 = plan.techStage1; const s2 = plan.techStage2; const s3 = plan.techStage3;
   const decided = plan.techEntryStatus === 'APPROVED' || plan.techEntryStatus === 'REJECTED';
   const stage1Done = !!s1 && s1.status === 'APPROVED';
-  const currentStage: 1 | 2 | null = decided ? null : (stage1Done ? 2 : 1);
+  const stage2Done = !!s2 && s2.status === 'APPROVED';
   // Per-stage approver assignment (Travel → Settings). If this stage has an
   // assigned approver, only that user (or an admin) may sign it.
   const { user, isAdmin } = useAuth();
   const cfgQ = useQuery({ queryKey: ['travel-config'], queryFn: async () => (await api.get('/travel/config')).data.config as any });
-  const assignedId = currentStage === 1 ? cfgQ.data?.reviewerId : currentStage === 2 ? cfgQ.data?.finalId : null;
-  const assignedName = currentStage === 1 ? cfgQ.data?.reviewerName : currentStage === 2 ? cfgQ.data?.finalName : null;
+  // Stage 3 (Final approval / Sir) is OPTIONAL — active only when configured in
+  // Settings. Until then the chain stays 2-stage (Reviewer → Final) as before.
+  const hasStage3 = !!cfgQ.data?.stage3Id;
+  const finalStageNum: 2 | 3 = hasStage3 ? 3 : 2;
+  const currentStage: 1 | 2 | 3 | null = decided ? null : (!stage1Done ? 1 : (!stage2Done ? 2 : (hasStage3 ? 3 : null)));
+  // Policy entitlement (per-day slab) — so the FINAL approver can see allowed slab
+  // vs what was claimed, and take the call when it's over-slab.
+  const slabQ = useQuery({
+    queryKey: ['travel-entitlement', plan.mLevel, plan.destination],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(plan.destination || '')}`)).data.entitlement as { hotel: number; food: number; other: number; group: string; category: string },
+    enabled: !!plan.mLevel,
+  });
+  const assignedId = currentStage === 1 ? cfgQ.data?.reviewerId : currentStage === 2 ? cfgQ.data?.finalId : currentStage === 3 ? cfgQ.data?.stage3Id : null;
+  const assignedName = currentStage === 1 ? cfgQ.data?.reviewerName : currentStage === 2 ? cfgQ.data?.finalName : currentStage === 3 ? cfgQ.data?.stage3Name : null;
   const blockedByAssignee = !!assignedId && assignedId !== user?.id && !isAdmin;
   // Names to display per stage. A stage that's ALREADY signed keeps the person
   // who actually signed it (historical record) — so changing the approver in
   // Settings never rewrites who approved a past trip. A stage still PENDING shows
   // the CURRENTLY assigned approver from Settings (who will approve it).
   const revName = s1?.by || cfgQ.data?.reviewerName || null;
-  const finalActual = s2?.by || (plan.techEntryStatus === 'APPROVED' ? plan.techApprovedBy : null);
-  const finName = finalActual || cfgQ.data?.finalName || null;
+  const finName = s2?.by || cfgQ.data?.finalName || null;
+  const stage3DispName = s3?.by || (plan.techEntryStatus === 'APPROVED' && hasStage3 ? plan.techApprovedBy : null) || cfgQ.data?.stage3Name || null;
   const readOnly = !canManage || currentStage == null || blockedByAssignee;
   const m0 = (n: any) => `₹${Math.round(+n || 0).toLocaleString('en-IN')}`;
   const atts: any[] = plan.techAttachments || [];
@@ -415,14 +478,15 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
   // The editable stage's per-day amounts. Stage 1 starts from the technician's
   // submitted figures; the Final stage starts from Stage-1's approved figures.
   const initDays = useMemo(() => {
-    const base = currentStage === 2 ? (s2?.days ?? s1?.days ?? []) : (s1?.days ?? []);
+    // Start from the LATEST approved stage's figures (config-load independent).
+    const base = s3?.days ?? s2?.days ?? s1?.days ?? [];
     return rows.map((d: any, i: number) => { const t = techDayVals(d); const b = base[i] || {}; return { day: i + 1, travel: b.travel ?? t.travel, food: b.food ?? t.food, hotel: b.hotel ?? t.hotel, other: b.other ?? t.other, misc: b.misc ?? t.misc, remark: b.remark ?? '' }; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [days, setDays] = useState<any[]>(initDays);
-  // Per-category override the reviewer can type (Spare-AI "override per category").
-  // Auto-tracks the grid sum until the reviewer edits it directly.
-  const [override, setOverride] = useState<StageCats>(() => (currentStage === 1 && s1?.totals) || (currentStage === 2 && s2?.totals) || catSum(initDays));
+  // Per-category override the approver can type (Spare-AI "override per category").
+  // Seeds from the latest approved stage; auto-tracks the grid sum until edited.
+  const [override, setOverride] = useState<StageCats>(() => s3?.totals ?? s2?.totals ?? s1?.totals ?? catSum(initDays));
   const [ovTouched, setOvTouched] = useState(false);
   const setCell = (i: number, c: string, v: number) => { const nd = days.map((d, j) => j === i ? { ...d, [c]: v } : d); setDays(nd); if (!ovTouched) setOverride(catSum(nd)); };
   const setRemark = (i: number, v: string) => setDays(days.map((d, j) => j === i ? { ...d, remark: v } : d));
@@ -430,12 +494,16 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
   const advDay = (i: number): StageCats => { const p = planDays[i] || {}; return { travel: +p.travel || 0, food: +p.food || 0, hotel: +p.hotel || 0, other: +p.other || 0, misc: 0 }; };
   const s1Cell = (i: number, c: string): number | null => stage1Done ? (s1.days?.[i]?.[c] ?? 0) : (currentStage === 1 ? (days[i]?.[c] ?? 0) : null);
   const s2Cell = (i: number, c: string): number | null => currentStage === 2 ? (days[i]?.[c] ?? 0) : (s2 ? (s2.days?.[i]?.[c] ?? 0) : null);
+  const s3Cell = (i: number, c: string): number | null => currentStage === 3 ? (days[i]?.[c] ?? 0) : (s3 ? (s3.days?.[i]?.[c] ?? 0) : null);
 
   const advReceived = plan.totalAdvance || 0;
   const techSum = catSum(rows.map(techDayVals));
   const s1Sum = stage1Done ? (s1.totals ?? catSum(s1.days || [])) : (currentStage === 1 ? override : null);
-  const finalSum = currentStage === 2 ? override : (s2 ? (s2.totals ?? catSum(s2.days || [])) : null);
-  const finalGrand = finalSum ? catGrand(finalSum) : (s1Sum ? catGrand(s1Sum) : catGrand(techSum));
+  const s2Sum = stage2Done ? (s2.totals ?? catSum(s2.days || [])) : (currentStage === 2 ? override : null);
+  const s3Sum = s3 ? (s3.totals ?? catSum(s3.days || [])) : (currentStage === 3 ? override : null);
+  // The final payable figure = the LAST configured stage's approved amount.
+  const finalSum = hasStage3 ? s3Sum : s2Sum;
+  const finalGrand = finalSum ? catGrand(finalSum) : (s2Sum ? catGrand(s2Sum) : s1Sum ? catGrand(s1Sum) : catGrand(techSum));
 
   const decide = useMutation({
     mutationFn: async () => api.post(`/travel/${plan.id}/tech-stage-decide`, { stage: currentStage, status: verdict, days: verdict === 'APPROVED' ? days : [], totals: verdict === 'APPROVED' ? override : undefined, comment }),
@@ -443,13 +511,13 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
     onError: (e) => setErr(errMsg(e)),
   });
 
-  const stageLabel = (n: number) => (n === 1 ? 'Reviewer' : 'Final');
+  const stageLabel = (n: number) => (n === 1 ? 'Reviewer' : n === 2 ? 'Final' : 'Final approval');
   const chainBadge = (done: boolean, pending: boolean) => (done ? <span className="rounded bg-green-100 px-1.5 text-[10px] text-green-700">Approved</span> : pending ? <span className="rounded bg-amber-100 px-1.5 text-[10px] text-amber-700">Pending</span> : <span className="rounded bg-slate-100 px-1.5 text-[10px] text-slate-500">Waiting</span>);
 
   const CatCell = ({ i, c }: { i: number; c: string }) => {
     const adv = advDay(i)[c as keyof StageCats]; const tech = techDayVals(rows[i])[c as keyof StageCats];
-    const s1v = s1Cell(i, c); const s2v = s2Cell(i, c);
-    const editRow = currentStage; // 1 → edit Reviewer row, 2 → edit Final row
+    const s1v = s1Cell(i, c); const s2v = s2Cell(i, c); const s3v = hasStage3 ? s3Cell(i, c) : null;
+    const editRow = currentStage; // 1 → Reviewer row, 2 → Final row, 3 → Final-approval row
     const inp = (val: number) => <input type="number" min={0} className="w-14 rounded border border-amber-300 bg-amber-50 px-1 text-right text-[10px]" value={val || ''} onChange={(e) => setCell(i, c, Number(e.target.value))} placeholder="0" />;
     return (
       <div className="rounded border border-slate-200 bg-white p-1 text-[10px]">
@@ -457,6 +525,7 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
         <div className="flex justify-between text-blue-600"><span>TECH</span><span>{m0(tech)}</span></div>
         <div className="flex items-center justify-between text-green-600"><span>REV</span><span>{editRow === 1 && !readOnly ? inp(days[i]?.[c] || 0) : (s1v == null ? '—' : m0(s1v))}</span></div>
         <div className="flex items-center justify-between text-amber-700"><span>FINAL</span><span>{editRow === 2 && !readOnly ? inp(days[i]?.[c] || 0) : (s2v == null ? '—' : m0(s2v))}</span></div>
+        {hasStage3 && <div className="flex items-center justify-between text-purple-700"><span>F.APP</span><span>{editRow === 3 && !readOnly ? inp(days[i]?.[c] || 0) : (s3v == null ? '—' : m0(s3v))}</span></div>}
       </div>
     );
   };
@@ -474,9 +543,25 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
         <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-base font-bold text-slate-700">{decided ? (plan.techEntryStatus === 'APPROVED' ? 'Approved' : 'Rejected') : stage1Done ? 'Awaiting Final' : 'Open'}</div></div>
       </div>
 
+      {/* Policy slab vs claimed — the final approver's call when it's over-slab. */}
+      {slabQ.data && (() => {
+        const cap = slabQ.data.hotel + slabQ.data.food + slabQ.data.other;
+        const allowed = cap * (plan.days || 1);
+        const claimed = catGrand(techSum);
+        const over = claimed - allowed;
+        return (
+          <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-xs ${over > 0 ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`}>
+            <span className="font-semibold text-slate-700">Policy slab</span>
+            <span className="text-slate-500">{plan.mLevel} · {plan.destination || '—'} · Grade {slabQ.data.group} Cat {slabQ.data.category} · {m0(cap)}/day × {plan.days || 1}d</span>
+            <span className="ml-auto text-slate-600">Allowed <b>{m0(allowed)}</b> · Claimed <b>{m0(claimed)}</b> · Approving <b className="text-navy">{m0(finalGrand)}</b></span>
+            <span className={`w-full text-[11px] font-medium ${over > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{over > 0 ? `⚠ Over slab by ${m0(over)} — final approver's call (review remarks + approved amount below).` : `✓ Within slab.`}</span>
+          </div>
+        );
+      })()}
+
       {/* Day-wise 2-stage approval grid */}
       <div className="rounded-lg border border-slate-200 bg-white p-2">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="text-xs font-semibold text-navy">Day-wise approval · each cell shows Advance / Technician / <span className="text-green-700">Reviewer{revName ? ` (${revName})` : ''}</span> / <span className="text-amber-700">Final{finName ? ` (${finName})` : ''}</span></div>{currentStage && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">You are editing the {stageLabel(currentStage)} row</span>}</div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="text-xs font-semibold text-navy">Day-wise approval · each cell shows Advance / Technician / <span className="text-green-700">Reviewer{revName ? ` (${revName})` : ''}</span> / <span className="text-amber-700">Final{finName ? ` (${finName})` : ''}</span>{hasStage3 && <> / <span className="text-purple-700">Final approval{stage3DispName ? ` (${stage3DispName})` : ''}</span></>}</div>{currentStage && <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">You are editing the {stageLabel(currentStage)} {currentStage === 3 ? 'amount (use the override box below)' : 'row'}</span>}</div>
         <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-sm">
           <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th>{APPR_CATS.map((c) => <th key={c}>{APPR_LABEL[c]}</th>)}<th>Day total</th></tr></thead>
           <tbody>
@@ -492,18 +577,20 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
                 <td className="pr-1">{(() => {
                   const rev = (stage1Done || currentStage === 1) ? APPR_CATS.reduce((s, c) => s + (s1Cell(i, c) ?? 0), 0) : null;
                   const fin = (currentStage === 2 || !!s2) ? APPR_CATS.reduce((s, c) => s + (s2Cell(i, c) ?? 0), 0) : null;
+                  const fap = hasStage3 && (currentStage === 3 || !!s3) ? APPR_CATS.reduce((s, c) => s + (s3Cell(i, c) ?? 0), 0) : null;
                   return (
                     <div className="rounded border border-slate-200 bg-slate-50 p-1 text-[10px] font-semibold">
                       <div className="flex justify-between text-slate-400"><span>ADV</span><span>{m0(catGrand(advDay(i)))}</span></div>
                       <div className="flex justify-between text-blue-600"><span>TECH</span><span>{m0(catGrand(techDayVals(d)))}</span></div>
                       <div className="flex justify-between text-green-600"><span>REV</span><span>{rev == null ? '—' : m0(rev)}</span></div>
                       <div className="flex justify-between text-amber-700"><span>FINAL</span><span>{fin == null ? '—' : m0(fin)}</span></div>
+                      {hasStage3 && <div className="flex justify-between text-purple-700"><span>F.APP</span><span>{fap == null ? '—' : m0(fap)}</span></div>}
                     </div>
                   );
                 })()}</td>
               </tr>
             ))}
-            <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="py-2">Total</td>{APPR_CATS.map((c) => <td key={c} className="text-[10px]"><div>ADV {m0(rows.reduce((s: number, _d: any, i: number) => s + advDay(i)[c], 0))}</div><div className="text-blue-600">TECH {m0(techSum[c])}</div><div className="text-green-600">REV {s1Sum ? m0(s1Sum[c]) : '—'}</div><div className="text-amber-700">FINAL {finalSum ? m0(finalSum[c]) : '—'}</div></td>)}<td></td></tr>
+            <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="py-2">Total</td>{APPR_CATS.map((c) => <td key={c} className="text-[10px]"><div>ADV {m0(rows.reduce((s: number, _d: any, i: number) => s + advDay(i)[c], 0))}</div><div className="text-blue-600">TECH {m0(techSum[c])}</div><div className="text-green-600">REV {s1Sum ? m0(s1Sum[c]) : '—'}</div><div className="text-amber-700">FINAL {s2Sum ? m0(s2Sum[c]) : '—'}</div>{hasStage3 && <div className="text-purple-700">F.APP {s3Sum ? m0(s3Sum[c]) : '—'}</div>}</td>)}<td></td></tr>
           </tbody>
         </table></div>
       </div>
@@ -522,17 +609,19 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
             clear who signed — even if the assigned approver changes later. */}
         <span>1. Reviewer{revName ? <span className="font-medium text-slate-600"> ({revName})</span> : ''} {chainBadge(stage1Done, currentStage === 1)}{stage1Done && s1Sum ? ` ${m0(catGrand(s1Sum))}` : ''}</span>
         <span className="text-slate-300">→</span>
-        <span>2. Final{finName ? <span className="font-medium text-slate-600"> ({finName})</span> : ''} {chainBadge(plan.techEntryStatus === 'APPROVED', currentStage === 2)}</span>
-        {!decided && <span className="ml-auto font-medium text-amber-600">{stage1Done ? 'Awaiting Final' : 'Awaiting Reviewer'}</span>}
+        <span>2. Final{finName ? <span className="font-medium text-slate-600"> ({finName})</span> : ''} {chainBadge(stage2Done, currentStage === 2)}{stage2Done && s2Sum ? ` ${m0(catGrand(s2Sum))}` : ''}</span>
+        {hasStage3 && <><span className="text-slate-300">→</span>
+        <span>3. Final approval{stage3DispName ? <span className="font-medium text-slate-600"> ({stage3DispName})</span> : ''} {chainBadge(plan.techEntryStatus === 'APPROVED', currentStage === 3)}{plan.techEntryStatus === 'APPROVED' && s3Sum ? ` ${m0(catGrand(s3Sum))}` : ''}</span></>}
+        {!decided && <span className="ml-auto font-medium text-amber-600">{currentStage ? `Awaiting ${stageLabel(currentStage)}` : ''}</span>}
       </div>
 
       {/* Stage breakdown + decision */}
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="overflow-hidden rounded-lg border border-slate-200">
           <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase text-slate-400">Stage breakdown · per category</div>
-          <table className="w-full text-sm"><thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-3 py-1">Category</th><th className="px-3 py-1 text-right">Submitted</th><th className="px-3 py-1 text-right">Reviewer</th><th className="px-3 py-1 text-right">Final</th></tr></thead>
-            <tbody>{APPR_CATS.map((c) => (<tr key={c} className="border-t border-slate-100"><td className="px-3 py-1 capitalize text-slate-600">{c}</td><td className="px-3 py-1 text-right">{m0(techSum[c])}</td><td className="px-3 py-1 text-right text-green-700">{s1Sum ? m0(s1Sum[c]) : '—'}</td><td className="px-3 py-1 text-right text-amber-700">{finalSum ? m0(finalSum[c]) : '—'}</td></tr>))}
-              <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="px-3 py-1.5">Total</td><td className="px-3 py-1.5 text-right">{m0(catGrand(techSum))}</td><td className="px-3 py-1.5 text-right">{s1Sum ? m0(catGrand(s1Sum)) : '—'}</td><td className="px-3 py-1.5 text-right">{finalSum ? m0(catGrand(finalSum)) : '—'}</td></tr>
+          <table className="w-full text-sm"><thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-3 py-1">Category</th><th className="px-3 py-1 text-right">Submitted</th><th className="px-3 py-1 text-right">Reviewer</th><th className="px-3 py-1 text-right">Final</th>{hasStage3 && <th className="px-3 py-1 text-right">Final appr.</th>}</tr></thead>
+            <tbody>{APPR_CATS.map((c) => (<tr key={c} className="border-t border-slate-100"><td className="px-3 py-1 capitalize text-slate-600">{c}</td><td className="px-3 py-1 text-right">{m0(techSum[c])}</td><td className="px-3 py-1 text-right text-green-700">{s1Sum ? m0(s1Sum[c]) : '—'}</td><td className="px-3 py-1 text-right text-amber-700">{s2Sum ? m0(s2Sum[c]) : '—'}</td>{hasStage3 && <td className="px-3 py-1 text-right text-purple-700">{s3Sum ? m0(s3Sum[c]) : '—'}</td>}</tr>))}
+              <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td className="px-3 py-1.5">Total</td><td className="px-3 py-1.5 text-right">{m0(catGrand(techSum))}</td><td className="px-3 py-1.5 text-right">{s1Sum ? m0(catGrand(s1Sum)) : '—'}</td><td className="px-3 py-1.5 text-right">{s2Sum ? m0(catGrand(s2Sum)) : '—'}</td>{hasStage3 && <td className="px-3 py-1.5 text-right">{s3Sum ? m0(catGrand(s3Sum)) : '—'}</td>}</tr>
             </tbody></table>
         </div>
         <div className={`rounded-lg border p-3 ${readOnly ? 'border-slate-200 bg-slate-50' : 'border-amber-300 bg-amber-50'}`}>
@@ -554,7 +643,7 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
         <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{plan.techEntryStatus === 'APPROVED' ? '✓ Approved' : '✗ Rejected'}{plan.techApprovedBy ? ` by ${plan.techApprovedBy}` : ''}{plan.techApproveComment ? ` — “${plan.techApproveComment}”` : ''}.</div>
       ) : !readOnly && (
         <div className="flex flex-wrap items-center gap-2">
-          <select className="input h-9 w-44 text-sm" value={verdict} onChange={(e) => setVerdict(e.target.value as any)}><option value="APPROVED">Approve → {currentStage === 1 ? 'send to Final' : 'done'}</option><option value="REJECTED">Reject → back to tech</option></select>
+          <select className="input h-9 w-56 text-sm" value={verdict} onChange={(e) => setVerdict(e.target.value as any)}><option value="APPROVED">Approve → {currentStage === 1 ? 'send to Final' : currentStage === 2 && hasStage3 ? 'send to Final approval' : 'done'}</option><option value="REJECTED">Reject → back to tech</option></select>
           <input className="input h-9 flex-1" placeholder={verdict === 'REJECTED' ? 'Reason (required)' : 'Comments (optional)'} value={comment} onChange={(e) => setComment(e.target.value)} />
           <button className="btn-primary" disabled={decide.isPending || (verdict === 'REJECTED' && !comment.trim())} onClick={() => decide.mutate()}>{verdict === 'APPROVED' ? `✓ Approve as ${currentStage ? stageLabel(currentStage) : ''}` : '✗ Reject'}</button>
         </div>
@@ -563,6 +652,111 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
       {!decided && blockedByAssignee && (
         <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">👁 View only — only <span className="font-medium">{assignedName || 'the assigned approver'}</span> (or an admin) can sign the {currentStage ? stageLabel(currentStage) : ''} stage.</div>
       )}
+    </div>
+  );
+}
+
+// ── Technician Cash in Hand (derived, read-only) ─────────────────────────────
+// Who is holding company money right now — travel advances + petty-cash advances
+// minus what has been accounted for. IN HAND > 0 → technician holds cash; < 0 →
+// company owes them. Data is derived live on the server, so it never drifts.
+interface CashRow {
+  personKey: string; personId: string | null; name: string;
+  received: number; spent: number; inHand: number; pendingApproval: number;
+  unsettled: number; entries: number; lastActivityAt: string | null; linked: boolean;
+}
+const inHandCls = (v: number) => (v > 0 ? 'text-amber-700' : v < 0 ? 'text-rose-600' : 'text-slate-400');
+
+function CashInHandPanel() {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const dataQ = useQuery({ queryKey: ['cash-in-hand'], queryFn: async () => (await api.get('/travel/cash-in-hand')).data as { rows: CashRow[]; totals: any } });
+  if (dataQ.isLoading) return <div className="rounded-xl border border-slate-200 bg-white p-6"><Spinner label="Loading cash in hand…" /></div>;
+  const rows = dataQ.data?.rows ?? [];
+  const totals = dataQ.data?.totals ?? { received: 0, spent: 0, inHand: 0, unsettled: 0, holding: 0, owed: 0 };
+  const needle = q.toLowerCase().trim();
+  const shown = needle ? rows.filter((r) => r.name.toLowerCase().includes(needle)) : rows;
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50/40">
+      {/* Collapsed banner — click "Details" to expand the cards + table. */}
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left">
+        <div>
+          <div className="font-semibold text-navy">💰 Technician cash in hand</div>
+          <div className="text-xs text-slate-500">Who is holding company money right now — every advance given, every rupee accounted for, across travel &amp; petty cash.</div>
+        </div>
+        <div className="flex items-center gap-3 text-sm text-slate-500">
+          <span><span className={`font-bold ${inHandCls(totals.inHand)}`}>{inr(totals.inHand)}</span> net in hand · {rows.length} person(s) · {totals.holding} holding cash{totals.owed ? <> · <span className="font-medium text-rose-600">{totals.owed} to reimburse</span></> : null}</span>
+          <span className="whitespace-nowrap rounded-lg border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-navy">{open ? '▾ Hide' : '▸ Details'}</span>
+        </div>
+      </button>
+
+      {open && (<>
+      {/* Summary cards */}
+      <div className="grid gap-2 border-t border-amber-100 px-4 py-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-[11px] text-slate-500">Advances given</div><div className="text-base font-bold text-blue-700">{inr(totals.received)}</div></div>
+        <div className="rounded-lg border border-green-200 bg-green-50 p-2.5"><div className="text-[11px] text-slate-500">Accounted for</div><div className="text-base font-bold text-green-700">{inr(totals.spent)}</div></div>
+        <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-[11px] text-slate-500">Net in hand</div><div className={`text-base font-bold ${inHandCls(totals.inHand)}`}>{inr(totals.inHand)}</div></div>
+        <div className="rounded-lg border border-amber-200 bg-white p-2.5"><div className="text-[11px] text-slate-500">Holding cash</div><div className="text-base font-bold text-amber-700">{totals.holding}</div></div>
+        <div className="rounded-lg border border-rose-200 bg-white p-2.5"><div className="text-[11px] text-slate-500">Unsettled advances</div><div className="text-base font-bold text-rose-600">{inr(totals.unsettled)}</div></div>
+      </div>
+
+      <div className="px-4 pb-2"><input className="input h-8 w-full max-w-xs text-sm" placeholder="Search technician…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+
+      {shown.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">No cash history yet. Advances (travel plan / petty cash) show up here per person.</div> : (
+        <div className="overflow-x-auto px-2 pb-3">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase text-slate-400">
+              <tr><th className="px-2 py-1.5">Technician</th><th className="px-2 text-right">Received</th><th className="px-2 text-right">Accounted</th><th className="px-2 text-right">In hand</th><th className="px-2 text-right">Pending</th><th className="px-2 text-right">Unsettled</th><th className="px-2 text-right">Entries</th><th className="px-2 text-right">Last activity</th></tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <Fragment key={r.personKey}>
+                  <tr className="cursor-pointer border-t border-amber-100 hover:bg-white" onClick={() => setOpenKey(openKey === r.personKey ? null : r.personKey)}>
+                    <td className="px-2 py-2 font-medium text-slate-700">{openKey === r.personKey ? '▾ ' : '▸ '}{r.name}{!r.linked && <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] text-slate-400" title="Legacy name — not linked to a user account">unlinked</span>}</td>
+                    <td className="px-2 text-right text-blue-700">{inr(r.received)}</td>
+                    <td className="px-2 text-right text-green-700">{inr(r.spent)}</td>
+                    <td className={`px-2 text-right font-semibold ${inHandCls(r.inHand)}`}>{inr(r.inHand)}</td>
+                    <td className="px-2 text-right text-slate-400">{r.pendingApproval ? inr(r.pendingApproval) : '—'}</td>
+                    <td className="px-2 text-right text-rose-500">{r.unsettled ? inr(r.unsettled) : '—'}</td>
+                    <td className="px-2 text-right text-slate-500">{r.entries}</td>
+                    <td className="px-2 text-right text-slate-400">{r.lastActivityAt ? fmtDate(r.lastActivityAt) : '—'}</td>
+                  </tr>
+                  {openKey === r.personKey && <tr><td colSpan={8} className="bg-white px-3 py-2"><PersonStatement pkey={r.personKey} /></td></tr>}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      </>)}
+    </div>
+  );
+}
+
+function PersonStatement({ pkey }: { pkey: string }) {
+  const q = useQuery({ queryKey: ['cash-statement', pkey], queryFn: async () => (await api.get(`/travel/cash-in-hand/${encodeURIComponent(pkey)}`)).data as { summary: CashRow; events: any[] } });
+  if (q.isLoading) return <Spinner label="Loading statement…" />;
+  const events = q.data?.events ?? [];
+  const kindPill: Record<string, string> = { advance: 'bg-blue-100 text-blue-700', expense: 'bg-green-100 text-green-700', settlement: 'bg-slate-100 text-slate-500', company_paid: 'bg-slate-100 text-slate-400' };
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-2">
+      <div className="mb-1 text-xs font-semibold text-slate-500">Statement — every advance, expense &amp; settlement in date order</div>
+      <table className="w-full text-xs">
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-2 py-1">Date</th><th className="px-2">Kind</th><th className="px-2">Detail</th><th className="px-2 text-right">Amount</th><th className="px-2 text-right">Running in hand</th></tr></thead>
+        <tbody>
+          {events.map((e, i) => (
+            <tr key={i} className="border-t border-slate-100">
+              <td className="px-2 py-1 text-slate-500">{e.at ? fmtDate(e.at) : '—'}</td>
+              <td className="px-2"><span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${kindPill[e.kind] || 'bg-slate-100'}`}>{e.kind}</span></td>
+              <td className="px-2"><span className="font-medium text-slate-600">{e.title}</span><div className="text-[10px] text-slate-400">{e.detail}</div></td>
+              <td className={`px-2 text-right ${e.delta > 0 ? 'text-blue-700' : e.delta < 0 ? 'text-green-700' : 'text-slate-400'}`}>{e.delta > 0 ? '+' : e.delta < 0 ? '−' : ''}{inr(e.amount)}</td>
+              <td className={`px-2 text-right font-medium ${inHandCls(e.balance)}`}>{inr(e.balance)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -593,6 +787,8 @@ function AccountsTab({ canManage, isAccounts }: { canManage: boolean; isAccounts
   const fbtn = (t: string) => `rounded-full px-3 py-0.5 text-xs font-medium ${filter === t ? 'bg-navy text-white' : 'text-slate-500'}`;
 
   return (
+    <div className="space-y-4">
+    {isAccounts && <CashInHandPanel />}
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
         <div><div className="font-semibold text-navy">Approved trips — ready to pay</div><div className="text-xs text-slate-400">What has been signed off, and what still needs an invoice?</div></div>
@@ -627,6 +823,7 @@ function AccountsTab({ canManage, isAccounts }: { canManage: boolean; isAccounts
           ))}
         </div>
       )}
+    </div>
     </div>
   );
 }
@@ -1019,6 +1216,19 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
   const totalAdvance = advances.reduce((s, a) => s + (+a.amount || 0), 0);
   const joNos = jobOrders.map((j) => j.jo).filter(Boolean);
 
+  // Policy entitlement (TA/DA) — per-day Hotel (by city category) / Food / Other
+  // from the traveller's M-Level. City comes from the first project's site.
+  const planCity = jobOrders.map((j) => j.loc).find(Boolean) || '';
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', mLevel, planCity],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(mLevel)}&city=${encodeURIComponent(planCity)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number; modes: string[]; classText: string; modeNote: string | null },
+    enabled: !!mLevel,
+  });
+  const ent = entQ.data;
+  // Apply the per-day policy rates to every day (Hotel/Food/Other) — editable
+  // afterwards; never overwrites Travel (no fixed daily slab in the policy).
+  const applyPolicyRates = () => { if (!ent) return; setDayCosts((prev) => prev.map((d) => ({ ...d, hotel: ent.hotel, food: ent.food, other: ent.other }))); };
+
   function pickEmployee(id: string) {
     setEmployeeId(id);
     const e = employees.find((x) => x.id === id);
@@ -1105,6 +1315,18 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
 
       {/* Sanctioned amounts — per day */}
       <Section title="Sanctioned amounts" hint="Per-day sanction; total is the column sum" accent="#f59e0b">
+        {/* Policy entitlement (auto from M-Level + destination city). */}
+        {ent && (
+          <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-amber-800">Policy entitlement</span>
+              <span className="text-slate-600">M-Level {mLevel || '—'} · Grade {ent.group}{planCity ? ` · ${planCity.split(',')[0]} = Category ${ent.category}` : ' · (add a project/site for Hotel category)'}</span>
+              <span className="ml-auto text-slate-700">Hotel <b>{money0(ent.hotel)}</b> · Food <b>{money0(ent.food)}</b> · Other <b>{money0(ent.other)}</b> = <b className="text-navy">{money0(ent.hotel + ent.food + ent.other)}/day</b></span>
+              <button type="button" className="rounded-lg bg-navy px-3 py-1 font-medium text-white hover:opacity-90" onClick={applyPolicyRates}>↻ Apply policy rates</button>
+            </div>
+            <div className="mt-1 text-[11px] text-slate-500">Allowed travel: <b>{ent.modes.join(' / ')}</b> · Class: <b>{ent.classText}</b>{ent.modeNote ? ` · ${ent.modeNote}` : ''}. Hotel varies by city category; Food & Other are grade-based. Travel (local) is manual. Rates are editable.</div>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full min-w-[820px] text-sm">
             <thead className="text-left text-[10px] uppercase text-slate-400">
@@ -1139,22 +1361,7 @@ function NewSanctionTab({ onDone }: { onDone: () => void }) {
         </div>
       </Section>
 
-      {/* Advances */}
-      <Section title="Advance" hint="Optional — sanctioned money" accent="#f59e0b">
-        <button className="mb-2 text-sm font-medium text-navy hover:underline" onClick={() => setAdvances([...advances, { amount: 0 }])}>+ Add advance</button>
-        {advances.length === 0 ? <p className="text-sm text-slate-400">No advance requested.</p> : (
-          <div className="space-y-2">
-            {advances.map((a, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <input type="number" min={0} className="input w-36" value={a.amount || ''} onChange={(e) => setAdvances(advances.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} placeholder="Amount" />
-                <label className="cursor-pointer rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-navy hover:bg-slate-50">{a.fileUrl ? 'Replace' : 'Proof'}<input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const url = await uploadFile(f); setAdvances(advances.map((x, j) => j === i ? { ...x, fileUrl: url } : x)); } }} /></label>
-                {a.fileUrl && <a href={a.fileUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">View</a>}
-                <button className="text-xs text-rose-500" onClick={() => setAdvances(advances.filter((_, j) => j !== i))}>✕</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </Section>
+      {/* Advance is issued only from the New Advance module now — no manual entry here. */}
 
       {/* Footer */}
       <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow">
@@ -1215,7 +1422,19 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
   const [origin, setOrigin] = useState('');
   const [destination, setDest] = useState('');
   const [travelMode, setMode] = useState('');
-  const [requestedTicketUrl, setRequestedTicket] = useState<string>('');
+  // Which leg(s) the ticket is for.
+  const [tripType, setTripType] = useState<'going' | 'return' | 'both'>('both');
+  // Policy entitlement — allowed modes/class + per-day rate for this M-Level + destination.
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', mLevel, destination],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(mLevel)}&city=${encodeURIComponent(destination)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number; modes: string[]; classText: string; modeNote: string | null },
+    enabled: !!mLevel,
+  });
+  const ent = entQ.data;
+  const allowedModes = ent?.modes ?? null; // null → no M-Level yet, no restriction
+  // If the picked mode is no longer allowed for this grade, clear it.
+  useEffect(() => { if (allowedModes && travelMode && !allowedModes.includes(travelMode)) setMode(''); }, [allowedModes, travelMode]);
+  const [ticketUrls, setTicketUrls] = useState<string[]>([]);
   const [purpose, setPurpose] = useState('');
   const [remarks, setRemarks] = useState('');
   const [advances, setAdvances] = useState<Advance[]>([]);
@@ -1258,7 +1477,7 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
         employeeId: isNonCrystal ? null : (employeeId || null), employeeName, employeeEmail, employeePhone, mLevel,
         designation, department, grade, aadharNo, aadharFileUrl,
         isNonCrystal, fromDate, toDate, days, origin, destination, purpose, remarks,
-        travelMode, requestedTicketUrl, advances,
+        travelMode, tripType, requestedTicketUrls: ticketUrls, advances,
       };
       const plan = (await api.post('/travel', body)).data.plan;
       if (submit) await api.post(`/travel/${plan.id}/submit`);
@@ -1352,22 +1571,50 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
             <div>
               <label className="label">Mode of travel *</label>
               <div className="flex flex-wrap gap-2">
-                {MODES.map((m) => (
-                  <button key={m} type="button" onClick={() => setMode(m)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${travelMode === m ? 'border-navy bg-navy text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{MODE_ICON[m]} {m}</button>
+                {MODES.map((m) => {
+                  const blocked = !!allowedModes && !allowedModes.includes(m);
+                  return (
+                    <button key={m} type="button" disabled={blocked} onClick={() => setMode(m)} title={blocked ? `Not allowed for ${mLevel}` : ''} className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${blocked ? 'cursor-not-allowed border-slate-200 text-slate-300' : travelMode === m ? 'border-navy bg-navy text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{MODE_ICON[m]} {m}</button>
+                  );
+                })}
+              </div>
+              {/* Entitlement (auto from M-Level + destination). */}
+              {ent && (
+                <div className="mt-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-slate-600">
+                  <div><span className="font-semibold text-amber-800">Entitlement</span> · M-Level {mLevel} · Grade {ent.group} — allowed: <b>{ent.modes.join(' / ')}</b> · Class: <b>{ent.classText}</b>{ent.modeNote ? ` · ${ent.modeNote}` : ''}</div>
+                  {destination && <div className="mt-0.5">{destination} = Category {ent.category} → <b className="text-navy">₹{(ent.hotel + ent.food + ent.other).toLocaleString('en-IN')}/day</b> (Hotel {ent.hotel} + Food {ent.food} + Other {ent.other})</div>}
+                </div>
+              )}
+            </div>
+            {/* The requester's reference: which ticket should be booked. Goes to the approver. */}
+            {/* Trip type — which leg(s) the ticket is for. Flows to the approver. */}
+            <div>
+              <label className="label">Ticket for *</label>
+              <div className="flex flex-wrap gap-2">
+                {([['going', 'Going'], ['return', 'Return'], ['both', 'Going + Return']] as const).map(([v, lbl]) => (
+                  <button key={v} type="button" onClick={() => setTripType(v)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${tripType === v ? 'border-navy bg-navy text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{lbl}</button>
                 ))}
               </div>
             </div>
-            {/* The requester's reference: which ticket should be booked. Goes to the approver. */}
             <div>
-              <label className="label">Which ticket to book <span className="text-[10px] font-normal text-slate-400">(upload — shown to the approver)</span></label>
+              <label className="label">Which ticket to book <span className="text-[10px] font-normal text-slate-400">(upload one or more — shown to the approver)</span></label>
               <div className="rounded-xl border border-dashed border-slate-300 p-3">
-                <div className="text-[11px] text-slate-400">PDF or image · the ticket/option you want booked</div>
-                <div className="mt-2 flex items-center gap-2">
+                <div className="text-[11px] text-slate-400">PDF or image · the ticket(s)/option(s) you want booked</div>
+                {ticketUrls.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {ticketUrls.map((u, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <a href={u} target="_blank" rel="noreferrer" className="font-medium text-navy hover:underline">📎 {fileNameFromUrl(u)}</a>
+                        <button type="button" className="text-rose-400 hover:text-rose-600" onClick={() => setTicketUrls(ticketUrls.filter((_, j) => j !== i))}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-2">
                   <label className="cursor-pointer rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-navy hover:bg-slate-50">
-                    📎 {requestedTicketUrl ? 'Replace' : 'Choose file'}
-                    <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) setRequestedTicket(await uploadFile(f)); }} />
+                    📎 Add ticket
+                    <input type="file" className="hidden" multiple accept="image/*,.pdf" onChange={async (e) => { const files = Array.from(e.target.files || []); const urls: string[] = []; for (const f of files) urls.push(await uploadFile(f)); if (urls.length) setTicketUrls((prev) => [...prev, ...urls]); (e.currentTarget as HTMLInputElement).value = ''; }} />
                   </label>
-                  {requestedTicketUrl && <a href={requestedTicketUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-navy hover:underline">View ✓</a>}
                 </div>
               </div>
             </div>
@@ -1385,23 +1632,8 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
       </div>
 
       {/* Job orders + Remarks */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="Advance" hint="Optional — sanctioned money" accent="#f59e0b">
-          <button className="mb-2 text-sm font-medium text-navy hover:underline" onClick={() => setAdvances([...advances, { amount: 0 }])}>+ Add advance</button>
-          {advances.length === 0 ? <p className="text-sm text-slate-400">No advance requested.</p> : (
-            <div className="space-y-2">
-              {advances.map((a, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input type="number" min={0} className="input w-36" value={a.amount || ''} onChange={(e) => setAdvances(advances.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x))} placeholder="Amount" />
-                  <label className="cursor-pointer rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-navy hover:bg-slate-50">{a.fileUrl ? 'Replace' : 'Proof'}<input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const url = await uploadFile(f); setAdvances(advances.map((x, j) => j === i ? { ...x, fileUrl: url } : x)); } }} /></label>
-                  {a.fileUrl && <a href={a.fileUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">View</a>}
-                  <button className="text-xs text-rose-500" onClick={() => setAdvances(advances.filter((_, j) => j !== i))}>✕</button>
-                </div>
-              ))}
-              <div className="text-sm text-slate-500">Total: <span className="font-semibold">{inr(totalAdvance)}</span></div>
-            </div>
-          )}
-        </Section>
+      <div className="grid gap-4">
+        {/* Advance is issued only from the New Advance module now — no manual entry here. */}
         <Section title="Remarks" hint="Anything the approver should know" accent="#f59e0b">
           <textarea className="input min-h-[90px]" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Purpose of trip / reasons / anything the approver should know…" />
           <input className="input mt-2" value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="Short purpose (one line)" />
@@ -1501,7 +1733,7 @@ function PlanRow({ p, isReq, open, onToggle, canManage }: { p: any; isReq?: bool
         <td className="whitespace-nowrap text-slate-500">{fmtDate(p.toDate)}</td>
         <td className="text-right font-medium">{p.days}</td>
         <td><span className={`badge ${PLAN_PILL[p.status] || 'bg-slate-100'}`}>{planLabel(p.status)}</span></td>
-        <td className="text-right font-medium text-amber-700">{inr(p.totalAdvance || 0)}</td>
+        <td className="text-right font-medium text-amber-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}` : undefined}>{inr(p.effectiveAdvance ?? p.totalAdvance ?? 0)}{p.personAdvance ? <div className="text-[9px] font-normal text-indigo-500">incl. {inr(p.personAdvance)} New Advance</div> : null}</td>
         <td className="pr-4 text-right" onClick={(e) => e.stopPropagation()}>
           {/* Ticket requests → View only. Sanctioning plans → Active: Edit + Close; Closed: View. */}
           {isReq || !isPlan ? (
@@ -1681,23 +1913,13 @@ function PlanEditPanel({ plan, readOnly, onDone }: { plan: any; readOnly: boolea
           </tbody></table></div>
       </div>
 
-      {/* Advance payments */}
+      {/* Advance — issued only from the New Advance module now. Read-only reflection. */}
       <div className="mt-4">
-        <div className="mb-2 text-xs font-semibold uppercase text-slate-400">Advance payments</div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-xl border border-blue-200 bg-blue-50 p-3"><div className="text-xs text-blue-700">Sanctioned</div><div className="text-xl font-bold text-blue-800">{money0(grand)}</div><div className="text-[10px] text-blue-500">Budget approved for this trip</div></div>
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><div className="text-xs text-amber-700">Advances paid</div><div className="text-xl font-bold text-amber-800">{money0(advPaid)}</div><div className="text-[10px] text-amber-500">Money already handed to the technician</div></div>
-          <div className={`rounded-xl border p-3 ${grand - advPaid < 0 ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`}><div className="text-xs text-emerald-700">{grand - advPaid < 0 ? 'Over by' : 'Remaining'}</div><div className="text-xl font-bold text-emerald-800">{money0(Math.abs(grand - advPaid))}</div><div className="text-[10px] text-emerald-600">Still un-disbursed against the sanction</div></div>
-        </div>
-        <div className="mt-2 space-y-1">
-          {[0, 1, 2, 3, 4].map((i) => { const a = advances[i]; return (
-            <div key={i} className="flex items-center gap-2 border-t border-slate-100 py-1.5 text-sm">
-              <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] ${a?.amount ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-400'}`}>{i + 1}</span>
-              <span className="w-24 text-xs text-slate-500">Advance {i + 1}</span>
-              <input type="number" min={0} className="input h-8 w-32 text-xs" value={a?.amount || ''} onChange={(e) => { const next = [...advances]; while (next.length <= i) next.push({ amount: 0 }); next[i] = { ...next[i], amount: Number(e.target.value) }; setAdvances(next); }} placeholder="0" />
-              {a?.fileUrl ? (<><label className="cursor-pointer text-xs text-navy hover:underline">Replace<input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const url = await uploadFile(f); const next = [...advances]; next[i] = { ...next[i], fileUrl: url }; setAdvances(next); } }} /></label><a href={a.fileUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">↗ View</a></>) : (
-                <label className="cursor-pointer text-xs text-navy hover:underline">📎 Attach proof<input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const url = await uploadFile(f); const next = [...advances]; while (next.length <= i) next.push({ amount: 0 }); next[i] = { ...next[i], fileUrl: url }; setAdvances(next); } }} /></label>)}
-            </div>); })}
+        <div className="mb-2 text-xs font-semibold uppercase text-slate-400">Advance</div>
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm">
+          <span className="font-semibold text-indigo-800">💰 {money0(plan.personAdvance || 0)}</span>
+          <span className="ml-1 text-slate-600">held by {plan.employeeName || 'this traveller'} from New Advance</span>
+          <div className="mt-1 text-[11px] text-slate-400">{(plan.personAdvance || 0) > 0 ? 'This is the active advance issued to them in the New Advance module.' : 'No advance issued yet — raise one in New Advance if needed.'}</div>
         </div>
       </div>
 
@@ -1906,12 +2128,13 @@ function SettingsTab() {
   const empQ = useQuery({ queryKey: ['travel-employees'], queryFn: async () => (await api.get('/travel/employees')).data.employees as { id: string; name: string; email?: string }[] });
   const [reviewerId, setReviewerId] = useState('');
   const [finalId, setFinalId] = useState('');
+  const [stage3Id, setStage3Id] = useState('');
   const [saved, setSaved] = useState(false);
-  useEffect(() => { if (cfgQ.data) { setReviewerId(cfgQ.data.reviewerId || ''); setFinalId(cfgQ.data.finalId || ''); } }, [cfgQ.data]);
+  useEffect(() => { if (cfgQ.data) { setReviewerId(cfgQ.data.reviewerId || ''); setFinalId(cfgQ.data.finalId || ''); setStage3Id(cfgQ.data.stage3Id || ''); } }, [cfgQ.data]);
   const emps = empQ.data ?? [];
   const nameOf = (id: string) => emps.find((e) => e.id === id)?.name || null;
   const save = useMutation({
-    mutationFn: async () => api.put('/travel/config', { reviewerId: reviewerId || null, reviewerName: nameOf(reviewerId), finalId: finalId || null, finalName: nameOf(finalId) }),
+    mutationFn: async () => api.put('/travel/config', { reviewerId: reviewerId || null, reviewerName: nameOf(reviewerId), finalId: finalId || null, finalName: nameOf(finalId), stage3Id: stage3Id || null, stage3Name: nameOf(stage3Id) }),
     onSuccess: () => { setSaved(true); qc.invalidateQueries({ queryKey: ['travel-config'] }); setTimeout(() => setSaved(false), 2500); },
     onError: (e) => alert(errMsg(e)),
   });
@@ -1920,8 +2143,8 @@ function SettingsTab() {
   return (
     <div className="max-w-2xl rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-1 font-semibold text-navy">Expense review approvers</div>
-      <p className="mb-4 text-xs text-slate-500">Who signs the day-wise expense review. <span className="font-medium">Reviewer</span> signs first (Stage 1), then <span className="font-medium">Final</span> (Stage 2). When set, only that person (or an admin) can sign that stage. Leave blank to let anyone with travel-edit sign it.</p>
-      <div className="grid gap-4 sm:grid-cols-2">
+      <p className="mb-4 text-xs text-slate-500">Who signs the day-wise expense review. <span className="font-medium">Reviewer</span> (Stage 1) → <span className="font-medium">Final</span> (Stage 2) → optional <span className="font-medium">Final approval</span> (Stage 3, e.g. Sir — gets an email). When set, only that person (or an admin) can sign that stage. Leave blank to let anyone with travel-edit sign it. Stage 3 blank = 2-stage flow (Stage 2 is final).</p>
+      <div className="grid gap-4 sm:grid-cols-3">
         <div>
           <label className="label">Reviewer (Stage 1)</label>
           <select className="input" value={reviewerId} onChange={(e) => setReviewerId(e.target.value)}>
@@ -1935,6 +2158,14 @@ function SettingsTab() {
             <option value="">— Anyone with travel edit —</option>
             {emps.map((e) => <option key={e.id} value={e.id}>{e.name}{e.email ? ` · ${e.email}` : ''}</option>)}
           </select>
+        </div>
+        <div>
+          <label className="label">Final approval — Sir (Stage 3)</label>
+          <select className="input" value={stage3Id} onChange={(e) => setStage3Id(e.target.value)}>
+            <option value="">— None (2-stage) —</option>
+            {emps.map((e) => <option key={e.id} value={e.id}>{e.name}{e.email ? ` · ${e.email}` : ''}</option>)}
+          </select>
+          <p className="mt-1 text-[11px] text-slate-400">Gets an email when it reaches their turn.</p>
         </div>
       </div>
       <div className="mt-4 flex items-center gap-3">

@@ -29,7 +29,9 @@ export default function AppShell() {
             <nav className="hidden items-center gap-1 text-sm md:flex">
               <NavLink to="/" end className={navCls}>Projects</NavLink>
               {canView('vendors') && <NavLink to="/vendors" className={navCls}>Vendors</NavLink>}
-              {canView('pettycash') && <NavLink to="/petty-cash" className={navCls}>Petty Cash</NavLink>}
+              {/* New Advance now lives as the first tab inside Travel. Keep a
+                  standalone link only for users who can't reach it via Travel. */}
+              {canView('pettycash') && !canView('travel') && <NavLink to="/petty-cash" className={navCls}>New Advance</NavLink>}
               {canView('travel') && <NavLink to="/travel" className={navCls}>Travel</NavLink>}
               {/* Approvals is a personal queue — always reachable so designated
                   approvers (who may lack the page grant) can act on their items. */}

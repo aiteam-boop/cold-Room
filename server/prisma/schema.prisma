@@ -71,7 +71,8 @@ model Project {
   name                 String
   clientName           String?
   siteLocation         String?
-  siteSupervisor       String?         // site supervisor / in-charge name
+  siteSupervisor       String?         // site supervisor / in-charge name (display + legacy)
+  siteSupervisorId     String?         // the User picked as site supervisor — drives the weekly pending-deposit email
   // The client's PO number this project/delivery is booked against — printed on the
   // packing list (Amisha interview 64). `clientPoNumber` is the LEGACY single value
   // (kept for old projects + fallback); `clientPos` is the newer list of multiple
@@ -1544,7 +1545,8 @@ model PettyCashEntry {
   // Expense fields
   category       String?                         // ledger head / expense category
   amount         Float     @default(0)           // always positive; `type` gives the sign
-  technician     String?                         // "for whom"
+  technician     String?                         // "for whom" (display name)
+  personId       String?                         // linked User the advance/top-up is for — drives the per-person ledger + (later) advance settlement
   paidTo         String?                         // vendor / person
   projectId      String?                         // optional project tag
   jobOrder       String?                         // free-text JO / client
@@ -1552,7 +1554,8 @@ model PettyCashEntry {
 
   // Top-up fields
   reason         String?                         // top-up reason (e.g. "Float")
-  utrNumber      String?                         // top-up bank ref
+  utrNumber      String?                         // top-up bank ref; also the raised-advance UTR pulled back from the Advance FMS sheet
+  vrNo           String?                         // raised-advance VR No. pulled back from the Advance FMS sheet
 
   // Files (expense): supporting invoice, budget-approval copy, payment screenshot
   invoiceUrl     String?
@@ -1563,7 +1566,12 @@ model PettyCashEntry {
   documents      String?
 
   // Lifecycle
-  status         String    @default("RECORDED")  // RECORDED | SUBMITTED | CONFIRMED | REJECTED | VOID
+  status         String    @default("RECORDED")  // RECORDED | SUBMITTED | CONFIRMED | REJECTED | VOID | PENDING_APPROVAL
+  // Raised advances go through the Approval-Chains engine (docType 'ADVANCE') — the
+  // no-login public Approval Form is opened via this token; approvalStatus mirrors
+  // the chain (APPROVED | ON_HOLD | null=pending) for quick display.
+  approvalToken  String?
+  approvalStatus String?
   sanctionedAmount Float?                         // Accounts may sanction a different amount
   decisionRemark String?
   decidedBy      String?
@@ -1614,6 +1622,8 @@ model TravelConfig {
   reviewerName  String?
   finalId       String?                          // User.id — Stage 2 (Final)
   finalName     String?
+  stage3Id      String?                          // User.id — Stage 3 (Final approval / Sir) — gets an email
+  stage3Name    String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -1643,9 +1653,14 @@ model TravelPlan {
 
   // Itinerary / ticket
   travelMode    String?                         // Flight | Train | Bus | Taxi
-  // The requester's "which ticket to book" reference (uploaded on the request) —
-  // shown to the approver so the booker knows what to book.
+  // Which leg(s) the request is for: 'going' | 'return' | 'both'.
+  tripType      String?
+  // The requester's "which ticket to book" reference(s) (uploaded on the request)
+  // — shown to the approver so the booker knows what to book. `requestedTicketUrl`
+  // is the legacy single value (kept for old records + first file); `requestedTicketUrls`
+  // is the newer list so the requester can attach several tickets/options.
   requestedTicketUrl String?
+  requestedTicketUrls Json?
   ticketPrice   Float?
   ticketFileUrl String?                         // the booked ticket document (uploaded by the ticket-booker approver)
   paymentProofUrl String?                       // proof of how the ticket was paid for
@@ -1713,6 +1728,7 @@ model TravelPlan {
   // { status, by, at, comment, days:[{day,travel,food,hotel,other,misc,remark}] }.
   techStage1       String?
   techStage2       String?
+  techStage3       String?      // Stage 3 (Final approval / Sir) — same JSON shape as stage 1/2
   // Accounts finalisation (after final approval): invoice/indent/GL/tax/payment.
   accountsData     String?      // JSON { glCode, jobType, indentNo, issueNoteNo, poLink, invoiceNo, invoiceAmount, costCenter, gstPct, gstAmt, tdsPct, tdsAmt, paymentMode, bankRef, paymentDate, notes }
   accountsFinalized Boolean     @default(false)

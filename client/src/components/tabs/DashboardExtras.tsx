@@ -54,6 +54,9 @@ export default function DashboardExtras({ projectId, onOpenGantt }: { projectId:
         </div>
       </div>
 
+      {/* Who's on site — from travel plans booked against this project. */}
+      <SitePresenceSection projectId={projectId} />
+
       {/* Room-wise progress */}
       {roomList.length > 0 && (
         <div>
@@ -190,6 +193,44 @@ function ProcPipelineSection({ projectId }: { projectId: string }) {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+// Who is on this site and when — derived from travel plans booked against the
+// project. Grouped: on site now, upcoming, and recent past.
+interface Presence { planNumber: string; employeeName: string | null; fromDate: string; toDate: string; destination: string | null; days: number; status: string }
+function SitePresenceSection({ projectId }: { projectId: string }) {
+  const q = useQuery({ queryKey: ['site-presence', projectId], queryFn: async () => (await api.get(`/projects/${projectId}/site-presence`)).data.presence as Presence[] });
+  const rows = q.data ?? [];
+  if (rows.length === 0) return null;
+  const startOfDay = (d: string) => new Date(new Date(d).toDateString()).getTime();
+  const today = new Date(new Date().toDateString()).getTime();
+  const bucket = (p: Presence) => { const f = startOfDay(p.fromDate); const t = startOfDay(p.toDate); return t < today ? 'past' : f > today ? 'upcoming' : 'now'; };
+  const groups: Record<string, Presence[]> = { now: [], upcoming: [], past: [] };
+  for (const p of rows) groups[bucket(p)].push(p);
+  const range = (p: Presence) => { const f = fmtDate(p.fromDate); const t = fmtDate(p.toDate); return f === t ? f : `${f} → ${t}`; };
+  const Row = ({ p, dim }: { p: Presence; dim?: boolean }) => (
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border px-3 py-2 text-sm ${dim ? 'border-slate-200 bg-white' : 'border-emerald-200 bg-emerald-50'}`}>
+      <span className="font-semibold text-navy">{p.employeeName || '—'}</span>
+      {p.destination && <span className="text-slate-500">📍 {p.destination}</span>}
+      <span className="ml-auto text-xs text-slate-500">{range(p)} <span className="text-slate-400">· {p.days}d</span></span>
+    </div>
+  );
+  const Group = ({ title, list, dim, accent }: { title: string; list: Presence[]; dim?: boolean; accent: string }) => list.length === 0 ? null : (
+    <div>
+      <div className={`mb-1 text-[11px] font-semibold uppercase ${accent}`}>{title} ({list.length})</div>
+      <div className="space-y-1.5">{list.map((p) => <Row key={p.planNumber} p={p} dim={dim} />)}</div>
+    </div>
+  );
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-slate-600">Who's on site <span className="font-normal text-slate-400">· from travel plans booked to this project</span></div>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Group title="On site now" list={groups.now} accent="text-emerald-600" />
+        <Group title="Upcoming" list={groups.upcoming} dim accent="text-blue-600" />
+        <Group title="Recent" list={groups.past.slice(0, 8)} dim accent="text-slate-400" />
+      </div>
     </div>
   );
 }

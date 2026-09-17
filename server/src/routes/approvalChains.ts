@@ -13,7 +13,7 @@ import { fixedChainFor, resolveAutoChain, type ChainDocType } from '../services/
 const router = Router();
 router.use(requireAuth);
 
-const DOC_TYPES = ['PO', 'WO', 'TO', 'GRN', 'PAYMENT', 'TRAVEL', 'TRAVEL_EXPENSE'] as const;
+const DOC_TYPES = ['PO', 'WO', 'TO', 'GRN', 'PAYMENT', 'TRAVEL', 'TRAVEL_EXPENSE', 'ADVANCE'] as const;
 
 // GET /api/approval-chains?docType=PO[&projectId=] — the configured chain.
 router.get('/', asyncHandler(async (req, res) => {

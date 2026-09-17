@@ -24,6 +24,7 @@ interface ProjectCard {
   effectiveStartDate?: string | null; // manual start, else latest of PO/drawing/advance
   startSource?: string | null;        // 'Manual' | 'PO received' | 'Drawing approved' | 'First advance'
   siteSupervisor?: string | null;
+  siteSupervisorId?: string | null;
   targetCompletionDate?: string;
   completionPct: number;
   estimatedCompletionDate?: string | null;
@@ -288,11 +289,15 @@ function ProjectGrid({ projects }: { projects: ProjectCard[] }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', siteSupervisor: '', clientPoNumber: '', clientGstin: '', startDate: '', targetCompletionDate: '', orderReceiveDate: '', advanceReceiveDate: '' });
+  const [form, setForm] = useState({ name: '', clientName: '', siteLocation: '', siteSupervisor: '', siteSupervisorId: '', clientPoNumber: '', clientGstin: '', startDate: '', targetCompletionDate: '', orderReceiveDate: '', advanceReceiveDate: '' });
   const [err, setErr] = useState('');
+  const { data: supervisors } = useQuery({
+    queryKey: ['site-supervisors'],
+    queryFn: async () => (await api.get('/projects/site-supervisors')).data.users as { id: string; name: string; email: string | null }[],
+  });
   const m = useMutation({
     mutationFn: async () => {
-      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, siteSupervisor: form.siteSupervisor || null, clientPoNumber: form.clientPoNumber, clientGstin: form.clientGstin || null };
+      const payload: Record<string, unknown> = { name: form.name, clientName: form.clientName, siteLocation: form.siteLocation, siteSupervisor: form.siteSupervisor || null, siteSupervisorId: form.siteSupervisorId || null, clientPoNumber: form.clientPoNumber, clientGstin: form.clientGstin || null };
       if (form.startDate) payload.startDate = form.startDate;
       if (form.targetCompletionDate) payload.targetCompletionDate = form.targetCompletionDate;
       if (form.orderReceiveDate) payload.orderReceiveDate = form.orderReceiveDate;
@@ -311,7 +316,17 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={(e) => setForm({ ...form, clientName: e.target.value })} /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} /></div>
         </div>
-        <div><label className="label">Site supervisor</label><input className="input" value={form.siteSupervisor} onChange={(e) => setForm({ ...form, siteSupervisor: e.target.value })} placeholder="Site in-charge / supervisor name" /></div>
+        <div>
+          <label className="label">Site supervisor</label>
+          <select className="input" value={form.siteSupervisorId} onChange={(e) => {
+            const u = supervisors?.find((s) => s.id === e.target.value);
+            setForm({ ...form, siteSupervisorId: e.target.value, siteSupervisor: u?.name ?? '' });
+          }}>
+            <option value="">— Not set —</option>
+            {supervisors?.map((s) => <option key={s.id} value={s.id}>{s.name}{s.email ? ` (${s.email})` : ''}</option>)}
+          </select>
+          <p className="mt-1 text-[11px] text-slate-400">Responsible for deposit recovery — gets the weekly pending-deposit email.</p>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
           <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={(e) => setForm({ ...form, clientGstin: e.target.value })} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>

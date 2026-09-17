@@ -104,6 +104,7 @@ router.get(
           clientName: p.clientName,
           siteLocation: p.siteLocation,
           siteSupervisor: p.siteSupervisor ?? null,
+          siteSupervisorId: p.siteSupervisorId ?? null,
           clientPoNumber: p.clientPoNumber,
           clientPos: p.clientPos ?? null,
           clientGstin: p.clientGstin ?? null,
@@ -140,6 +141,24 @@ router.get(
   })
 );
 
+// GET /api/projects/site-supervisors — active users for the project-form
+// "Site supervisor" dropdown. The picked user's id is stored on the project so the
+// weekly pending-deposit email can reach them. Any Admin/CEO (who alone can edit a
+// project) may read this small name/email list.
+router.get(
+  '/site-supervisors',
+  asyncHandler(async (req, res) => {
+    const canEditProject = isAdmin(req.account!.role) || req.account!.role === 'CEO';
+    if (!canEditProject) throw forbidden('Only an Admin or CEO can edit a project.');
+    const users = await prisma.user.findMany({
+      where: { active: true },
+      select: { id: true, name: true, email: true },
+      orderBy: { name: 'asc' },
+    });
+    res.json({ users });
+  })
+);
+
 // One client PO the project is booked against, with an optional uploaded proof.
 const clientPoSchema = z.object({ number: z.string().trim().min(1).max(120), proofUrl: z.string().max(1000).nullable().optional() });
 const createSchema = z.object({
@@ -147,6 +166,7 @@ const createSchema = z.object({
   clientName: z.string().optional(),
   siteLocation: z.string().optional(),
   siteSupervisor: z.string().trim().max(120).nullable().optional(),
+  siteSupervisorId: z.string().nullable().optional(),
   clientPoNumber: z.string().optional(),
   clientPos: z.array(clientPoSchema).optional(),
   clientGstin: z.string().trim().max(20).nullable().optional(),
@@ -168,6 +188,7 @@ router.post(
         clientName: body.clientName,
         siteLocation: body.siteLocation,
         siteSupervisor: body.siteSupervisor ?? null,
+        siteSupervisorId: body.siteSupervisorId ?? null,
         // Legacy single field stays in sync with the first client PO for consumers
         // (packing-list default) that still read it.
         clientPoNumber: body.clientPos?.length ? body.clientPos[0].number : body.clientPoNumber,
@@ -208,6 +229,22 @@ router.get(
   })
 );
 
+// GET /api/projects/:projectId/site-presence — who is on this site and when,
+// derived from the travel plans booked against this project. Read-only; visible
+// to any project member (dashboard panel "Who's on site").
+router.get(
+  '/:projectId/site-presence',
+  requireProjectMember,
+  asyncHandler(async (req, res) => {
+    const plans = await prisma.travelPlan.findMany({
+      where: { projectId: req.params.projectId, status: { not: 'DRAFT' } },
+      select: { planNumber: true, employeeName: true, fromDate: true, toDate: true, destination: true, days: true, status: true },
+      orderBy: { fromDate: 'desc' },
+    });
+    res.json({ presence: plans });
+  })
+);
+
 const updateSchema = createSchema.partial().extend({
   status: z.enum(PROJECT_STATUSES).optional(),
   // On edit these dates must also accept `null` so the owner can CLEAR a date
@@ -242,6 +279,7 @@ router.patch(
         ...(body.clientName !== undefined && { clientName: body.clientName }),
         ...(body.siteLocation !== undefined && { siteLocation: body.siteLocation }),
         ...(body.siteSupervisor !== undefined && { siteSupervisor: body.siteSupervisor }),
+        ...(body.siteSupervisorId !== undefined && { siteSupervisorId: body.siteSupervisorId }),
         ...(body.clientPos !== undefined && { clientPos: body.clientPos, clientPoNumber: body.clientPos?.[0]?.number ?? null }),
         ...(body.clientPos === undefined && body.clientPoNumber !== undefined && { clientPoNumber: body.clientPoNumber }),
         ...(body.clientGstin !== undefined && { clientGstin: body.clientGstin }),

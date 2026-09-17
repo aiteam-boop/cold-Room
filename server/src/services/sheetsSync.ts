@@ -183,7 +183,7 @@ function toCell(v: unknown): string | number | boolean {
 
 // ── Tab management ──────────────────────────────────────────────────────────
 
-async function ensureTabs(tabNames: string[]): Promise<void> {
+export async function ensureTabs(tabNames: string[]): Promise<void> {
   const sheets = getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
@@ -629,16 +629,95 @@ export async function exportPaymentAccountFms(): Promise<number> {
   return rows.length;
 }
 
+// ── "Advance Account FMS" — the accounts-facing RAISED-ADVANCE pipeline ──────
+// One row per approved advance (New Advance module). Same idea as the payment
+// tab: A–F carry the advance's own data, G–O are left BLANK (so the FMS team's
+// A/C-sheet layout lines up), then P = VR No. and Q = UTR — both owned by the FMS
+// team's fetch-from-sheet formulas, so our export PRESERVES those two columns and
+// never overwrites them. R = 'Advance Ref' (the entry id) is the hidden key the
+// reverse-sync maps a row back by. Timestamp (A) is a real datetime, like the
+// payment tab. Nothing here touches the payment-FMS export.
+export const ADVANCE_FMS_TAB = 'Advance Account FMS';
+const ADV_FMS_HEADERS = [
+  'Timestamp', 'Petty #', 'Person', 'Amount', 'Date', 'Site / Project', 'Note', // A–G
+  '', '', '', '', '', '', '', '',                                                 // H–O (blank spacers)
+  'VR No.', 'UTR / Payment Ref', 'Advance Ref',                                   // P, Q, R (VR still column P)
+];
+
+// Pull VR/UTR the FMS team entered against an advance row back into the app:
+// an APPROVED (account-pending) advance becomes CONFIRMED once its UTR lands.
+async function importAdvanceUtrsFromSheet(): Promise<number> {
+  if (!sheetsEnabled()) return 0;
+  let vals: string[][] = [];
+  try {
+    const resp = await getSheetsClient().spreadsheets.values.get({ spreadsheetId: getSpreadsheetId(), range: `${ADVANCE_FMS_TAB}!A1:Z2000` });
+    vals = (resp.data.values as string[][]) || [];
+  } catch { return 0; }
+  if (vals.length < 2) return 0;
+  const H = vals[0];
+  const iRef = H.indexOf('Advance Ref'); const iUtr = H.indexOf('UTR / Payment Ref'); const iVr = H.indexOf('VR No.');
+  if (iRef < 0 || iUtr < 0) return 0;
+  const db = await getDb();
+  const col = db.collection('PettyCashEntry');
+  // A cell is a real value only if it's non-empty and not a spreadsheet error/"loading" formula.
+  const bad = (s: string) => !s || s === '—' || /^#(REF|N\/A|VALUE|ERROR|NAME|DIV|NULL|NUM|GETTING_DATA)/i.test(s) || /^Loading/i.test(s);
+  let done = 0;
+  for (const row of vals.slice(1)) {
+    const ref = (row[iRef] || '').trim();
+    if (!ref) continue;
+    const utrRaw = (row[iUtr] || '').trim();
+    const vrRaw = iVr >= 0 ? (row[iVr] || '').trim() : '';
+    const utr = bad(utrRaw) ? '' : utrRaw;
+    const vr = bad(vrRaw) ? '' : vrRaw;
+    if (!utr && !vr) continue;                 // nothing to pull
+    const e = await col.findOne({ _id: ref } as never);
+    if (!e || !['APPROVED', 'CONFIRMED'].includes(e.status)) continue;
+    const set: Record<string, unknown> = {};
+    if (vr && e.vrNo !== vr) set.vrNo = vr;                       // store VR as soon as it lands (even without UTR)
+    if (utr && e.utrNumber !== utr) set.utrNumber = utr;          // store UTR
+    if (utr && e.status === 'APPROVED') set.status = 'CONFIRMED'; // UTR confirms an approved-but-unpaid advance
+    if (Object.keys(set).length) { set.updatedAt = new Date(); await col.updateOne({ _id: e._id } as never, { $set: set }); done++; }
+  }
+  return done;
+}
+
+export async function exportAdvanceAccountFms(): Promise<number> {
+  // Consume any VR/UTR the FMS team entered before we overwrite the tab.
+  try { await importAdvanceUtrsFromSheet(); } catch { /* best-effort */ }
+  if (!sheetsEnabled()) return 0;
+  const db = await getDb();
+  const [entries, projects] = await Promise.all([
+    db.collection('PettyCashEntry').find({ category: 'Advance to Technician', status: { $in: ['APPROVED', 'CONFIRMED'] } }).sort({ date: 1 }).toArray(),
+    db.collection('Project').find({}).project({ name: 1 }).toArray(),
+  ]);
+  const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
+  const rows: (string | number)[][] = entries.map((e) => {
+    const amt = Number(e.sanctionedAmount ?? e.amount) || 0;
+    const site = e.projectId ? (projName.get(String(e.projectId)) || '') : '';
+    return [
+      istSerial(e.date || e.createdAt), (e.entryNumber as string) || '', (e.technician as string) || '', amt, dmy(e.date), site, (e.description as string) || '',
+      '', '', '', '', '', '', '', '',        // H–O blank
+      '', '', String(e._id),                 // P VR (preserved), Q UTR (preserved), R ref
+    ];
+  });
+  rows.sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0));
+  const preserve = ['VR No.', 'UTR / Payment Ref'].map((h) => ADV_FMS_HEADERS.indexOf(h)).filter((i) => i >= 0);
+  await writeTabPreservingCols(ADVANCE_FMS_TAB, ADV_FMS_HEADERS, rows as (string | number | boolean)[][], preserve);
+  await formatTimestampColumn(ADVANCE_FMS_TAB);
+  return rows.length;
+}
+
 /** Full export of every configured entity. */
 export async function exportAll(): Promise<ExportResult> {
   if (!sheetsEnabled()) throw new Error('Sheets sync disabled (missing env)');
-  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB]);
+  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB, ADVANCE_FMS_TAB]);
   const result: ExportResult = [];
   for (const cfg of ENTITIES) {
     const count = await exportEntity(cfg);
     result.push({ tab: cfg.tab, rows: count });
   }
   result.push({ tab: FMS_TAB, rows: await exportPaymentAccountFms() });
+  result.push({ tab: ADVANCE_FMS_TAB, rows: await exportAdvanceAccountFms() });
   return result;
 }
 
@@ -686,7 +765,7 @@ export function startFmsReverseSyncPoll(): void {
     if (fmsPolling) return;
     fmsPolling = true;
     void exportPaymentAccountFms()
-      .then((n) => { if (n >= 0) { /* imported + refreshed */ } })
+      .then(() => exportAdvanceAccountFms())   // pull advance VR/UTR + refresh that tab too
       .catch((e) => console.error('[sheetsSync] FMS reverse-sync poll failed:', (e as Error).message))
       .finally(() => { fmsPolling = false; });
   }, everyMs);

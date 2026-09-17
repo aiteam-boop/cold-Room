@@ -37,7 +37,7 @@ import { readFromDb } from '../lib/fileStore';
 import { deliveryInfo } from '../services/delivery';
 import { chainForAmount, validateChain, type MatrixDocType } from '../services/approvalMatrix';
 import { resolveAutoChain } from '../services/fixedChain';
-import { buildPaymentSteps, ensurePaymentSteps, notifyCurrentPaymentStep } from '../services/paymentChain';
+import { buildPaymentSteps, ensurePaymentSteps, notifyCurrentPaymentStep, notifyPaymentPaid } from '../services/paymentChain';
 import { buildInvoiceSteps, ensureInvoiceSteps, notifyCurrentInvoiceStep } from '../services/invoiceChain';
 import {
   buildChain, recordDecision, remindCurrent, finalizeApproval, markDocOnHold,
@@ -1504,6 +1504,11 @@ router.post('/grns/:grnId/mark-paid', requireProjectMember, requireSection('canM
   });
   await payGrnMilestone(grn, b.utrNumber, paidAt);
   await audit({ userId: req.user!.sub, projectId: req.params.projectId, action: 'GRN_MARK_PAID', entity: 'GRN', entityId: grn.id, details: { utr: b.utrNumber } });
+  // Notify the raiser that the payment is done (term · amount · UTR · VR). VR is
+  // usually assigned later on the FMS sheet — include it if we already have it.
+  const vdoc = await prisma.procurementDoc.findUnique({ where: { id: grn.docId }, select: { sheetPayments: true } }).catch(() => null);
+  const vr = (parseJson(vdoc?.sheetPayments, []) as any[]).find((x) => x?.utr === b.utrNumber)?.vrNo ?? null;
+  await notifyPaymentPaid(grn.id, b.utrNumber, paidAt, vr);
   res.json({ grn: updated });
 }));
 
