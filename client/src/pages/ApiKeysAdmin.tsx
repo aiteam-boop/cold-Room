@@ -27,6 +27,7 @@ const fmtDay = (s: string | null) => (s ? new Date(s).toLocaleDateString('en-GB'
 const REALM_COLOR: Record<string, string> = {
   projects: 'bg-blue-100 text-blue-700', procurement: 'bg-indigo-100 text-indigo-700',
   timeline: 'bg-teal-100 text-teal-700', finance: 'bg-amber-100 text-amber-700', vendors: 'bg-rose-100 text-rose-700',
+  approvals: 'bg-orange-100 text-orange-700', travel: 'bg-emerald-100 text-emerald-700',
 };
 const scopeColor = (s: string) => (s === 'read:core' ? 'bg-slate-100 text-slate-600' : 'bg-violet-100 text-violet-700');
 
@@ -75,6 +76,7 @@ export default function ApiKeysAdmin() {
   const [created, setCreated] = useState<{ name: string; key: string; rotated?: boolean } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [usageFor, setUsageFor] = useState<KeyRow | null>(null);
+  const [editFor, setEditFor] = useState<KeyRow | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const metaQ = useQuery({ queryKey: ['api-keys-meta'], queryFn: async () => (await api.get('/api-keys/meta')).data as Meta });
@@ -215,6 +217,7 @@ export default function ApiKeysAdmin() {
                   <td className="px-3 py-2">
                     <div className="flex flex-col gap-1 text-xs">
                       <button className="text-left font-medium text-slate-500 hover:text-navy hover:underline" onClick={() => setUsageFor(k)}>📈 Usage</button>
+                      {k.active && <button className="text-left font-medium text-navy hover:underline" onClick={() => setEditFor(k)}>🔑 Edit</button>}
                       {k.active && <button className="text-left font-medium text-amber-600 hover:underline"
                         onClick={() => confirm(`Rotate “${k.name}”? The current secret stops working immediately and you get a new one.`) && rotate.mutate(k.id)}>♻ Rotate</button>}
                       {k.active
@@ -275,37 +278,42 @@ export default function ApiKeysAdmin() {
       </div>
 
       {showCreate && <CreateModal meta={meta} onClose={() => setShowCreate(false)} onCreated={(c) => { setCreated(c); setShowCreate(false); qc.invalidateQueries({ queryKey: ['api-keys'] }); }} />}
+      {editFor && <CreateModal meta={meta} editKey={editFor} onClose={() => setEditFor(null)} onCreated={() => {}} onSaved={() => { setEditFor(null); qc.invalidateQueries({ queryKey: ['api-keys'] }); }} />}
       {usageFor && <UsageModal keyRow={usageFor} onClose={() => setUsageFor(null)} />}
     </div>
   );
 }
 
 // ── Create modal ──────────────────────────────────────────────────────────────
-function CreateModal({ meta, onClose, onCreated }: { meta: Meta; onClose: () => void; onCreated: (c: { name: string; key: string }) => void }) {
-  const [name, setName] = useState('');
-  const [mode, setMode] = useState<'live' | 'test'>('live');
-  const [realms, setRealms] = useState<string[]>([]);
-  const [scopes, setScopes] = useState<string[]>(['read:core']);
-  const [rate, setRate] = useState('600');
-  const [expires, setExpires] = useState('');
-  const [ips, setIps] = useState('');
+function CreateModal({ meta, onClose, onCreated, editKey, onSaved }: { meta: Meta; onClose: () => void; onCreated: (c: { name: string; key: string }) => void; editKey?: KeyRow; onSaved?: () => void }) {
+  const isEdit = !!editKey;
+  const [name, setName] = useState(editKey?.name ?? '');
+  const [mode, setMode] = useState<'live' | 'test'>((editKey?.mode as 'live' | 'test') ?? 'live');
+  const [realms, setRealms] = useState<string[]>(editKey?.realms ?? []);
+  const [scopes, setScopes] = useState<string[]>(editKey?.scopes ?? ['read:core']);
+  const [rate, setRate] = useState(String(editKey?.rateLimitPerMin ?? 600));
+  const [expires, setExpires] = useState(editKey?.expiresAt ? editKey.expiresAt.slice(0, 10) : '');
+  const [ips, setIps] = useState((editKey?.ipAllowlist ?? []).join('\n'));
   const [err, setErr] = useState('');
 
   const toggle = (arr: string[], set: (v: string[]) => void, v: string) =>
     set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
 
+  // Create (POST) mints a new secret; Edit (PATCH) changes ONLY what the SAME key
+  // can reach — the secret is never touched.
   const create = useMutation({
     mutationFn: async () => {
       const ipAllowlist = ips.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
       const body = {
-        name: name.trim(), mode, realms, scopes,
+        name: name.trim(), realms, scopes,
         rateLimitPerMin: Number(rate) || 600,
         expiresAt: expires ? new Date(expires + 'T23:59:59').toISOString() : null,
         ipAllowlist,
       };
-      return (await api.post('/api-keys', body)).data as { name: string; key: string };
+      if (isEdit) { await api.patch(`/api-keys/${editKey!.id}`, body); return null; }
+      return (await api.post('/api-keys', { ...body, mode })).data as { name: string; key: string };
     },
-    onSuccess: (d) => onCreated(d),
+    onSuccess: (d) => { if (isEdit) onSaved?.(); else onCreated(d as { name: string; key: string }); },
     onError: (e) => setErr(errMsg(e)),
   });
 
@@ -320,11 +328,16 @@ function CreateModal({ meta, onClose, onCreated }: { meta: Meta; onClose: () => 
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgba(5,35,121,0.34)] p-4">
       <div className="my-8 w-full max-w-2xl rounded-lg bg-white shadow-lg">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
-          <h2 className="text-base font-bold text-navy">Create an API key</h2>
+          <h2 className="text-base font-bold text-navy">{isEdit ? `Edit permissions — ${editKey!.name}` : 'Create an API key'}</h2>
           <button className="text-slate-400 hover:text-slate-700" onClick={onClose}>✕</button>
         </div>
 
         <div className="max-h-[70vh] space-y-5 overflow-y-auto px-5 py-4">
+          {isEdit && (
+            <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              The key’s secret is <b>not</b> changed — the same <code className="font-mono">{editKey!.prefix}…</code> keeps working. You’re only changing what it can reach. To let this key fetch every realm, tick them all below.
+            </div>
+          )}
           {/* Name */}
           <div>
             <label className="label">Name</label>
@@ -401,16 +414,18 @@ function CreateModal({ meta, onClose, onCreated }: { meta: Meta; onClose: () => 
             <p className="mt-1 text-xs text-slate-400">Leave empty to allow any IP. A call from outside the list is rejected with <code className="font-mono">ip_not_allowed (403)</code>. Plain IPv4 and CIDR supported.</p>
           </div>
 
-          {/* Mode */}
-          <div>
-            <label className="label">Mode</label>
-            <div className="flex gap-2">
-              {(['live', 'test'] as const).map((m) => (
-                <button key={m} type="button" onClick={() => setMode(m)}
-                  className={`rounded-lg border px-4 py-1.5 font-mono text-sm ${mode === m ? 'border-navy bg-navy/5 text-navy' : 'border-slate-200 text-slate-500'}`}>crmk_{m}_…</button>
-              ))}
+          {/* Mode — only on create; a key's mode is fixed once minted (it's in the prefix). */}
+          {!isEdit && (
+            <div>
+              <label className="label">Mode</label>
+              <div className="flex gap-2">
+                {(['live', 'test'] as const).map((m) => (
+                  <button key={m} type="button" onClick={() => setMode(m)}
+                    className={`rounded-lg border px-4 py-1.5 font-mono text-sm ${mode === m ? 'border-navy bg-navy/5 text-navy' : 'border-slate-200 text-slate-500'}`}>crmk_{m}_…</button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {err && <div className="rounded-lg bg-rose-50 px-3 py-2 text-sm font-medium text-rose-600">{err}</div>}
         </div>
@@ -418,7 +433,7 @@ function CreateModal({ meta, onClose, onCreated }: { meta: Meta; onClose: () => 
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-3">
           <button className="btn-outline" onClick={onClose}>Cancel</button>
           <button className="btn-primary" disabled={!canSubmit} onClick={() => { setErr(''); create.mutate(); }}>
-            {create.isPending ? 'Creating…' : 'Create key'}
+            {create.isPending ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save permissions' : 'Create key')}
           </button>
         </div>
       </div>

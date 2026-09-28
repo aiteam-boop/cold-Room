@@ -48,6 +48,8 @@ import invoiceApprovalRoutes from './routes/invoiceApproval';
 import travelRoutes from './routes/travel';
 import travelApprovalRoutes from './routes/travelApproval';
 import advanceApprovalRoutes from './routes/advanceApproval';
+import techApprovalRoutes from './routes/techApproval';
+import travelDocsPublicRoutes from './routes/travelDocsPublic';
 import depositRoutes from './routes/deposits';
 
 const app = express();
@@ -94,6 +96,8 @@ app.use('/api/public/invoice-approval', invoiceApprovalRoutes);
 // Public no-login Travel "Approval Form" (request + expense), linked from the email.
 app.use('/api/public/travel-approval', travelApprovalRoutes);
 app.use('/api/public/advance-approval', advanceApprovalRoutes);
+app.use('/api/public/tech-approval', techApprovalRoutes);
+app.use('/api/public/travel-docs', travelDocsPublicRoutes);
 
 // Projects + nested project-scoped modules
 app.use('/api/projects', projectRoutes);

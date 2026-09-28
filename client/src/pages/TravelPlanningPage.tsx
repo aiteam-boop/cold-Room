@@ -205,7 +205,7 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
                 <span className="text-sm text-slate-500">· {p.employeeName} · {fmtDate(p.fromDate)} → {fmtDate(p.toDate)} <span className="text-xs">({p.days}d · {(p.jobOrders ?? []).filter((j: any) => j.jo).length} projects)</span></span>
                 <span className="badge ml-1 bg-slate-200 text-slate-600">CLOSED</span>
                 <span className="ml-auto flex items-center gap-2 text-xs">
-                  <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}` : undefined}>Adv {inr(p.effectiveAdvance ?? p.totalAdvance ?? 0)}{p.personAdvance ? <span className="text-[9px] text-indigo-500"> (+NA)</span> : null}</span>
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}${p.personSettled ? ` − ${inr(p.personSettled)} settled` : ''}` : undefined}>Adv {inr(Math.max(0, (p.effectiveAdvance ?? p.totalAdvance ?? 0) - (Number(p.personSettled) || 0)))}{p.personAdvance ? <span className="text-[9px] text-indigo-500"> (+NA)</span> : null}</span>
                   {(() => { const spent = (p.actualDayCosts || []).reduce((s: number, d: any) => s + dayActualTotal(d), 0); return spent > 0 ? <span className="font-medium text-slate-700">Spent {inr(spent)}</span> : null; })()}
                   <span className={`badge ${techPill(p.techEntryStatus)}`}>{techLabel(p.techEntryStatus)}</span>
                 </span>
@@ -244,19 +244,23 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
   // see "you already hold ₹X" against this trip. 0 when none.
   const raisedQ = useQuery({
     queryKey: ['person-advance', plan.employeeId],
-    queryFn: async () => (await api.get(`/travel/person-advance/${plan.employeeId}`)).data as { total: number; count: number; entries: any[] },
+    queryFn: async () => (await api.get(`/travel/person-advance/${plan.employeeId}`)).data as { total: number; settled: number; count: number; entries: any[] },
     enabled: !!plan.employeeId,
   });
   const raisedAdvance = raisedQ.data?.total || 0;
-  // Advance the person holds against this trip = plan advance + New-Advance balance.
-  const advReceived = planAdv + raisedAdvance;
+  const settledSoFar = raisedQ.data?.settled || 0;   // settled across ALL this person's trips (shared pool)
+  // Advance the person holds = plan advance + New-Advance balance, minus what
+  // Accounts has already settled across all their trips (the shared pool shrinks).
+  const advReceived = Math.max(0, planAdv + raisedAdvance - settledSoFar);
   const balance = advReceived - actGrand;
 
-  // Per-day policy slab (M-Level + destination city): one combined cap spendable on
-  // anything that day; the day's total over the cap is flagged as over-slab.
+  // Per-day policy slab (M-Level + city): one combined cap spendable on anything that
+  // day; a day over the cap is flagged over-slab. City = first project's location, else
+  // the destination (empty → policy default category).
+  const techCity = (plan.jobOrders || []).map((j: any) => j.loc).find(Boolean) || plan.destination || '';
   const entQ = useQuery({
-    queryKey: ['travel-entitlement', plan.mLevel, plan.destination],
-    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(plan.destination || '')}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number },
+    queryKey: ['travel-entitlement', plan.mLevel, techCity],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(techCity)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number },
     enabled: !!plan.mLevel,
   });
   const ent = entQ.data;
@@ -297,7 +301,7 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
       {/* Day-wise actual grid */}
       <fieldset disabled={readOnly}>
       <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm">
-        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th>{CATS.map((c) => <th key={c} className="text-right">{CAT_LABEL[c]}</th>)}<th>Notes</th><th className="text-right pr-2">Total</th></tr></thead>
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th>{CATS.map((c) => <th key={c} className="pl-1">{CAT_LABEL[c]}</th>)}<th>Notes</th><th className="text-right pr-2">Total</th></tr></thead>
         <tbody>
           {rows.map((d, i) => (
             <tr key={i} className="border-t border-slate-100">
@@ -319,7 +323,7 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
               </td>
             </tr>
           ))}
-          <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td colSpan={2} className="py-2">Total</td>{CATS.map((c) => <td key={c} className="text-right">{m0(rows.reduce((s, d) => s + (+d[c] || 0), 0))}</td>)}<td></td><td className="pr-2 text-right">{m0(actGrand)}</td></tr>
+          <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy"><td colSpan={2} className="py-2">Total</td>{CATS.map((c) => <td key={c} className="pl-1">{m0(rows.reduce((s, d) => s + (+d[c] || 0), 0))}</td>)}<td></td><td className="pr-2 text-right">{m0(actGrand)}</td></tr>
         </tbody>
       </table></div>
       <textarea className="input mt-2 min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Trip-level notes (optional)" />
@@ -332,12 +336,12 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
           <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
             <span className="font-semibold text-indigo-800">💰 New Advance in hand</span>
             <span className="text-slate-600">{plan.employeeName}</span>
-            <span className="ml-auto text-lg font-bold text-indigo-800">{m0(raisedAdvance)}</span>
-            {raisedQ.data?.count ? <span className="w-full text-[11px] text-indigo-500">{raisedQ.data.count} active advance(s) raised to this person. Trip spend is booked against it.</span> : <span className="w-full text-[11px] text-slate-400">No advance raised to this person yet.</span>}
+            <span className="ml-auto text-lg font-bold text-indigo-800">{m0(Math.max(0, raisedAdvance - settledSoFar))}</span>
+            {settledSoFar > 0 ? <span className="w-full text-[11px] text-indigo-500">{m0(raisedAdvance)} raised − {m0(settledSoFar)} settled by Accounts.</span> : raisedQ.data?.count ? <span className="w-full text-[11px] text-indigo-500">{raisedQ.data.count} active advance(s) raised to this person. Trip spend is booked against it.</span> : <span className="w-full text-[11px] text-slate-400">No advance raised to this person yet.</span>}
           </div>
         )}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div>{raisedAdvance > 0 && <div className="text-[10px] text-blue-500">Plan {m0(planAdv)} + New Advance {m0(raisedAdvance)}</div>}</div>
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance outstanding</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div>{settledSoFar > 0 ? <div className="text-[10px] text-blue-500">{m0(planAdv + raisedAdvance)} − {m0(settledSoFar)} settled</div> : raisedAdvance > 0 ? <div className="text-[10px] text-blue-500">Plan {m0(planAdv)} + New Advance {m0(raisedAdvance)}</div> : null}</div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"><div className="text-xs text-slate-600">Actual spent</div><div className="text-lg font-bold text-slate-700">{m0(actGrand)}</div></div>
           <div className={`rounded-lg border p-2.5 ${balance < 0 ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}><div className="text-xs text-amber-700">Balance</div><div className="text-lg font-bold text-amber-800">{m0(Math.abs(balance))}</div><div className="text-[10px] text-amber-500">{balance < 0 ? 'reimburse to tech' : 'due back to company'}</div></div>
           <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-lg font-bold text-slate-700">{techLabel(plan.techEntryStatus)}</div></div>
@@ -458,6 +462,13 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
     queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(plan.destination || '')}`)).data.entitlement as { hotel: number; food: number; other: number; group: string; category: string },
     enabled: !!plan.mLevel,
   });
+  // Advance the technician actually received from the "New Advance" module (raised
+  // advance), so the approver sees the true advance-in-hand — same as Tech entry.
+  const raisedQ = useQuery({
+    queryKey: ['person-advance', plan.employeeId],
+    queryFn: async () => (await api.get(`/travel/person-advance/${plan.employeeId}`)).data as { total: number; settled: number; count: number; entries: any[] },
+    enabled: !!plan.employeeId,
+  });
   const assignedId = currentStage === 1 ? cfgQ.data?.reviewerId : currentStage === 2 ? cfgQ.data?.finalId : currentStage === 3 ? cfgQ.data?.stage3Id : null;
   const assignedName = currentStage === 1 ? cfgQ.data?.reviewerName : currentStage === 2 ? cfgQ.data?.finalName : currentStage === 3 ? cfgQ.data?.stage3Name : null;
   const blockedByAssignee = !!assignedId && assignedId !== user?.id && !isAdmin;
@@ -496,7 +507,10 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
   const s2Cell = (i: number, c: string): number | null => currentStage === 2 ? (days[i]?.[c] ?? 0) : (s2 ? (s2.days?.[i]?.[c] ?? 0) : null);
   const s3Cell = (i: number, c: string): number | null => currentStage === 3 ? (days[i]?.[c] ?? 0) : (s3 ? (s3.days?.[i]?.[c] ?? 0) : null);
 
-  const advReceived = plan.totalAdvance || 0;
+  const planAdv = plan.totalAdvance || 0;
+  const raisedAdvance = raisedQ.data?.total || 0;
+  const settledSoFar = raisedQ.data?.settled || 0;   // settled across ALL this person's trips (shared pool)
+  const advReceived = Math.max(0, planAdv + raisedAdvance - settledSoFar);
   const techSum = catSum(rows.map(techDayVals));
   const s1Sum = stage1Done ? (s1.totals ?? catSum(s1.days || [])) : (currentStage === 1 ? override : null);
   const s2Sum = stage2Done ? (s2.totals ?? catSum(s2.days || [])) : (currentStage === 2 ? override : null);
@@ -537,7 +551,7 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
 
       {/* Advance reconciliation */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance received</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div></div>
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance outstanding</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div>{settledSoFar > 0 ? <div className="text-[10px] text-blue-500">{m0(planAdv + raisedAdvance)} − {m0(settledSoFar)} settled</div> : raisedAdvance > 0 ? <div className="text-[10px] text-blue-500">Plan {m0(planAdv)} + New Advance {m0(raisedAdvance)}</div> : null}</div>
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"><div className="text-xs text-slate-600">Actual spent</div><div className="text-lg font-bold text-slate-700">{m0(catGrand(techSum))}</div></div>
         <div className={`rounded-lg border p-2.5 ${advReceived - finalGrand < 0 ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}><div className="text-xs text-amber-700">Balance</div><div className="text-lg font-bold text-amber-800">{m0(Math.abs(advReceived - finalGrand))}</div><div className="text-[10px] text-amber-500">{advReceived - finalGrand < 0 ? 'owed to tech' : 'due back'}</div></div>
         <div className="rounded-lg border border-slate-200 bg-white p-2.5"><div className="text-xs text-slate-500">Status</div><div className="text-base font-bold text-slate-700">{decided ? (plan.techEntryStatus === 'APPROVED' ? 'Approved' : 'Rejected') : stage1Done ? 'Awaiting Final' : 'Open'}</div></div>
@@ -742,16 +756,19 @@ function PersonStatement({ pkey }: { pkey: string }) {
   const kindPill: Record<string, string> = { advance: 'bg-blue-100 text-blue-700', expense: 'bg-green-100 text-green-700', settlement: 'bg-slate-100 text-slate-500', company_paid: 'bg-slate-100 text-slate-400' };
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-2">
-      <div className="mb-1 text-xs font-semibold text-slate-500">Statement — every advance, expense &amp; settlement in date order</div>
+      <div className="text-xs font-semibold text-slate-500">Statement — every advance, expense &amp; settlement in date order</div>
+      <div className="mb-1 text-[10px] text-slate-400"><span className="text-blue-600">Advance received</span> adds to in-hand · <span className="text-rose-500">Settled from advance</span> reduces it (only when Accounts settles) · <span className="text-slate-500">Trip spend</span> is the approved cost, shown for info — it does NOT change in-hand until settled.</div>
       <table className="w-full text-xs">
-        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-2 py-1">Date</th><th className="px-2">Kind</th><th className="px-2">Detail</th><th className="px-2 text-right">Amount</th><th className="px-2 text-right">Running in hand</th></tr></thead>
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-2 py-1">Date</th><th className="px-2">Kind</th><th className="px-2">Detail</th><th className="px-2 text-right text-blue-600">Advance received</th><th className="px-2 text-right text-slate-500">Trip spend</th><th className="px-2 text-right text-rose-500">Settled from advance</th><th className="px-2 text-right">Running in hand</th></tr></thead>
         <tbody>
           {events.map((e, i) => (
             <tr key={i} className="border-t border-slate-100">
               <td className="px-2 py-1 text-slate-500">{e.at ? fmtDate(e.at) : '—'}</td>
               <td className="px-2"><span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${kindPill[e.kind] || 'bg-slate-100'}`}>{e.kind}</span></td>
               <td className="px-2"><span className="font-medium text-slate-600">{e.title}</span><div className="text-[10px] text-slate-400">{e.detail}</div></td>
-              <td className={`px-2 text-right ${e.delta > 0 ? 'text-blue-700' : e.delta < 0 ? 'text-green-700' : 'text-slate-400'}`}>{e.delta > 0 ? '+' : e.delta < 0 ? '−' : ''}{inr(e.amount)}</td>
+              <td className="px-2 text-right font-medium text-blue-700">{e.kind === 'advance' ? `+${inr(e.amount)}` : ''}</td>
+              <td className="px-2 text-right text-slate-500">{(e.kind === 'expense' || e.kind === 'company_paid') ? inr(e.amount) : ''}</td>
+              <td className="px-2 text-right font-medium text-rose-600">{e.kind === 'settlement' ? `−${inr(e.amount)}` : ''}</td>
               <td className={`px-2 text-right font-medium ${inHandCls(e.balance)}`}>{inr(e.balance)}</td>
             </tr>
           ))}
@@ -771,6 +788,13 @@ function AccountsTab({ canManage, isAccounts }: { canManage: boolean; isAccounts
   const nowD = new Date();
   const [month, setMonth] = useState<string>(String(nowD.getMonth()));
   const [year, setYear] = useState<string>(String(nowD.getFullYear()));
+  // Push sent-to-FMS trips to the "Travel Account FMS" sheet + pull VR/UTR back on
+  // demand (VPS auto-polls; this covers local testing / a missed best-effort push).
+  const syncSheet = useMutation({
+    mutationFn: async () => (await api.post('/travel/travel-fms-sync')).data as { ok: boolean; rows?: number; message?: string },
+    onSuccess: (d) => window.alert(d.ok ? `✓ Synced — ${d.rows} row(s) now on the Travel Account FMS sheet.` : `Sync failed: ${d.message}`),
+    onError: (e) => window.alert(`Sync failed: ${errMsg(e)}`),
+  });
   if (plansQ.isLoading) return <Spinner label="Loading…" />;
   const approved = (plansQ.data ?? []).filter((p) => p.techEntryStatus === 'APPROVED');
   // Years present in the data (for the dropdown) plus the current year, newest first.
@@ -804,6 +828,7 @@ function AccountsTab({ canManage, isAccounts }: { canManage: boolean; isAccounts
             {years.map((y) => <option key={y} value={y}>{y}</option>)}
           </select>
           <div className="flex gap-1 rounded-full bg-slate-100 p-0.5">{(['pending', 'finalized', 'all'] as const).map((t) => <button key={t} className={fbtn(t)} onClick={() => setFilter(t)}>{t}</button>)}</div>
+          {isAccounts && <button className="whitespace-nowrap rounded-full border border-navy/30 bg-navy/5 px-2.5 py-0.5 font-medium text-navy hover:bg-navy/10 disabled:opacity-50" disabled={syncSheet.isPending} onClick={() => syncSheet.mutate()} title="Push payment-pending trips to the Travel Account FMS sheet + pull VR/UTR back">{syncSheet.isPending ? '↻ Syncing…' : '↻ Sync sheet'}</button>}
           <span className="whitespace-nowrap text-slate-400">{rows.length} entry(s)</span>
         </div>
       </div>
@@ -836,6 +861,7 @@ const ACC_FIELDS: { k: string; label: string; type?: string }[] = [
 ];
 
 function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: boolean; isAccounts: boolean; onDone: () => void }) {
+  const qc = useQueryClient();
   const finalized = !!plan.accountsFinalized;
   // Only the Accounts team (accountsTeam flag) may edit / finalise — not everyone
   // with travel-edit. Finalised rows are read-only until re-opened.
@@ -846,7 +872,29 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
   const techGrand = catGrand(submittedTotals(plan.actualDayCosts || []));
   const revGrand = plan.techStage1 ? catGrand(plan.techStage1.totals ?? {}) : null;
   const finalGrand = plan.techApproved ? catGrand(plan.techApproved) : 0;
-  const advPaid = plan.totalAdvance || 0;
+  const planAdv = plan.totalAdvance || 0;
+  // Advance the technician actually holds = plan advance + active New Advance
+  // (raised advance), so Accounts sees the true advance and can settle it. `settled`
+  // is what Accounts has settled across ALL this person's trips (shared pool).
+  const raisedQ = useQuery({
+    queryKey: ['person-advance', plan.employeeId],
+    queryFn: async () => (await api.get(`/travel/person-advance/${plan.employeeId}`)).data as { total: number; settled: number; count: number; entries: any[] },
+    enabled: !!plan.employeeId,
+  });
+  const raisedAdvance = raisedQ.data?.total || 0;
+  const settledAll = raisedQ.data?.settled || 0;              // settled across ALL person's trips
+  const thisSaved = Number(plan.advanceSettledAmount) || 0;   // this trip's settled
+  const settledOthers = Math.max(0, settledAll - thisSaved);  // other trips already ate this much of the pool
+  // Advance still available to THIS trip = plan advance + New Advance not yet settled by other trips.
+  const advPaid = planAdv + Math.max(0, raisedAdvance - settledOthers);
+  // Policy entitlement (per-day slab) — so Accounts sees the allowed ₹/day too.
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', plan.mLevel, plan.destination],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(plan.destination || '')}`)).data.entitlement as { hotel: number; food: number; other: number; group: string; category: string },
+    enabled: !!plan.mLevel,
+  });
+  const ent = entQ.data;
+  const dailyCap = ent ? (ent.hotel + ent.food + ent.other) : 0;
   const [form, setForm] = useState<any>(() => ({ invoiceAmount: finalGrand, gstPct: 0, gstAmt: 0, tdsPct: 0, tdsAmt: 0, ...(plan.accountsData || {}) }));
   const [err, setErr] = useState('');
   const netPayable = finalGrand + (+form.gstAmt || 0) - (+form.tdsAmt || 0) - advPaid;
@@ -880,13 +928,39 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
   });
   const reopen = useMutation({ mutationFn: async () => api.post(`/travel/${plan.id}/tech-accounts`, { unfinalize: true }), onSuccess: onDone });
 
-  // Advance settlement — how the pre-trip advance was recovered / adjusted.
+  // Advance settlement — Accounts settles the trip claim AGAINST the advance, in
+  // parts. `settledAmount` is the cumulative amount settled so far (0..claim); this
+  // is what reduces the technician's in-hand (deduction happens here, step 5).
   const advSettled = !!plan.advanceSettled;
-  const [recvBack, setRecvBack] = useState<string>(plan.advanceReceivedBack != null ? String(plan.advanceReceivedBack) : '');
+  const settledSoFar = Number(plan.advanceSettledAmount) || 0;
+  const advNet = Math.max(0, advPaid - settledSoFar);   // advance remaining after what Accounts settled
+  // What "Mark processed" will send to the Travel Account FMS sheet = the trip
+  // claim not yet settled against the advance. 0 → nothing to pay, finalise directly.
+  const payableNow = Math.max(0, finalGrand - settledSoFar);
+  const sentToFms = !!plan.accountsSentToFmsAt && !finalized;   // payment pending on the sheet
+  const [settleInput, setSettleInput] = useState<string>('');   // how much to deduct NOW (additional)
   const [settleNote, setSettleNote] = useState<string>(plan.advanceSettleNote || '');
+  // Advance settlement — Accounts DEDUCTS from the advance the technician holds, in
+  // parts. The box is how much to deduct NOW; it's capped at the advance still with
+  // the tech (and never more than the claim still needs). Rest is paid via the sheet.
+  const claimTarget = finalGrand;
+  const settleCap = Math.min(claimTarget, advPaid);              // most ever deductible from the held advance
+  const settledSaved = Math.min(settleCap, settledSoFar);        // deducted so far (saved)
+  const advLeftSaved = Math.max(0, advPaid - settledSaved);      // advance still with the tech
+  const payableSaved = Math.max(0, claimTarget - settledSaved);  // amount to pay via the sheet
+  const additionalCap = Math.max(0, Math.min(advLeftSaved, payableSaved)); // most you can deduct NOW
+  const addWanted = Math.max(0, Number(settleInput) || 0);
+  const addNow = Math.min(additionalCap, addWanted);
+  const overCap = addWanted > additionalCap + 0.5;              // typed more than the tech holds
+  const newTotal = settledSaved + addNow;                       // cumulative total to save
+  const previewLeft = Math.max(0, advPaid - newTotal);
+  const previewPay = Math.max(0, claimTarget - newTotal);
+  const previewShow = settleInput !== '' && addWanted > 0 && !overCap;
   const settleAdv = useMutation({
-    mutationFn: async (settle: boolean) => api.post(`/travel/${plan.id}/advance-settle`, settle ? { receivedBack: recvBack === '' ? undefined : Number(recvBack), note: settleNote, settle: true } : { settle: false }),
-    onSuccess: onDone, onError: (e) => setErr(errMsg(e)),
+    mutationFn: async (settle: boolean) => api.post(`/travel/${plan.id}/advance-settle`, settle ? { settledAmount: newTotal, note: settleNote, settle: true } : { settle: false }),
+    // Settling changes the shared New-Advance pool → refresh every view that shows it.
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['travel-plans'] }); qc.invalidateQueries({ queryKey: ['person-advance'] }); qc.invalidateQueries({ queryKey: ['cash-in-hand'] }); onDone(); },
+    onError: (e) => setErr(errMsg(e)),
   });
 
   // Who signed each stage (for the money-trail cards) — the actual signer.
@@ -908,8 +982,18 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
         {card('Tech entered', techGrand, 'What the technician claimed', 'border-slate-200 bg-slate-50')}
         {card('Reviewer approved', revGrand ?? 0, `Stage 1 sign-off${revBy ? ` · by ${revBy}` : ''}`, 'border-emerald-200 bg-emerald-50')}
         {card('Final', finalGrand, `Final sign-off — what we pay${finBy ? ` · by ${finBy}` : ''}`, 'border-green-200 bg-green-50')}
-        {card('Advance paid', advPaid, 'Handed over before the trip', 'border-amber-200 bg-amber-50')}
+        {card('Advance outstanding', advNet, settledSoFar > 0 ? `${m0(advPaid)} − ${m0(settledSoFar)} settled` : (raisedAdvance > 0 ? `Incl. ${m0(raisedAdvance)} from New Advance` : 'Handed over before the trip'), 'border-amber-200 bg-amber-50')}
       </div>
+
+      {/* Policy entitlement (grade + destination → allowed ₹/day) — so Accounts can
+          see the per-day allowance and the total entitled for the trip. */}
+      {dailyCap > 0 && ent && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+          <span className="font-semibold text-amber-800">Policy entitlement</span>
+          <span className="text-slate-500">{plan.mLevel} · {plan.destination || '—'} · Grade {ent.group} Cat {ent.category}</span>
+          <span className="ml-auto text-slate-700">Hotel <b>{m0(ent.hotel)}</b> · Food <b>{m0(ent.food)}</b> · Other <b>{m0(ent.other)}</b> = <b className="text-navy">{m0(dailyCap)}/day</b> × {plan.days || 1}d = <b className="text-navy">{m0(dailyCap * (plan.days || 1))}</b> <span className="text-[10px] text-amber-600">entitled</span></span>
+        </div>
+      )}
 
       {/* Day-wise claim vs the sanctioned per-day plan (the "slab"). Cells that
           went over the planned amount for that category are flagged amber, so
@@ -1087,39 +1171,82 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
           <div className="flex flex-wrap items-center gap-2">
             <div className="text-[10px] font-semibold uppercase text-amber-800">Advance settlement</div>
             {advSettled
-              ? <span className="badge bg-green-100 text-green-700">✓ Settled</span>
-              : <span className="badge bg-amber-100 text-amber-700">Pending</span>}
-            <span className="ml-auto text-xs text-slate-500">Advance paid <span className="font-semibold text-amber-700">{m0(advPaid)}</span> · Balance (final − advance) <span className={`font-semibold ${bal < 0 ? 'text-rose-700' : bal > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{m0(bal)}</span></span>
+              ? <span className="badge bg-green-100 text-green-700">✓ Fully settled</span>
+              : settledSoFar > 0
+                ? <span className="badge bg-blue-100 text-blue-700">Partly settled</span>
+                : <span className="badge bg-amber-100 text-amber-700">Pending</span>}
+            <span className="ml-auto text-xs text-slate-500">Claim <span className="font-semibold text-slate-700">{m0(claimTarget)}</span> · Advance held <span className="font-semibold text-amber-700">{m0(advPaid)}</span></span>
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">{bal < 0 ? 'Advance exceeded the claim — recover the balance from the technician.' : bal > 0 ? 'Advance was less than the claim — still payable to the technician.' : 'Advance matches the claim.'}</div>
+          <div className="mt-1 text-[11px] text-slate-500">Deduct from the advance the technician holds (max {m0(settleCap)} — the smaller of claim / advance). Whatever is left of the claim is paid via the Travel Account FMS sheet on Mark processed. Nothing is deducted at approval.</div>
+
+          {/* Current (SAVED) state — stays stable while you type. */}
+          <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+            <span className="rounded border border-amber-200 bg-white/70 px-2 py-0.5">Deducted from advance <b className="text-emerald-700">{m0(settledSaved)}</b></span>
+            <span className="rounded border border-amber-200 bg-white/70 px-2 py-0.5">Advance left <b className="text-amber-700">{m0(advLeftSaved)}</b></span>
+            <span className={`rounded border px-2 py-0.5 ${payableSaved > 0 ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'}`}>Amount to pay <b className={payableSaved > 0 ? 'text-rose-700' : 'text-emerald-700'}>{m0(payableSaved)}</b></span>
+          </div>
 
           {advSettled ? (
             <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
-              <span>✓ Advance settled{plan.advanceReceivedBack != null ? ` · recovered ${m0(plan.advanceReceivedBack)}` : ''}{plan.advanceSettledBy ? ` · by ${plan.advanceSettledBy}` : ''}{plan.advanceSettledAt ? ` · ${fmtDate(plan.advanceSettledAt)}` : ''}.</span>
+              <span>✓ Fully covered by advance · {m0(settledSaved)} of {m0(claimTarget)} deducted{plan.advanceSettledBy ? ` · by ${plan.advanceSettledBy}` : ''}{plan.advanceSettledAt ? ` · ${fmtDate(plan.advanceSettledAt)}` : ''}. Advance left {m0(advLeftSaved)} · nothing to pay.</span>
               {plan.advanceSettleNote && <span className="w-full text-[11px] text-slate-500">“{plan.advanceSettleNote}”</span>}
               {isAccounts && <button className="btn-outline ml-auto text-xs" disabled={settleAdv.isPending} onClick={() => settleAdv.mutate(false)}>↻ Re-open</button>}
             </div>
-          ) : isAccounts ? (
-            <div className="mt-2 grid gap-2 sm:grid-cols-3">
-              <div><label className="label">Recovered from technician (₹)</label><input type="number" className="input h-9 text-sm" value={recvBack} placeholder="0 = fully adjusted" onChange={(e) => setRecvBack(e.target.value)} /></div>
-              <div className="sm:col-span-2"><label className="label">Note (optional)</label><input className="input h-9 text-sm" value={settleNote} placeholder="e.g. ₹500 returned by UPI, rest adjusted against claim" onChange={(e) => setSettleNote(e.target.value)} /></div>
-              <div><button className="btn-primary" disabled={settleAdv.isPending} onClick={() => settleAdv.mutate(true)}>✓ Mark advance settled</button></div>
-            </div>
           ) : (
-            <div className="mt-2 text-xs text-slate-400">Only the Accounts team can settle the advance.</div>
+            <>
+              {/* Partly-deducted status message — so the deducted amount + who/when is clear. */}
+              {settledSoFar > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
+                  <span>✓ {m0(settledSaved)} deducted from advance{plan.advanceSettledBy ? ` · by ${plan.advanceSettledBy}` : ''}{plan.advanceSettledAt ? ` · ${fmtDate(plan.advanceSettledAt)}` : ''} · advance left {m0(advLeftSaved)} · <b className="text-rose-600">{m0(payableSaved)} to pay</b>.</span>
+                  {plan.advanceSettleNote && <span className="w-full text-[11px] text-slate-500">“{plan.advanceSettleNote}”</span>}
+                  {isAccounts && <button className="btn-outline ml-auto text-xs" disabled={settleAdv.isPending} onClick={() => settleAdv.mutate(false)}>↻ Reset</button>}
+                </div>
+              )}
+              {isAccounts && additionalCap > 0 ? (
+                <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  <div><label className="label">Deduct now (₹) — how much MORE from the advance</label><input type="number" min={0} max={additionalCap} className={`input h-9 text-sm ${overCap ? 'border-rose-400' : ''}`} value={settleInput} placeholder={`0 – ${Math.round(additionalCap)}`} onChange={(e) => setSettleInput(e.target.value)} /></div>
+                  <div className="sm:col-span-2"><label className="label">Note (optional)</label><input className="input h-9 text-sm" value={settleNote} placeholder="e.g. ₹3,000 more from advance now" onChange={(e) => setSettleNote(e.target.value)} /></div>
+                  <div><button className="btn-primary" disabled={settleAdv.isPending || overCap || addNow <= 0} onClick={() => settleAdv.mutate(true)}>✓ Deduct now</button></div>
+                  <div className="sm:col-span-3 text-[11px] text-slate-500">
+                    Advance left with tech: <b className="text-amber-700">{m0(advLeftSaved)}</b> — deduct up to that.
+                    {overCap
+                      ? <span className="ml-1 font-medium text-rose-600">⚠ Can’t deduct {m0(addWanted)} — the technician only holds {m0(advLeftSaved)} advance.</span>
+                      : previewShow && <span className="ml-1 font-medium text-navy">→ On save: total deducted {m0(newTotal)} · advance left {m0(previewLeft)} · amount to pay {m0(previewPay)}.</span>}
+                  </div>
+                </div>
+              ) : isAccounts ? (
+                <div className="mt-2 text-[11px] text-slate-500">No advance left to deduct{payableSaved > 0 ? ` — ${m0(payableSaved)} will be paid via the sheet on Mark processed.` : '.'}</div>
+              ) : (
+                <div className="mt-2 text-xs text-slate-400">Only the Accounts team can settle the advance.</div>
+              )}
+            </>
           )}
         </div>
       )}
 
       {finalized ? (
-        <div className="flex items-center justify-between gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
-          <span>✓ Processed{plan.accountsFinalizedBy ? ` by ${plan.accountsFinalizedBy}` : ''}{plan.accountsFinalizedAt ? ` · ${fmtDate(plan.accountsFinalizedAt)}` : ''}.</span>
-          {isAccounts && <button className="btn-outline text-xs" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+          <span>✓ {plan.accountsPaidAt ? 'Paid' : 'Processed'}{plan.accountsFinalizedBy ? ` by ${plan.accountsFinalizedBy}` : ''}{plan.accountsFinalizedAt ? ` · ${fmtDate(plan.accountsFinalizedAt)}` : ''}{plan.accountsPaidAt && plan.accountsPayAmount ? ` · paid ${m0(plan.accountsPayAmount)}` : ''}.</span>
+          {(plan.accountsPayVr || plan.accountsPayUtr) && <span className="w-full text-[11px] text-slate-500">{plan.accountsPayVr ? `VR ${plan.accountsPayVr}` : ''}{plan.accountsPayVr && plan.accountsPayUtr ? ' · ' : ''}{plan.accountsPayUtr ? `UTR ${plan.accountsPayUtr}` : ''}</span>}
+          {isAccounts && <button className="btn-outline text-xs ml-auto" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
+        </div>
+      ) : sentToFms ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2 text-amber-800">
+            <span className="badge bg-amber-100 text-amber-700">Payment pending</span>
+            <span><b>{m0(plan.accountsPayAmount)}</b> sent to <b>Travel Account FMS</b>{plan.accountsSentToFmsAt ? ` · ${fmtDate(plan.accountsSentToFmsAt)}` : ''} — awaiting VR/UTR.</span>
+            {isAccounts && <button className="btn-outline text-xs ml-auto" disabled={reopen.isPending} onClick={() => reopen.mutate()}>↻ Re-open</button>}
+          </div>
+          {(plan.accountsPayVr || plan.accountsPayUtr) && <div className="mt-1 text-[11px] text-slate-500">{plan.accountsPayVr ? `VR ${plan.accountsPayVr}` : ''}{plan.accountsPayVr && plan.accountsPayUtr ? ' · ' : ''}{plan.accountsPayUtr ? `UTR ${plan.accountsPayUtr}` : ''}</div>}
+          <div className="mt-1 text-[11px] text-slate-400">The FMS team fills VR/UTR on the sheet; once the UTR lands, this trip is marked Paid automatically.</div>
         </div>
       ) : !readOnly && (
-        <div className="flex gap-2">
-          <button className="btn-outline" disabled={save.isPending} onClick={() => save.mutate(false)}>Save draft</button>
-          <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✓ Mark processed</button>
+        <div>
+          <div className="flex gap-2">
+            <button className="btn-outline" disabled={save.isPending} onClick={() => save.mutate(false)}>Save draft</button>
+            <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate(true)}>✓ Mark processed</button>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">{payableNow > 0.5 ? `Mark processed → sends ${m0(payableNow)} to the Travel Account FMS sheet for payment (UTR → Paid).` : 'Mark processed → done (nothing to pay — fully settled against the advance).'}</div>
         </div>
       )}
 
@@ -1662,6 +1789,8 @@ const planProjects = (p: any) => (p.jobOrders ?? []).map((j: any) => j.jo).filte
 
 function HistoryTab({ kind, canManage }: { kind: 'PLAN' | 'REQUEST'; canManage: boolean }) {
   const isReq = kind === 'REQUEST';
+  // The server's kind=PLAN already includes approved-or-beyond ticket requests (they
+  // flow through the plan pipeline), so this one query covers Plan history too.
   const plansQ = useQuery({ queryKey: ['travel-plans', kind], queryFn: async () => (await api.get(`/travel?kind=${kind}`)).data.plans as any[] });
   const [open, setOpen] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -1733,7 +1862,7 @@ function PlanRow({ p, isReq, open, onToggle, canManage }: { p: any; isReq?: bool
         <td className="whitespace-nowrap text-slate-500">{fmtDate(p.toDate)}</td>
         <td className="text-right font-medium">{p.days}</td>
         <td><span className={`badge ${PLAN_PILL[p.status] || 'bg-slate-100'}`}>{planLabel(p.status)}</span></td>
-        <td className="text-right font-medium text-amber-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}` : undefined}>{inr(p.effectiveAdvance ?? p.totalAdvance ?? 0)}{p.personAdvance ? <div className="text-[9px] font-normal text-indigo-500">incl. {inr(p.personAdvance)} New Advance</div> : null}</td>
+        <td className="text-right font-medium text-amber-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}${p.personSettled ? ` − ${inr(p.personSettled)} settled` : ''}` : undefined}>{inr(Math.max(0, (p.effectiveAdvance ?? p.totalAdvance ?? 0) - (Number(p.personSettled) || 0)))}{Number(p.advanceSettledAmount) > 0 ? <div className="text-[9px] font-normal text-emerald-600">−{inr(p.advanceSettledAmount)} settled here</div> : p.personAdvance ? <div className="text-[9px] font-normal text-indigo-500">incl. {inr(Math.max(0, (Number(p.personAdvance) || 0) - (Number(p.personSettled) || 0)))} New Advance</div> : null}</td>
         <td className="pr-4 text-right" onClick={(e) => e.stopPropagation()}>
           {/* Ticket requests → View only. Sanctioning plans → Active: Edit + Close; Closed: View. */}
           {isReq || !isPlan ? (
@@ -1777,6 +1906,17 @@ function PlanSummary({ plan }: { plan: any }) {
   );
   const advs = (plan.advances || []).filter((a: any) => (+a.amount || 0) > 0 || a.fileUrl);
   const projs = (plan.jobOrders || []).filter((j: any) => j.jo);
+  // Policy entitlement (grade + city → per-day allowance) shown read-only here too.
+  const city = (plan.jobOrders || []).map((j: any) => j.loc).find(Boolean) || plan.destination || '';
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', plan.mLevel, city],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(city)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number; modes: string[]; classText: string; modeNote: string | null },
+    enabled: !!plan.mLevel,
+  });
+  const ent = entQ.data;
+  const naGross = Number(plan.personAdvance) || 0;
+  const naSettled = Number(plan.personSettled) || 0;   // settled across ALL person's trips (shared pool)
+  const na = Math.max(0, naGross - naSettled);   // New Advance remaining after Accounts settled
   return (
     <div>
       <div className="grid gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
@@ -1792,10 +1932,19 @@ function PlanSummary({ plan }: { plan: any }) {
         {fact('Created', fmtDate(plan.createdAt))}
         {plan.linkedTripNumber ? fact('Linked trip', plan.linkedTripNumber) : null}
       </div>
+      {/* Policy entitlement (read-only). */}
+      {ent && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+          <span className="font-semibold text-amber-800">Policy entitlement</span>
+          <span className="text-slate-600">M-Level {plan.mLevel || '—'} · Grade {ent.group}{city ? ` · ${city.split(',')[0]} = Cat ${ent.category}` : ` · Cat ${ent.category}`}{ent.modes?.length ? ` · ${ent.modes.join('/')}` : ''}{ent.classText ? ` · ${ent.classText}` : ''}</span>
+          <span className="ml-auto text-slate-700">Hotel <b>{money0(ent.hotel)}</b> · Food <b>{money0(ent.food)}</b> · Other <b>{money0(ent.other)}</b> = <b className="text-navy">{money0(ent.hotel + ent.food + ent.other)}/day</b> × {plan.days || 1}d = <b className="text-navy">{money0((ent.hotel + ent.food + ent.other) * (plan.days || 1))}</b> <span className="text-[10px] text-amber-600">entitled</span></span>
+        </div>
+      )}
       <div className="mt-3">
-        <div className="text-[10px] uppercase text-slate-400">Advances paid</div>
-        {advs.length === 0 ? <p className="text-sm text-slate-400">No advances disbursed.</p> : (
+        <div className="text-[10px] uppercase text-slate-400">Advances</div>
+        {(advs.length === 0 && na <= 0) ? <p className="text-sm text-slate-400">No advance issued.</p> : (
           <div className="mt-1 flex flex-wrap gap-2">
+            {na > 0 && <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700" title={naSettled > 0 ? `${money0(naGross)} − ${money0(naSettled)} settled` : undefined}>💰 {money0(na)} from New Advance{naSettled > 0 ? ` (${money0(naSettled)} settled)` : ''}</span>}
             {advs.map((a: any, i: number) => (
               <span key={i} className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">{money0(a.amount)}{a.fileUrl && <a href={a.fileUrl} target="_blank" rel="noreferrer" className="underline">View</a>}</span>
             ))}
@@ -1844,11 +1993,30 @@ function PlanEditPanel({ plan, readOnly, onDone }: { plan: any; readOnly: boolea
   const setDay = (i: number, patch: Partial<DayCost>) => setDayCosts(dayCosts.map((d, j) => j === i ? { ...d, ...patch } : d));
   const setJo = (i: number, patch: Partial<JobOrder>) => setJobOrders(jobOrders.map((j, k) => k === i ? { ...j, ...patch } : j));
 
+  // Policy entitlement (grade + destination) — per-day Hotel/Food/Other allowance,
+  // plus one-click "Apply policy rates" to fill every day. City = first project's
+  // location, else the trip destination (for a ticket request opened here).
+  const planCity = jobOrders.map((j) => j.loc).find(Boolean) || plan.destination || '';
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', mLevel, planCity],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(mLevel)}&city=${encodeURIComponent(planCity)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number; modes: string[]; classText: string; modeNote: string | null },
+    enabled: !!mLevel,
+  });
+  const ent = entQ.data;
+  // Per-day combined cap from the grade entitlement (e.g. ₹1,200/day). A day whose
+  // sanctioned total goes over this is flagged over-slab (red) — no click needed.
+  const dailyCap = ent ? (ent.hotel + ent.food + ent.other) : 0;
+  const overageTotal = dailyCap > 0 ? dayCosts.reduce((s, d) => s + Math.max(0, ((+d.travel || 0) + (+d.food || 0) + (+d.hotel || 0) + (+d.other || 0)) - dailyCap), 0) : 0;
+  const applyPolicyRates = () => { if (!ent) return; setDayCosts((prev) => prev.map((d) => ({ ...d, hotel: ent.hotel, food: ent.food, other: ent.other }))); };
+
   const save = useMutation({
     mutationFn: async () => api.patch(`/travel/${plan.id}`, {
       employeeId: employeeId || null, employeeName, mLevel, fromDate, toDate, days,
       jobOrders: jobOrders.filter((j) => j.jo.trim()), planCosts: totals, planDayCosts: dayCosts, advances,
-      status: 'ACTIVE',  // any edit re-opens the plan as Active
+      // A sanctioning PLAN re-opens as Active on any edit. A ticket REQUEST edited here
+      // must KEEP its own status (Approved/Booked/…) — forcing 'ACTIVE' dropped it out
+      // of Plan history (which only lists approved+ requests).
+      ...(plan.kind === 'REQUEST' ? {} : { status: 'ACTIVE' }),
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['travel-plans'] }); onDone(); },
   });
@@ -1891,11 +2059,22 @@ function PlanEditPanel({ plan, readOnly, onDone }: { plan: any; readOnly: boolea
             </tr>))}</tbody></table></div>
       </div>
 
+      {/* Policy entitlement — grade + destination → per-day allowance + one-click fill. */}
+      {ent && (
+        <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+          <span className="font-semibold text-amber-800">Policy entitlement</span>
+          <span className="text-slate-600">M-Level {mLevel || '—'} · Grade {ent.group}{planCity ? ` · ${planCity.split(',')[0]} = Cat ${ent.category}` : ''}{ent.modes?.length ? ` · ${ent.modes.join('/')}` : ''}{ent.classText ? ` · ${ent.classText}` : ''}</span>
+          <span className="ml-auto text-slate-700">Hotel <b>{money0(ent.hotel)}</b> · Food <b>{money0(ent.food)}</b> · Other <b>{money0(ent.other)}</b> = <b className="text-navy">{money0(dailyCap)}/day</b> × {days}d = <b className="text-navy">{money0(dailyCap * days)}</b> <span className="text-[10px] text-amber-600">entitled</span></span>
+          {!dis && <button type="button" className="rounded-lg border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-medium text-navy hover:bg-amber-100" onClick={applyPolicyRates}>Apply policy rates (all days)</button>}
+          <span className="w-full text-[11px] text-amber-600">Spend up to {money0(dailyCap)}/day across any head (Travel / Food / Hotel / Other). A day that goes over the limit is flagged over-slab (red).{overageTotal > 0 ? <> Total over-slab: <b className="text-rose-600">{money0(overageTotal)}</b>.</> : null}</span>
+        </div>
+      )}
+
       {/* Sanctioned amounts */}
       <div className="mt-4">
         <div className="mb-1 text-xs font-semibold uppercase text-slate-400">Sanctioned amounts</div>
         <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm">
-          <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th><th>Projects</th><th>Remarks</th><th className="text-right">Travel</th><th className="text-right">Food</th><th className="text-right">Hotel</th><th className="text-right">Other</th><th className="text-right pr-2">Day total</th></tr></thead>
+          <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th><th>Projects</th><th className="w-[180px]">Remarks</th><th className="min-w-[72px] px-1 text-right">Travel</th><th className="min-w-[72px] px-1 text-right">Food</th><th className="min-w-[72px] px-1 text-right">Hotel</th><th className="min-w-[72px] px-1 text-right">Other</th><th className="text-right pr-2">Day total</th></tr></thead>
           <tbody>
             {dayCosts.map((d, i) => { const dt = (+d.travel || 0) + (+d.food || 0) + (+d.hotel || 0) + (+d.other || 0); return (
               <tr key={i} className="border-t border-slate-100 align-top">
@@ -1903,8 +2082,12 @@ function PlanEditPanel({ plan, readOnly, onDone }: { plan: any; readOnly: boolea
                 <td className="text-xs text-slate-500">{d.date}</td>
                 <td className="pr-2"><DayProjectPicker available={joNos} selected={d.jobOrderNos} onChange={(next) => setDay(i, { jobOrderNos: next })} /></td>
                 <td className="pr-2"><input className="input h-8 text-xs" value={d.remark} onChange={(e) => setDay(i, { remark: e.target.value })} placeholder="—" /></td>
-                {(['travel', 'food', 'hotel', 'other'] as const).map((k) => (<td key={k} className="pr-1"><input type="number" min={0} className="input h-8 w-20 text-right text-xs" value={(d[k] as number) || ''} onChange={(e) => setDay(i, { [k]: Number(e.target.value) } as any)} placeholder="0" /></td>))}
-                <td className="pr-2 text-right font-medium">{money0(dt)}</td>
+                {(['travel', 'food', 'hotel', 'other'] as const).map((k) => (<td key={k} className="min-w-[72px] px-1"><input type="number" min={0} className="input h-8 w-full text-right text-xs" value={(d[k] as number) || ''} onChange={(e) => setDay(i, { [k]: Number(e.target.value) } as any)} placeholder="0" /></td>))}
+                <td className="pr-2 text-right font-medium">
+                  {(() => { const over = dailyCap > 0 ? dt - dailyCap : 0; return (
+                    <><span className={over > 0 ? 'text-rose-600' : ''}>{money0(dt)}</span>{over > 0 && <div className="text-[10px] font-normal text-rose-500">+{money0(over)} over</div>}</>
+                  ); })()}
+                </td>
               </tr>); })}
             <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold text-navy">
               <td className="py-2" colSpan={4}>Total sanctioned</td>
@@ -1917,9 +2100,9 @@ function PlanEditPanel({ plan, readOnly, onDone }: { plan: any; readOnly: boolea
       <div className="mt-4">
         <div className="mb-2 text-xs font-semibold uppercase text-slate-400">Advance</div>
         <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm">
-          <span className="font-semibold text-indigo-800">💰 {money0(plan.personAdvance || 0)}</span>
+          <span className="font-semibold text-indigo-800">💰 {money0(Math.max(0, (plan.personAdvance || 0) - (Number(plan.personSettled) || 0)))}</span>
           <span className="ml-1 text-slate-600">held by {plan.employeeName || 'this traveller'} from New Advance</span>
-          <div className="mt-1 text-[11px] text-slate-400">{(plan.personAdvance || 0) > 0 ? 'This is the active advance issued to them in the New Advance module.' : 'No advance issued yet — raise one in New Advance if needed.'}</div>
+          <div className="mt-1 text-[11px] text-slate-400">{(plan.personAdvance || 0) > 0 ? ((Number(plan.personSettled) || 0) > 0 ? `${money0(plan.personAdvance)} raised − ${money0(plan.personSettled)} settled by Accounts.` : 'This is the active advance issued to them in the New Advance module.') : 'No advance issued yet — raise one in New Advance if needed.'}</div>
         </div>
       </div>
 
@@ -1941,8 +2124,18 @@ function PlanDetail({ planId, canManage }: { planId: string; canManage: boolean 
   const submit = useMutation({ mutationFn: async () => api.post(`/travel/${planId}/submit`), onSuccess: refresh });
   const remind = useMutation({ mutationFn: async () => api.post(`/travel/${planId}/remind`), onSuccess: () => alert('Reminder sent to the current approver.') });
 
+  // Policy entitlement (grade + destination) — shown on the trip so the reviewer sees
+  // the allowed mode/class and the per-day allowance for this traveller.
+  const plan0 = q.data?.plan;
+  const entQ = useQuery({
+    queryKey: ['travel-entitlement', plan0?.mLevel, plan0?.destination],
+    queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan0?.mLevel || '')}&city=${encodeURIComponent(plan0?.destination || '')}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number; modes: string[]; classText: string; modeNote: string | null },
+    enabled: !!plan0?.mLevel,
+  });
+
   if (q.isLoading) return <Spinner label="Loading…" />;
   const { plan, requestChain, expenseChains } = q.data;
+  const ent = entQ.data;
 
   return (
     <div className="space-y-4">
@@ -1964,6 +2157,12 @@ function PlanDetail({ planId, canManage }: { planId: string; canManage: boolean 
               {plan.aadharFileUrl && <a href={plan.aadharFileUrl} target="_blank" rel="noreferrer" className="text-navy hover:underline">📎 Aadhaar</a>}
               {plan.requestedTicketUrl && <a href={plan.requestedTicketUrl} target="_blank" rel="noreferrer" className="text-navy hover:underline">📎 Ticket to book</a>}
             </div>
+            {ent && (
+              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] leading-snug text-slate-600">
+                <span className="font-semibold text-amber-800">Entitlement</span> · M-Level {plan.mLevel || '—'} · Grade {ent.group}{ent.modes?.length ? ` — allowed: ${ent.modes.join(' / ')}` : ''}{ent.classText ? ` · Class: ${ent.classText}` : ''}
+                <div>{plan.destination || '—'} = Category {ent.category} → <b className="text-navy">₹{(ent.hotel + ent.food + ent.other).toLocaleString('en-IN')}/day</b> <span className="text-slate-400">(Hotel {ent.hotel} + Food {ent.food} + Other {ent.other})</span></div>
+              </div>
+            )}
           </div>
           {canManage && plan.status === 'DRAFT' && <button className="btn-primary mt-2 text-xs" disabled={submit.isPending} onClick={() => submit.mutate()}>Submit for approval</button>}
           {canManage && plan.status === 'SUBMITTED' && <button className="btn-outline mt-2 text-xs" disabled={remind.isPending} onClick={() => remind.mutate()}>📧 Send reminder</button>}

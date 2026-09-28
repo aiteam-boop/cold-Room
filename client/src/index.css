@@ -73,6 +73,12 @@ thead th { font-family: var(--f-display); letter-spacing: 0.3px; }
 /* Brand selection highlight. */
 ::selection { background: var(--amber); color: var(--text); }
 
+/* Hide the up/down spinner on ALL number inputs app-wide — the tiny steppers
+   accidentally nudge amounts up/down. Users type the value directly. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
+
 @layer components {
   /* ── Buttons ─────────────────────────────────────────────── */
   .btn, .btn-primary, .btn-outline, .btn-danger {

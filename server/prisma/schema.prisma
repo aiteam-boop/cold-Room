@@ -1729,11 +1729,23 @@ model TravelPlan {
   techStage1       String?
   techStage2       String?
   techStage3       String?      // Stage 3 (Final approval / Sir) — same JSON shape as stage 1/2
+  techApprovalToken String?     // token for the no-login Final-Approval Form (Stage 3 email link)
+  advanceSettledAmount Float?   // Accounts settles the trip claim against the advance, in parts (0..claim). Deduction happens HERE (step 5), not at approval.
   // Accounts finalisation (after final approval): invoice/indent/GL/tax/payment.
   accountsData     String?      // JSON { glCode, jobType, indentNo, issueNoteNo, poLink, invoiceNo, invoiceAmount, costCenter, gstPct, gstAmt, tdsPct, tdsAmt, paymentMode, bankRef, paymentDate, notes }
   accountsFinalized Boolean     @default(false)
   accountsFinalizedBy String?
   accountsFinalizedAt DateTime?
+  // ── Payment to the technician (the unsettled part of the claim) via the
+  // "Travel Account FMS" sheet. Mark processed with a payable > 0 sends the row
+  // to that sheet; the FMS team fills VR/UTR, which reverse-syncs back and marks
+  // the trip Paid (finalised). Mirrors the Payment / Advance FMS round-trip.
+  accountsSentToFmsAt DateTime?                       // when Mark processed sent it to the sheet
+  accountsPayAmount   Float?                          // amount to pay (claim − settled, at send time)
+  accountsPayVr       String?                         // VR No. from the FMS sheet
+  accountsPayUtr      String?                         // UTR / payment ref from the FMS sheet
+  accountsPaidAt      DateTime?                        // when the UTR landed (paid)
+  docsToken           String?                          // token for the public combined-documents PDF link
   // ── Advance settlement / reconciliation (Accounts) ──────────────────────────
   // How the pre-trip advance was closed: recovered from the technician, or
   // adjusted against the claim. Kept SEPARATE from finalisation so the cash

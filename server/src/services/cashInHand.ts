@@ -84,27 +84,36 @@ function eventsFor(plans: any[], petty: any[]): CashEvent[] {
         source: 'travel', refNo: p.planNumber || '', settled: !!p.advanceSettled, balance: 0,
       });
     }
-    // Accounted spend: the approved figure once the tech entry is signed off, else
-    // the claimed figure (flagged pending) so in-hand isn't misleadingly healthy.
+    // The trip's approved figure (once signed off) or the claimed figure (pending).
     const approved = p.techEntryStatus === 'APPROVED' ? sumCosts(parse(p.techApproved, {})) : 0;
     const claimed = sumDays(parse<any[]>(p.actualDayCosts, []));
     const spend = approved || (p.techEntryStatus === 'SUBMITTED' ? claimed : 0);
+    // How much of the advance Accounts has SETTLED/consumed for this trip. The
+    // deduction from in-hand happens at SETTLEMENT (step 5), NOT at approval:
+    //   • new model      → the amount Accounts settled so far (advanceSettledAmount, partial ok)
+    //   • legacy settled  → the approved spend (was settled the old way)
+    //   • not settled yet → 0 (advance still fully in the technician's hand)
+    const consumed = p.advanceSettledAmount != null
+      ? num(p.advanceSettledAmount)
+      : (p.advanceSettled ? approved : 0);
+    const fullySettled = spend > 0 ? consumed >= spend - 0.5 : !!p.advanceSettled;
     if (spend > 0) {
       const isApproved = p.techEntryStatus === 'APPROVED';
       events.push({
+        // Informational — the trip cost. Does NOT move in-hand until Accounts settles it.
         at: iso(p.techApprovedAt) || iso(p.techEntrySubmittedAt) || iso(p.toDate) || iso(p.createdAt),
-        kind: 'expense', delta: -spend, amount: spend,
+        kind: 'expense', delta: 0, amount: spend,
         title: isApproved ? `Trip expenses approved — ${p.planNumber || ''}` : `Trip expenses claimed (pending) — ${p.planNumber || ''}`,
-        detail: isApproved ? 'Sanctioned spend booked against the advance' : 'Awaiting sign-off — figure may change',
-        source: 'travel', refNo: p.planNumber || '', settled: !!p.advanceSettled, balance: 0,
+        detail: !isApproved ? 'Awaiting sign-off — figure may change' : fullySettled ? 'Settled against the advance' : 'Approved — awaiting Accounts settlement',
+        source: 'travel', refNo: p.planNumber || '', settled: fullySettled, balance: 0,
       });
     }
-    if (p.advanceSettled && p.advanceSettledAt) {
-      const back = num(p.advanceReceivedBack);
+    if (consumed > 0) {
+      // Accounts settling the trip against the advance is what reduces in-hand.
       events.push({
-        at: iso(p.advanceSettledAt), kind: 'settlement', delta: 0, amount: back,
+        at: iso(p.advanceSettledAt) || iso(p.techApprovedAt), kind: 'settlement', delta: -consumed, amount: consumed,
         title: `Advance settled — ${p.planNumber || ''}`,
-        detail: back > 0 ? `₹${Math.round(back)} recovered from the technician` : 'Adjusted against the claim',
+        detail: `₹${Math.round(consumed)} settled against the advance by Accounts`,
         source: 'travel', refNo: p.advanceSettledBy || '', settled: true, balance: 0,
       });
     }
@@ -134,16 +143,21 @@ function eventsFor(plans: any[], petty: any[]): CashEvent[] {
 }
 
 function summarise(personKey: string, personId: string | null, name: string, linked: boolean, events: CashEvent[]): CashSummary {
-  let received = 0, spent = 0, pendingApproval = 0, unsettled = 0, lastActivityAt: string | null = null;
+  let received = 0, settled = 0, pendingApproval = 0, awaiting = 0, lastActivityAt: string | null = null;
   for (const ev of events) {
     if (ev.at && (!lastActivityAt || ev.at > lastActivityAt)) lastActivityAt = ev.at;
-    if (ev.kind === 'advance') { received += ev.amount; if (!ev.settled) unsettled += ev.amount; }
-    else if (ev.kind === 'expense') { spent += ev.amount; if (ev.title.includes('pending')) pendingApproval += ev.amount; }
+    if (ev.kind === 'advance') received += ev.amount;
+    else if (ev.kind === 'settlement') settled += ev.amount;                 // consumed against the advance by Accounts
+    else if (ev.kind === 'expense') {
+      if (ev.title.includes('pending')) pendingApproval += ev.amount;        // claimed, not yet approved
+      else if (!ev.settled) awaiting += ev.amount;                           // approved, awaiting Accounts settlement
+    }
   }
   return {
     personKey, personId, name,
-    received: round2(received), spent: round2(spent), inHand: round2(received - spent),
-    pendingApproval: round2(pendingApproval), unsettled: round2(unsettled),
+    // "Accounted for" = what Accounts has settled; In hand = advances − settled.
+    received: round2(received), spent: round2(settled), inHand: round2(received - settled),
+    pendingApproval: round2(pendingApproval), unsettled: round2(awaiting),
     entries: events.length, lastActivityAt, linked,
   };
 }

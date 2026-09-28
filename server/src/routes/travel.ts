@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, notFound } from '../lib/errors';
@@ -6,10 +7,9 @@ import { requireAuth, requirePage, requireEdit, requireSection, requireAdmin } f
 import { isAdmin } from '../lib/enums';
 import { upload, UPLOADS_PATH } from '../middleware/upload';
 import path from 'path';
-import fs from 'fs';
-import PDFDocument from 'pdfkit';
-import { readFromDb } from '../lib/fileStore';
 import { extractAadharNumber } from '../services/aadharExtract';
+import { buildTravelDocsPdf } from '../services/travelDocs';
+import { exportTravelAccountFms } from '../services/sheetsSync';
 import { audit } from '../lib/audit';
 import { buildTravelSteps, notifyCurrentTravelStep, buildExpenseSteps, notifyCurrentExpenseStep, travelChainState, notifyEmployeeTechApproved, notifyTechStage3Approver } from '../services/travelChain';
 import { buildTravelExpensePdf } from '../services/travelPdf';
@@ -40,6 +40,7 @@ function serializePlan(p: any) {
     techApproved: parseJson(p.techApproved, null as any),
     techStage1: parseJson(p.techStage1, null as any),
     techStage2: parseJson(p.techStage2, null as any),
+    techStage3: parseJson(p.techStage3, null as any),
     accountsData: parseJson(p.accountsData, null as any),
     trail: parseJson(p.trail, [] as any[]),
     expenses: Array.isArray(p.expenses) ? p.expenses.map(serializeExpense) : undefined,
@@ -147,8 +148,11 @@ router.get('/person-advance/:employeeId', requirePage('travel'), asyncHandler(as
   });
   const active = rows.filter((r) => !['VOID', 'REJECTED', 'PENDING_APPROVAL'].includes(r.status));
   const total = active.reduce((s, r) => s + (Number(r.sanctionedAmount ?? r.amount) || 0), 0);
+  // Total already settled by Accounts across ALL of this person's trips (shared pool).
+  const settledMap = await personSettledMap([req.params.employeeId]);
+  const settled = settledMap.get(req.params.employeeId) || 0;
   res.json({
-    total, count: active.length,
+    total, settled, count: active.length,
     entries: active.map((r) => ({ entryNumber: r.entryNumber, amount: Number(r.sanctionedAmount ?? r.amount) || 0, date: r.date, status: r.status })),
   });
 }));
@@ -171,7 +175,12 @@ router.get('/', requirePage('travel'), asyncHandler(async (req, res) => {
     const hasPlanData = (Array.isArray(jo) && jo.some((j) => j?.jo)) || (Array.isArray(dc) && dc.length > 0);
     return (hasPlanData && !p.travelMode && !p.origin && !p.destination) ? 'PLAN' : 'REQUEST';
   };
-  if (q.kind === 'PLAN' || q.kind === 'REQUEST') plans = plans.filter((p) => effKind(p) === q.kind);
+  // kind=PLAN returns the sanctioning plans PLUS every APPROVED-or-beyond ticket
+  // REQUEST — so an approved request flows through Plan history / Tech entry /
+  // Approvals / Accounts exactly like a plan (day-wise sanction, expenses, close).
+  // kind=REQUEST still returns only the ticket requests (Request history).
+  if (q.kind === 'PLAN') plans = plans.filter((p) => effKind(p) === 'PLAN' || (effKind(p) === 'REQUEST' && ['APPROVED', 'BOOKED', 'TRAVELLED', 'CLOSED'].includes(p.status)));
+  else if (q.kind === 'REQUEST') plans = plans.filter((p) => effKind(p) === 'REQUEST');
   if (q.search) {
     const s = q.search.toLowerCase();
     plans = plans.filter((p) => [p.planNumber, p.employeeName, p.destination, p.origin, p.purpose].some((v) => (v || '').toLowerCase().includes(s)));
@@ -179,8 +188,23 @@ router.get('/', requirePage('travel'), asyncHandler(async (req, res) => {
   // Attach each traveller's ACTIVE New-Advance balance (from the New Advance module)
   // so the trip's advance figure can reflect it: effectiveAdvance = plan advance +
   // what the person already holds. Display-only — never changes stored totalAdvance.
-  const advMap = await personAdvanceMap(plans.map((p) => p.employeeId).filter((id): id is string => !!id));
-  res.json({ plans: plans.map((p) => { const personAdvance = p.employeeId ? (advMap.get(p.employeeId) || 0) : 0; return { ...serializePlan(p), personAdvance, effectiveAdvance: (Number(p.totalAdvance) || 0) + personAdvance }; }) });
+  const empIds = plans.map((p) => p.employeeId).filter((id): id is string => !!id);
+  const advMap = await personAdvanceMap(empIds);
+  // Total Accounts has settled per person across ALL their trips — the New Advance
+  // is a shared pool, so this reduces the remaining advance shown on EVERY trip.
+  const settledMap = await personSettledMap(empIds);
+  // M-Level fallback (some plans didn't store it) → the employee's own M-Level, so
+  // the entitlement/slab can compute. Display-only. One query for the set of ids.
+  const uniqEmp = [...new Set(empIds)];
+  const users = uniqEmp.length ? await prisma.user.findMany({ where: { id: { in: uniqEmp } }, select: { id: true, mLevel: true } }) : [];
+  const mLevelMap = new Map(users.map((u) => [u.id, u.mLevel]));
+  res.json({ plans: plans.map((p) => {
+    const personAdvance = p.employeeId ? (advMap.get(p.employeeId) || 0) : 0;
+    const personSettled = p.employeeId ? (settledMap.get(p.employeeId) || 0) : 0;
+    const s = serializePlan(p);
+    if (!s.mLevel && p.employeeId) s.mLevel = mLevelMap.get(p.employeeId) || s.mLevel;
+    return { ...s, personAdvance, personSettled, effectiveAdvance: (Number(p.totalAdvance) || 0) + personAdvance };
+  }) });
 }));
 
 // Map of userId → their ACTIVE raised New-Advance total (category 'Advance to
@@ -200,6 +224,24 @@ async function personAdvanceMap(ids: string[]): Promise<Map<string, number>> {
   return map;
 }
 
+// Map of userId → total advance Accounts has SETTLED across ALL their trips. The
+// New Advance is a shared pool, so a settlement on one trip reduces the remaining
+// advance shown on every trip. One query for a set of ids.
+async function personSettledMap(ids: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const uniq = ids.filter((id): id is string => !!id);
+  if (!uniq.length) return map;
+  const rows = await prisma.travelPlan.findMany({
+    where: { employeeId: { in: [...new Set(uniq)] } },
+    select: { employeeId: true, advanceSettledAmount: true },
+  });
+  for (const r of rows) {
+    if (!r.employeeId || r.advanceSettledAmount == null) continue;
+    map.set(r.employeeId, (map.get(r.employeeId) || 0) + (Number(r.advanceSettledAmount) || 0));
+  }
+  return map;
+}
+
 // ── One plan (+ expenses + chain state) ──────────────────────────────────────
 router.get('/:id', requirePage('travel'), asyncHandler(async (req, res) => {
   const p = await prisma.travelPlan.findUnique({ where: { id: req.params.id }, include: { expenses: { orderBy: { createdAt: 'desc' } } } });
@@ -207,7 +249,22 @@ router.get('/:id', requirePage('travel'), asyncHandler(async (req, res) => {
   const requestChain = await travelChainState('TRAVEL', p.id);
   const expenseChains: Record<string, any> = {};
   for (const e of p.expenses) expenseChains[e.id] = await travelChainState('TRAVEL_EXPENSE', e.id);
-  res.json({ plan: serializePlan(p), requestChain, expenseChains });
+  const plan = serializePlan(p);
+  // Entitlement needs the traveller's M-Level; older plans didn't store it, so fall
+  // back to the employee's own M-Level (display-only — never changes the plan).
+  if (!plan.mLevel && p.employeeId) {
+    const u = await prisma.user.findUnique({ where: { id: p.employeeId }, select: { mLevel: true } });
+    if (u?.mLevel) plan.mLevel = u.mLevel;
+  }
+  // Attach the traveller's New-Advance balance + total settled (shared pool) so the
+  // detail view shows the same remaining advance as the list/tech-entry/approvals.
+  if (p.employeeId) {
+    const [advMap, settledMap] = await Promise.all([personAdvanceMap([p.employeeId]), personSettledMap([p.employeeId])]);
+    plan.personAdvance = advMap.get(p.employeeId) || 0;
+    plan.personSettled = settledMap.get(p.employeeId) || 0;
+    plan.effectiveAdvance = (Number(p.totalAdvance) || 0) + plan.personAdvance;
+  }
+  res.json({ plan, requestChain, expenseChains });
 }));
 
 // ── GET /:id/statement — extras for the Accounts "full statement" ────────────────
@@ -451,6 +508,9 @@ router.post('/:id/tech-stage-decide', requireEdit('travel'), asyncHandler(async 
   else if (b.stage === finalStage) { // the LAST configured stage is the final approval
     data.techEntryStatus = 'APPROVED'; data.techApproved = JSON.stringify(totals); data.techApprovedBy = u.name; data.techApprovedAt = new Date();
   }
+  // Stage 2 approved with a Stage-3 (Final approval) approver set → mint the token
+  // for the no-login Final-Approval Form now, so it exists even when email is off.
+  if (b.status === 'APPROVED' && b.stage === 2 && hasStage3 && !cur.techApprovalToken) data.techApprovalToken = crypto.randomBytes(24).toString('hex');
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
   await audit({ userId: u.sub, action: `TRAVEL_TECH_STAGE${b.stage}_${b.status}`, entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
   if (b.status === 'APPROVED') {
@@ -474,39 +534,93 @@ router.post('/:id/tech-accounts', requireSection('accountsTeam'), asyncHandler(a
   if (cur.techEntryStatus !== 'APPROVED') throw badRequest('Only an approved expense can be finalised in Accounts.');
   const data: any = {};
   if (b.data !== undefined) data.accountsData = JSON.stringify(b.data);
-  if (b.finalize) { data.accountsFinalized = true; data.accountsFinalizedBy = u.name; data.accountsFinalizedAt = new Date(); data.trail = withTrail(cur, 'Accounts finalised (marked processed)', u.name); }
-  if (b.unfinalize) { data.accountsFinalized = false; data.trail = withTrail(cur, 'Accounts re-opened', u.name); }
+  let sentToFms = false;
+  if (b.finalize) {
+    // Amount to pay = the trip claim NOT yet settled against the advance.
+    const ta = parseJson<any>(cur.techApproved, {});
+    const claim = ['travel', 'food', 'hotel', 'other', 'misc'].reduce((s, k) => s + (Number(ta?.[k]) || 0), 0);
+    const settled = Number(cur.advanceSettledAmount) || 0;
+    const payable = Math.max(0, claim - settled);
+    if (payable > 0.5 && !cur.accountsPaidAt) {
+      // Route to the "Travel Account FMS" sheet — do NOT finalise until the UTR lands.
+      data.accountsSentToFmsAt = new Date();
+      data.accountsPayAmount = payable;
+      if (!cur.docsToken) data.docsToken = crypto.randomBytes(24).toString('hex');
+      data.trail = withTrail(cur, `Sent to Travel Account FMS — pay ₹${Math.round(payable)}`, u.name);
+      sentToFms = true;
+    } else {
+      // Nothing to pay (fully settled against the advance) → done.
+      data.accountsFinalized = true; data.accountsFinalizedBy = u.name; data.accountsFinalizedAt = new Date();
+      data.trail = withTrail(cur, 'Accounts finalised (marked processed — no payment due)', u.name);
+    }
+  }
+  if (b.unfinalize) {
+    data.accountsFinalized = false;
+    data.accountsSentToFmsAt = null; data.accountsPayAmount = null; data.accountsPaidAt = null; data.accountsPayVr = null; data.accountsPayUtr = null;
+    data.trail = withTrail(cur, 'Accounts re-opened', u.name);
+  }
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
   await audit({ userId: u.sub, action: b.finalize ? 'TRAVEL_ACCOUNTS_FINALISE' : 'TRAVEL_ACCOUNTS_SAVE', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });
+  if (sentToFms) exportTravelAccountFms().catch(() => {});   // push the row to the sheet (best-effort)
   res.json({ plan: serializePlan(plan) });
 }));
 
+// POST /travel/travel-fms-sync — push sent-to-FMS trips to the "Travel Account FMS"
+// sheet + pull any VR/UTR back now. VPS auto-polls; this lets Accounts trigger it on
+// demand (e.g. to test, or if the best-effort push on Mark processed didn't land).
+router.post('/travel-fms-sync', requireSection('accountsTeam'), asyncHandler(async (_req, res) => {
+  try {
+    const { sheetsEnabled } = await import('../services/sheetsSync');
+    if (!sheetsEnabled()) { res.json({ ok: false, message: 'Google Sheets not configured on this server.' }); return; }
+    const rows = await exportTravelAccountFms();
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.json({ ok: false, message: (e as Error)?.message || 'Sync failed' });
+  }
+}));
+
 // ── Advance settlement / reconciliation (Accounts) ───────────────────────────
-// Records how the pre-trip advance was closed — how much cash the technician
-// returned (or that it was fully adjusted against the claim) + a note. Same
-// dedicated `accountsTeam` flag as the finalise action. `settle:false` re-opens.
-const advanceSettleBody = z.object({ receivedBack: z.coerce.number().min(0).optional(), note: z.string().optional(), settle: z.boolean().default(true) });
+// Accounts settles the trip's approved claim AGAINST the advance — in parts. The
+// `settledAmount` is the cumulative amount settled/consumed so far (0..claim); this
+// is what reduces the technician's in-hand (the deduction happens HERE, step 5, not
+// at approval). `settle:false` re-opens. Same dedicated `accountsTeam` flag.
+const advanceSettleBody = z.object({ settledAmount: z.coerce.number().min(0).optional(), note: z.string().optional(), settle: z.boolean().default(true) });
 router.post('/:id/advance-settle', requireSection('accountsTeam'), asyncHandler(async (req, res) => {
   const b = advanceSettleBody.parse(req.body ?? {});
   const u = req.user!;
   const cur = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
   if (!cur) throw notFound('Travel plan not found');
   if (cur.techEntryStatus !== 'APPROVED') throw badRequest('Settle the advance only after the expense is approved.');
+  // The trip claim (approved figure) — the most Accounts would ever adjust.
+  const ta = parseJson<any>(cur.techApproved, {});
+  const claim = ['travel', 'food', 'hotel', 'other', 'misc'].reduce((s, k) => s + (Number(ta?.[k]) || 0), 0);
+  // The advance the technician actually HOLDS available to this trip = plan advance
+  // + New Advance not yet settled by their OTHER trips. You can't deduct more from
+  // the advance than what's there — so the deduction is capped at min(claim, held).
+  const emp = cur.employeeId ? [cur.employeeId] : [];
+  const [advMap, settledMap] = await Promise.all([personAdvanceMap(emp), personSettledMap(emp)]);
+  const raised = cur.employeeId ? (advMap.get(cur.employeeId) || 0) : 0;
+  const settledOthers = Math.max(0, (cur.employeeId ? (settledMap.get(cur.employeeId) || 0) : 0) - (Number(cur.advanceSettledAmount) || 0));
+  const advanceHeld = (Number(cur.totalAdvance) || 0) + Math.max(0, raised - settledOthers);
+  const cap = Math.min(claim, advanceHeld);
   const data: any = {};
   if (b.settle) {
-    data.advanceSettled = true;
-    if (b.receivedBack !== undefined) data.advanceReceivedBack = b.receivedBack;
+    // Deduct from the advance, capped at what the technician actually holds.
+    const settled = Math.min(cap, Math.max(0, b.settledAmount ?? cap));
+    data.advanceSettledAmount = settled;
+    data.advanceSettled = settled >= claim - 0.5;               // fully settled only if it covers the whole claim
     if (b.note !== undefined) data.advanceSettleNote = b.note;
     data.advanceSettledBy = u.name;
     data.advanceSettledAt = new Date();
-    data.trail = withTrail(cur, `Advance settled${b.receivedBack !== undefined ? ` — recovered ${b.receivedBack}` : ''}`, u.name);
+    data.trail = withTrail(cur, `Advance settled ${settled} of ${claim}`, u.name);
   } else {
     data.advanceSettled = false;
+    data.advanceSettledAmount = null;
     data.advanceSettledAt = null;
     data.trail = withTrail(cur, 'Advance settlement re-opened', u.name);
   }
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
-  await audit({ userId: u.sub, action: b.settle ? 'TRAVEL_ADVANCE_SETTLE' : 'TRAVEL_ADVANCE_REOPEN', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber, receivedBack: b.receivedBack } });
+  await audit({ userId: u.sub, action: b.settle ? 'TRAVEL_ADVANCE_SETTLE' : 'TRAVEL_ADVANCE_REOPEN', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber, settledAmount: b.settledAmount } });
   res.json({ plan: serializePlan(plan) });
 }));
 
@@ -516,56 +630,11 @@ router.post('/:id/advance-settle', requireSection('accountsTeam'), asyncHandler(
 // PDF attachments are noted (pdfkit can't inline an existing PDF) so nothing is
 // silently dropped. Read-only — does not touch any data.
 router.get('/:id/documents-pdf', requirePage('travel'), asyncHandler(async (req, res) => {
-  const plan = await prisma.travelPlan.findUnique({ where: { id: req.params.id } });
-  if (!plan) throw notFound('Travel plan not found');
-  const advances = parseJson<any[]>(plan.advances, []);
-  const atts = parseJson<any[]>(plan.techAttachments, []);
-  const docs: { label: string; url: string }[] = [];
-  advances.forEach((a, i) => { if (a?.fileUrl) docs.push({ label: `Advance ${i + 1}${a.amount ? ` — Rs. ${a.amount}` : ''}`, url: a.fileUrl }); });
-  atts.forEach((a) => { if (a?.fileUrl) docs.push({ label: `${a.category || 'Bill'}${a.day ? ` · Day ${a.day}` : ''}`, url: a.fileUrl }); });
-  if (plan.ticketFileUrl) docs.push({ label: 'Ticket', url: plan.ticketFileUrl });
-  if (plan.paymentProofUrl) docs.push({ label: 'Payment proof', url: plan.paymentProofUrl });
-
-  const getBuf = async (url: string): Promise<{ fn: string; buf: Buffer | null }> => {
-    const fn = path.basename(String(url).split('?')[0]);
-    let buf = await readFromDb(fn).catch(() => null);
-    if (!buf) { try { buf = fs.readFileSync(path.join(UPLOADS_PATH, fn)); } catch { buf = null; } }
-    return { fn, buf };
-  };
-
-  const doc = new PDFDocument({ autoFirstPage: false, margin: 36 });
-  const chunks: Buffer[] = [];
-  doc.on('data', (c) => chunks.push(c as Buffer));
-  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
-
-  // Cover page.
-  doc.addPage();
-  doc.fontSize(16).fillColor('#0a1a4f').text(`Travel documents — ${plan.planNumber}`);
-  doc.moveDown(0.3);
-  doc.fontSize(10).fillColor('#333').text(`Traveller: ${plan.employeeName || '-'}`);
-  doc.text(`Trip: ${plan.origin || '-'} to ${plan.destination || '-'}`);
-  doc.text(`${docs.length} document(s) attached`);
-
-  for (const d of docs) {
-    const { fn, buf } = await getBuf(d.url);
-    doc.addPage();
-    doc.fontSize(11).fillColor('#0a1a4f').text(d.label);
-    doc.moveDown(0.3);
-    if (buf && /\.(jpe?g|png)$/i.test(fn)) {
-      try { doc.image(buf, { fit: [520, 680] }); }
-      catch { doc.fontSize(9).fillColor('#b00000').text('(could not render this image)'); }
-    } else if (/\.pdf$/i.test(fn)) {
-      doc.fontSize(9).fillColor('#666').text(`PDF attachment "${fn}" — open it from the trip's documents (a PDF cannot be inlined here).`);
-    } else {
-      doc.fontSize(9).fillColor('#666').text(buf ? `File: ${fn} (format not previewable).` : `File not found: ${fn}.`);
-    }
-  }
-  if (docs.length === 0) { doc.addPage(); doc.fontSize(11).fillColor('#666').text('No documents were uploaded against this trip.'); }
-  doc.end();
-  const buffer = await done;
+  const out = await buildTravelDocsPdf(req.params.id);
+  if (!out) throw notFound('Travel plan not found');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${plan.planNumber}-documents.pdf"`);
-  res.send(buffer);
+  res.setHeader('Content-Disposition', `inline; filename="${out.planNumber}-documents.pdf"`);
+  res.send(out.buffer);
 }));
 
 // ── Delete a DRAFT plan ──────────────────────────────────────────────────────

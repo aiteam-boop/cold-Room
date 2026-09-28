@@ -8,6 +8,15 @@ import ApprovalTimeline from './ApprovalTimeline';
 import ChainBuilder from './ChainBuilder';
 import FmsTimeline from './FmsTimeline';
 
+// Parse a money field the user may have typed WITH commas (e.g. "55,401" — Indian
+// formatting). Plain Number("55,401") is NaN → saved as null; strip commas first.
+// Returns null for empty/invalid so a blank field clears rather than saving NaN.
+const toNum = (v: unknown): number | null => {
+  if (v == null || v === '') return null;
+  const n = Number(String(v).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : null;
+};
+
 export default function GRNView({ projectId, focusId }: { projectId: string; role: string; focusId?: string }) {
   const qc = useQueryClient();
   const { canEdit, can } = useAuth();
@@ -49,6 +58,13 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
     const hasInvoice = !!(g.invoiceNumber || g.invoiceValue != null || g.invoicePdfUrl);
     return !hasInvoice || (!!g.invoicePdfUrl && g.invoiceReleaseStatus !== 'APPROVED');
   });
+  // The FULL invoice list — every PAID payment (pending AND already-approved), so an
+  // approved invoice stays visible here to view / re-fill. The badge counts only the
+  // pending ones (invoicePending); the list itself shows all.
+  const invoiceAll = grns.filter((g) => (g.milestoneId || g.piValue != null)
+    && (g.paymentStatus === 'PAID' || g.paymentStatus === 'CLOSED' || g.invoicePdfUrl || g.invoiceNumber || g.invoiceValue != null))
+    // Pending (needs upload / approval) on TOP; already-approved invoices at the BOTTOM.
+    .sort((a, b) => (a.invoiceReleaseStatus === 'APPROVED' ? 1 : 0) - (b.invoiceReleaseStatus === 'APPROVED' ? 1 : 0));
 
   return (
     <div className="space-y-3">
@@ -88,7 +104,7 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
       )}
 
       {listTab === 'invoices' ? (
-        <InvoicesPanel grns={invoicePending} onOpenInvoice={(id) => { setOpenId(id); setOpenForInvoice(true); }} />
+        <InvoicesPanel grns={invoiceAll} pendingCount={invoicePending.length} onOpenInvoice={(id) => { setOpenId(id); setOpenForInvoice(true); }} />
       ) : grns.length === 0 ? (
         <EmptyState title="No payments yet" hint="Raise a payment against an approved PO/WO — pick the payment term, upload the PI, and send it for approval. Physical delivery is recorded separately on the Goods Receipt (GRN) page." />
       ) : (
@@ -148,15 +164,15 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
 // The "Invoices" tab — every payment still waiting for its tax invoice. Opening
 // one goes to its payment page with the Tax Invoice block shown, where the
 // invoice is filled in and uploaded (the block is hidden on the normal view).
-function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (id: string) => void }) {
+function InvoicesPanel({ grns, pendingCount, onOpenInvoice }: { grns: any[]; pendingCount: number; onOpenInvoice: (id: string) => void }) {
   if (grns.length === 0) {
-    return <EmptyState title="No pending invoices" hint="Every payment has its tax invoice uploaded and approved. A payment shows here while its invoice still needs uploading or approval." />;
+    return <EmptyState title="No invoices yet" hint="Paid payments show here — pending ones to upload / approve, and already-approved invoices to view or re-fill." />;
   }
   return (
     <div className="card overflow-hidden">
-      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} whose tax invoice needs uploading or approval.</div>
+      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} — tax invoices{pendingCount ? ` · ${pendingCount} pending` : ' · all done'}.</div>
       <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Date</th><th className="text-right">PI Value</th><th>Status</th><th></th></tr></thead>
+        <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Date</th><th className="text-right">PI Value</th><th className="text-right">Invoice Value</th><th>Status</th><th></th></tr></thead>
         <tbody>
           {grns.map((g) => {
             // What this payment needs on the invoice side:
@@ -164,15 +180,17 @@ function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (i
             // 'ready'    — invoice uploaded, not yet submitted for approval.
             // 'awaiting' — invoice submitted, decision still pending.
             // 'hold'     — invoice approval was put on hold.
-            const stage = !g.invoicePdfUrl ? 'upload'
+            const stage = g.invoiceReleaseStatus === 'APPROVED' ? 'done'
+              : !g.invoicePdfUrl ? 'upload'
               : g.invoiceReleaseStatus === 'ON_HOLD' ? 'hold'
               : g.invoiceReleaseToken ? 'awaiting'
               : 'ready';
-            const stageBadge = stage === 'upload' ? <span className="ml-1 text-[10px] font-medium text-orange-600">invoice pending</span>
+            const stageBadge = stage === 'done' ? <span className="ml-1 rounded bg-green-50 px-1 text-[10px] font-medium text-green-700">invoice approved</span>
+              : stage === 'upload' ? <span className="ml-1 text-[10px] font-medium text-orange-600">invoice pending</span>
               : stage === 'ready' ? <span className="ml-1 rounded bg-blue-50 px-1 text-[10px] font-medium text-blue-700">ready to submit</span>
               : stage === 'awaiting' ? <span className="ml-1 rounded bg-amber-50 px-1 text-[10px] font-medium text-amber-700">approval pending</span>
               : <span className="ml-1 rounded bg-orange-50 px-1 text-[10px] font-medium text-orange-700">invoice on hold</span>;
-            const actionLabel = stage === 'upload' ? 'Upload Invoice →' : stage === 'ready' ? 'Submit for Approval →' : 'Review →';
+            const actionLabel = stage === 'done' ? 'Open →' : stage === 'upload' ? 'Upload Invoice →' : stage === 'ready' ? 'Submit for Approval →' : 'Review →';
             return (
             <tr key={g.id} className="cursor-pointer border-b border-slate-100 hover:bg-slate-50" onClick={() => onOpenInvoice(g.id)}>
               <td className="px-4 py-2 font-medium text-navy">{g.grnNumber}</td>
@@ -180,6 +198,7 @@ function InvoicesPanel({ grns, onOpenInvoice }: { grns: any[]; onOpenInvoice: (i
               <td className="text-slate-600">{g.vendorName}</td>
               <td className="text-slate-500">{fmtDate(g.grnDate)}</td>
               <td className="text-right">{g.piValue != null ? inr(g.piValue) : '—'}</td>
+              <td className="text-right">{g.invoiceValue != null ? inr(g.invoiceValue) : <span className="text-orange-500">—</span>}</td>
               <td>
                 {g.paymentStatus
                   ? <span className={`badge ${g.paymentStatus === 'TRIGGERED' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{g.paymentStatus === 'TRIGGERED' ? 'Triggered' : g.paymentStatus === 'PAID' ? 'Paid' : 'Closed'}</span>
@@ -242,11 +261,11 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
   const save = useMutation({
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/grns/${grnId}`, {
       vehicleNumber: g.vehicleNumber, driverName: g.driverName, deliveryChallanNumber: g.deliveryChallanNumber,
-      invoiceNumber: g.invoiceNumber, invoiceDate: g.invoiceDate?.slice?.(0, 10), invoiceValue: g.invoiceValue ? Number(g.invoiceValue) : undefined, ewayBillNumber: g.ewayBillNumber,
+      invoiceNumber: g.invoiceNumber, invoiceDate: g.invoiceDate?.slice?.(0, 10), invoiceValue: toNum(g.invoiceValue) ?? undefined, ewayBillNumber: g.ewayBillNumber,
       // Payment (GRN/Payment PRD v3 §3) — the milestone being paid, the PI, and the amount.
       milestoneId: g.milestoneId ?? null, milestoneKey: g.milestoneKey ?? null, milestoneName: g.milestoneName ?? null,
-      piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, paymentDueDate: g.paymentDueDate?.slice?.(0, 10) || null, piValue: g.piValue != null && g.piValue !== '' ? Number(g.piValue) : null,
-      amountToPay: g.amountToPay != null && g.amountToPay !== '' ? Number(g.amountToPay) : null,
+      piNumber: g.piNumber ?? null, piDate: g.piDate?.slice?.(0, 10) || null, paymentDueDate: g.paymentDueDate?.slice?.(0, 10) || null, piValue: toNum(g.piValue),
+      amountToPay: toNum(g.amountToPay),
       ledgerHead: g.ledgerHead ?? null,
       lrNumber: g.lrNumber ?? null,
       lineItems: g.lineItems.map((l: any) => ({ id: l.id, receiptQty: Number(l.receiptQty), defectQty: Number(l.defectQty || 0), remarks: l.remarks })),
@@ -262,9 +281,23 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
     },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Read the uploaded tax-invoice PDF and PRE-FILL Number/Date/Value — runs
+  // AUTOMATICALLY right after an upload, and the user can still correct any field
+  // before saving. Only fills what it read; never wipes something already typed.
+  const extractInvoice = useMutation({
+    mutationFn: async () => (await api.post(`/projects/${projectId}/procurement/grns/${grnId}/invoice-extract`, {})).data as { invoiceNumber: string | null; invoiceDate: string | null; invoiceValue: number | null; source: string; note?: string },
+    onSuccess: (r) => {
+      setG((prev: any) => ({ ...prev, invoiceNumber: r.invoiceNumber ?? prev.invoiceNumber, invoiceDate: r.invoiceDate ?? prev.invoiceDate, invoiceValue: r.invoiceValue != null ? r.invoiceValue : prev.invoiceValue }));
+      const got = [r.invoiceNumber && 'number', r.invoiceValue != null && 'value', r.invoiceDate && 'date'].filter(Boolean);
+      setMsg(got.length ? `Auto-filled from the PDF: ${got.join(', ')}. Review & correct if needed, then Save tax invoice.` : (r.note || 'Could not read the invoice from the PDF — enter the details manually.'));
+    },
+    onError: () => { /* silent — auto-fetch is best-effort; user can fill manually */ },
+  });
   const uploadInvoice = useMutation({
     mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/invoice`, fd); },
-    onSuccess: () => { setMsg('Invoice uploaded.'); qc.invalidateQueries({ queryKey: ['grn', grnId] }); },
+    // Merge ONLY the new PDF url into the form (never refetch — that would wipe an
+    // unsaved typed value), then AUTO-READ the PDF to pre-fill the fields.
+    onSuccess: (r) => { setG((prev: any) => ({ ...prev, invoicePdfUrl: r?.data?.invoicePdfUrl ?? prev?.invoicePdfUrl })); setMsg('Invoice uploaded — reading details…'); qc.invalidateQueries({ queryKey: ['grns', projectId] }); extractInvoice.mutate(); },
     onError: (e) => setMsg(errMsg(e)),
   });
   const uploadPI = useMutation({
@@ -341,7 +374,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
     mutationFn: async () => (await api.patch(`/projects/${projectId}/procurement/grns/${grnId}`, {
       invoiceNumber: g.invoiceNumber ?? null,
       invoiceDate: g.invoiceDate?.slice?.(0, 10) || null,
-      invoiceValue: g.invoiceValue != null && g.invoiceValue !== '' ? Number(g.invoiceValue) : null,
+      invoiceValue: toNum(g.invoiceValue),
       ewayBillNumber: g.ewayBillNumber ?? null,
     })).data.grn,
     onSuccess: (grn) => { setG(structuredClone(grn)); setMsg('Tax invoice details saved.'); qc.invalidateQueries({ queryKey: ['grns', projectId] }); },
@@ -655,6 +688,7 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
                 ? <a className="text-sm text-navy hover:underline" href={g.invoicePdfUrl} target="_blank" rel="noreferrer">📄 View invoice</a>
                 : <span className="text-xs text-slate-400">{isPaymentGrn ? 'Comes after payment' : 'Not uploaded'}</span>}
               {canUploadTaxInvoice && <input className="input mt-1 text-xs" type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && uploadInvoice.mutate(e.target.files[0])} />}
+              {extractInvoice.isPending && <div className="mt-1 text-[11px] text-slate-400">⏳ Reading the invoice PDF…</div>}
             </F>
             <F label="Material Photo">
               {g.photoUrl

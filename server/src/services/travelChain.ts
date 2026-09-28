@@ -182,8 +182,9 @@ export async function notifyEmployeeTechApproved(planId: string): Promise<void> 
 }
 
 // When Stage 2 approves and a Stage-3 (Final approval / Sir) approver is set, email
-// them that a trip's expenses await their final approval. In-app decision (they open
-// Travel → Approvals), so this is a heads-up with a link. Best-effort.
+// them that a trip's expenses await their final approval. They open a no-login
+// Final-Approval Form (advance held + per-category stage breakdown + day-wise
+// spend) and Approve / Reject right there — just like the Advance / Payment forms.
 export async function notifyTechStage3Approver(planId: string): Promise<void> {
   if (!isEmailEnabled()) return;
   try {
@@ -193,18 +194,30 @@ export async function notifyTechStage3Approver(planId: string): Promise<void> {
     if (!cfg?.stage3Id) return;
     const user = await prisma.user.findUnique({ where: { id: cfg.stage3Id }, select: { email: true, name: true } });
     if (!user?.email) return;
+    // Token for the public Final-Approval Form (reused if already minted).
+    let token = plan.techApprovalToken;
+    if (!token) { token = crypto.randomBytes(24).toString('hex'); await prisma.travelPlan.update({ where: { id: plan.id }, data: { techApprovalToken: token } }); }
     const t = ((): any => { try { return plan.techStage2 ? JSON.parse(plan.techStage2) : {}; } catch { return {}; } })();
     const totals = t?.totals || {};
     const grand = ['travel', 'food', 'hotel', 'other', 'misc'].reduce((s, k) => s + (Number(totals[k]) || 0), 0);
+    // Advance the traveller already holds (plan advance + active New Advance).
+    let raised = 0;
+    if (plan.employeeId) {
+      const advs = await prisma.pettyCashEntry.findMany({ where: { personId: plan.employeeId, category: 'Advance to Technician' } });
+      raised = advs.filter((r) => !['VOID', 'REJECTED', 'PENDING_APPROVAL'].includes(r.status)).reduce((s, r) => s + (Number(r.sanctionedAmount ?? r.amount) || 0), 0);
+    }
+    const advReceived = (Number(plan.totalAdvance) || 0) + raised;
     const rupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
     const lines = [
       `Hi ${user.name},`,
       `A trip's expenses need your <strong>final approval</strong>.`,
       `Trip: <strong>${plan.planNumber}</strong> · ${plan.employeeName}`,
+      `Advance received: <strong>${rupee(advReceived)}</strong>${raised > 0 ? ` <span style="color:#94a3b8">(incl. ${rupee(raised)} New Advance)</span>` : ''}`,
       `Amount approved so far (Stage 2): <strong>${rupee(grand)}</strong>`,
-      `Open Travel → Approvals to review and give the final approval.`,
+      `Open the Final-Approval Form to see the per-category stage breakdown and the day-wise spend, then Approve or Reject.`,
     ];
-    const html = approvalEmailHtml({ heading: `Final approval needed — ${plan.planNumber}`, lines, actionUrl: `${appClientUrl()}/travel`, actionLabel: 'Open Travel → Approvals' });
+    const link = `${appBaseUrl()}/api/public/tech-approval/${token}`;
+    const html = approvalEmailHtml({ heading: `Final approval needed — ${plan.planNumber}`, lines, actionUrl: link, actionLabel: 'Open Final Approval Form' });
     await sendEmail({ to: user.email, subject: `Final approval needed — ${plan.planNumber} · ${plan.employeeName}`, html });
   } catch { /* best-effort */ }
 }

@@ -21,11 +21,13 @@ router.use(requireApiKey);
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
-// Scope + paginate a list, then ship the standard envelope.
-function sendList(req: Request, res: Response, rows: Record<string, unknown>[], total: number) {
+// Scope + paginate a list, then ship the standard envelope. `extraMeta` rides in
+// `_meta` alongside `withheld` (e.g. the person-matching summary).
+function sendList(req: Request, res: Response, rows: Record<string, unknown>[], total: number, extraMeta?: Record<string, unknown>) {
   const { limit, offset } = parseListParams(req);
   const { data, withheld } = applyScopes(rows, req.apiKey!.scopes);
-  return apiList(res, data as unknown[], { limit, offset, total }, withheld.length ? { withheld } : undefined);
+  const meta = { ...(extraMeta || {}), ...(withheld.length ? { withheld } : {}) };
+  return apiList(res, data as unknown[], { limit, offset, total }, Object.keys(meta).length ? meta : undefined);
 }
 function sendItem(req: Request, res: Response, row: Record<string, unknown>) {
   const { data, withheld } = applyScopes(row, req.apiKey!.scopes);
@@ -201,7 +203,51 @@ router.get('/projects/:id/tasks', requireRealm('timeline'), asyncHandler(async (
 // belongs to one person — so this is the natural per-person "what's on my plate"
 // feed. Each row's deepLink opens the underlying PO/WO/GRN/payment, where the
 // approver can actually act.
-const APPROVAL_ENTITY: Record<string, 'po' | 'wo' | 'grn' | 'payment'> = { PO: 'po', WO: 'wo', GRN: 'grn', PAYMENT: 'payment' };
+// docType → dashboard deep-link entity. PO/WO/TO are ProcurementDoc; GRN/INVOICE/
+// PAYMENT are all GRN-model records (PAY-QAS-###, the payment page); the rest fall
+// back to the project.
+const APPROVAL_ENTITY: Record<string, 'po' | 'wo' | 'grn' | 'payment'> = { PO: 'po', WO: 'wo', TO: 'po', GRN: 'grn', INVOICE: 'grn', PAYMENT: 'payment' };
+
+// Resolve a batch of ApprovalStep rows into API rows — approver identity + the
+// parent doc's number/amount/counterparty. Covers EVERY docType from CRMCTS models:
+//   PO / WO / TO           → ProcurementDoc (docNumber, finalAmount)
+//   GRN / INVOICE / PAYMENT → GRN model (grnNumber PAY-QAS-###, invoiceValue ?? amountToPay)
+//   TRAVEL / TRAVEL_EXPENSE → TravelPlan · ADVANCE → PettyCashEntry
+async function enrichApprovalSteps(steps: { id: string; docType: string; docId: string; projectId: string | null; order: number; status: string; approverId: string | null; approverName: string | null; approverEmail: string | null; remarks: string | null; createdAt: Date; actedAt: Date | null }[]): Promise<Record<string, unknown>[]> {
+  const uids = [...new Set(steps.map((s) => s.approverId).filter((x): x is string => !!x))];
+  const users = uids.length ? await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, email: true, employeeCode: true } }) : [];
+  const userById = new Map(users.map((u) => [u.id, u]));
+  const idsOf = (types: string[]) => steps.filter((s) => types.includes(s.docType)).map((s) => s.docId);
+  const [procDocs, grns, plans, advs] = await Promise.all([
+    prisma.procurementDoc.findMany({ where: { id: { in: idsOf(['PO', 'WO', 'TO']) } }, select: { id: true, docNumber: true, finalAmount: true, vendorName: true, status: true } }),
+    prisma.gRN.findMany({ where: { id: { in: idsOf(['GRN', 'INVOICE', 'PAYMENT']) } }, select: { id: true, grnNumber: true, invoiceValue: true, amountToPay: true, vendorName: true, status: true } }),
+    prisma.travelPlan.findMany({ where: { id: { in: idsOf(['TRAVEL', 'TRAVEL_EXPENSE']) } }, select: { id: true, planNumber: true, totalAdvance: true, employeeName: true, status: true } }),
+    prisma.pettyCashEntry.findMany({ where: { id: { in: idsOf(['ADVANCE']) } }, select: { id: true, entryNumber: true, sanctionedAmount: true, amount: true, technician: true, status: true } }),
+  ]);
+  type D = { number: string; amount: number | null; vendor: string | null; personName: string | null; status: string };
+  const docById = new Map<string, D>();
+  for (const d of procDocs) docById.set(d.id, { number: d.docNumber, amount: d.finalAmount, vendor: d.vendorName, personName: null, status: d.status });
+  for (const g of grns) docById.set(g.id, { number: g.grnNumber, amount: g.invoiceValue ?? g.amountToPay ?? null, vendor: g.vendorName, personName: null, status: g.status });
+  for (const t of plans) docById.set(t.id, { number: t.planNumber, amount: t.totalAdvance, vendor: null, personName: t.employeeName, status: t.status });
+  for (const a of advs) docById.set(a.id, { number: a.entryNumber, amount: a.sanctionedAmount ?? a.amount, vendor: null, personName: a.technician, status: a.status });
+  return steps.map((s) => {
+    const usr = s.approverId ? userById.get(s.approverId) : undefined;
+    const d = docById.get(s.docId);
+    const ent = APPROVAL_ENTITY[s.docType];
+    return {
+      id: s.id, docType: s.docType, docId: s.docId, docNumber: d?.number ?? null, docStatus: d?.status ?? null,
+      projectId: s.projectId,
+      vendor: d?.vendor ?? null,          // read:parties (procurement counterparty)
+      personName: d?.personName ?? null,  // read:people (traveller / technician)
+      amount: d?.amount ?? null,          // read:money
+      step: s.order, status: s.status,    // WAITING | PENDING | APPROVED | ON_HOLD
+      approverName: s.approverName, approverUserId: s.approverId,
+      approverEmail: usr?.email ?? s.approverEmail ?? null, approverEmployeeCode: usr?.employeeCode ?? null,
+      remarks: s.remarks, raisedAt: iso(s.createdAt), actedAt: iso(s.actedAt),
+      deepLink: ent ? deepLink(ent, s.docId, s.projectId ?? undefined) : (s.projectId ? deepLink('project', s.projectId, s.projectId) : undefined),
+    };
+  });
+}
 
 router.get('/approvals', requireRealm('approvals'), asyncHandler(async (req, res) => {
   const { limit, offset } = parseListParams(req);
@@ -219,42 +265,8 @@ router.get('/approvals', requireRealm('approvals'), asyncHandler(async (req, res
     prisma.approvalStep.findMany({ where, orderBy: { createdAt: 'desc' }, skip: offset, take: limit }),
     prisma.approvalStep.count({ where }),
   ]);
-
-  // Resolve approver identity + the parent doc (number/amount) in batches.
-  const uids = [...new Set(steps.map((s) => s.approverId).filter(Boolean))];
-  const users = uids.length ? await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, email: true, employeeCode: true } }) : [];
-  const userById = new Map(users.map((u) => [u.id, u]));
-  const docIds = (t: string) => steps.filter((s) => s.docType === t).map((s) => s.docId);
-  const [procDocs, grns, pays] = await Promise.all([
-    prisma.procurementDoc.findMany({ where: { id: { in: [...docIds('PO'), ...docIds('WO')] } }, select: { id: true, docNumber: true, finalAmount: true, vendorName: true, status: true } }),
-    prisma.gRN.findMany({ where: { id: { in: docIds('GRN') } }, select: { id: true, grnNumber: true, invoiceValue: true, vendorName: true, status: true } }),
-    prisma.vendorPayment.findMany({ where: { id: { in: docIds('PAYMENT') } }, select: { id: true, paymentNumber: true, amountToPay: true, vendorName: true, status: true } }),
-  ]);
-  const docById = new Map<string, { number: string; amount: number | null; vendor: string | null; status: string }>();
-  for (const d of procDocs) docById.set(d.id, { number: d.docNumber, amount: d.finalAmount, vendor: d.vendorName, status: d.status });
-  for (const g of grns) docById.set(g.id, { number: g.grnNumber, amount: g.invoiceValue, vendor: g.vendorName, status: g.status });
-  for (const p of pays) docById.set(p.id, { number: p.paymentNumber, amount: p.amountToPay, vendor: p.vendorName, status: p.status });
-
-  const rows = steps.map((s) => {
-    const u = s.approverId ? userById.get(s.approverId) : undefined;
-    const d = docById.get(s.docId);
-    const ent = APPROVAL_ENTITY[s.docType];
-    return {
-      id: s.id,
-      docType: s.docType, docId: s.docId, docNumber: d?.number ?? null, docStatus: d?.status ?? null,
-      projectId: s.projectId,
-      vendor: d?.vendor ?? null,          // read:parties
-      amount: d?.amount ?? null,          // read:money
-      step: s.order, status: s.status,    // WAITING | PENDING | APPROVED | ON_HOLD
-      approverName: s.approverName,       // read:people
-      approverUserId: s.approverId,
-      approverEmail: u?.email ?? s.approverEmail ?? null,
-      approverEmployeeCode: u?.employeeCode ?? null,
-      remarks: s.remarks, raisedAt: iso(s.createdAt), actedAt: iso(s.actedAt),
-      // Opens the actual document, where this person approves it.
-      deepLink: ent ? deepLink(ent, s.docId, s.projectId) : deepLink('project', s.projectId, s.projectId),
-    };
-  });
+  // Resolve approver identity + the parent doc — now covers travel & advances too.
+  const rows = await enrichApprovalSteps(steps);
   return sendList(req, res, rows, total);
 }));
 
@@ -480,6 +492,187 @@ router.get('/machine-models', requireRealm('vendors'), asyncHandler(async (req, 
     powerInputKw: m.powerInputKw, weightKg: m.weightKg, dimensions: m.dimensions, voltage: m.voltage,
     compressorModel: m.compressorModel, deepLink: deepLink('machinemodel', m.id),
   }));
+  return sendList(req, res, rows, total);
+}));
+
+// ── Travel & Advances realm ───────────────────────────────────────────────────
+// All data from CRMCTS's own models (TravelPlan, PettyCashEntry). Read-only.
+const parseJ = <T,>(s: string | null | undefined, fb: T): T => { try { return s ? (JSON.parse(s) as T) : fb; } catch { return fb; } };
+const CATS = ['travel', 'food', 'hotel', 'other', 'misc'] as const;
+const catGrand = (t: Record<string, unknown> | null | undefined) => CATS.reduce((s, k) => s + (Number(t?.[k]) || 0), 0);
+const dayGrand = (d: Record<string, unknown>) => (Number(d?.bus) || 0) + (Number(d?.auto) || 0) + (Number(d?.food) || 0) + (Number(d?.hotel) || 0) + (Number(d?.other) || 0) + (Number(d?.misc) || 0);
+const travelLink = (projectId: string | null | undefined) => (projectId ? deepLink('project', projectId, projectId) : undefined);
+
+// ── Person matching (by-id → by-email → by-name) ──────────────────────────────
+// Much travel/advance data references a person only by NAME (no user id). Resolve
+// each reference to a canonical CRMCTS user with the MOST RELIABLE method available
+// and report how confident that match is — so a caller trusts `by-id`, treats
+// `by-name` as best-effort, and skips `unmatched` (e.g. an external contractor).
+type Matching = 'by-id' | 'by-email' | 'by-name' | 'unmatched';
+interface PersonRef { userId?: string | null; email?: string | null; name?: string | null }
+interface PersonResolved { personUserId: string | null; personName: string | null; personEmail: string | null; employeeCode: string | null; matching: Matching; ambiguous?: boolean }
+
+// Batch-resolve many refs in ONE user query (CRMCTS has a bounded user set).
+async function resolvePersons(refs: PersonRef[]): Promise<PersonResolved[]> {
+  const users = await prisma.user.findMany({ select: { id: true, name: true, email: true, employeeCode: true } });
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const byEmail = new Map(users.filter((u) => u.email).map((u) => [u.email!.trim().toLowerCase(), u]));
+  const byName = new Map<string, typeof users>();
+  for (const u of users) { const k = (u.name || '').trim().toLowerCase(); if (!k) continue; (byName.get(k) ?? byName.set(k, []).get(k)!).push(u); }
+  const pack = (u: { id: string; name: string; email: string | null; employeeCode: string | null }, matching: Matching, ambiguous?: boolean): PersonResolved =>
+    ({ personUserId: u.id, personName: u.name, personEmail: u.email, employeeCode: u.employeeCode, matching, ...(ambiguous ? { ambiguous: true } : {}) });
+  return refs.map((ref) => {
+    if (ref.userId && byId.has(ref.userId)) return pack(byId.get(ref.userId)!, 'by-id');
+    if (ref.email) { const u = byEmail.get(ref.email.trim().toLowerCase()); if (u) return pack(u, 'by-email'); }
+    if (ref.name) { const list = byName.get(ref.name.trim().toLowerCase()); if (list?.length === 1) return pack(list[0], 'by-name'); if (list && list.length > 1) return pack(list[0], 'by-name', true); }
+    return { personUserId: null, personName: ref.name ?? null, personEmail: ref.email ?? null, employeeCode: null, matching: 'unmatched' };
+  });
+}
+
+// Response-level summary of how the batch matched (for `_meta.matching`).
+const matchingSummary = (ppl: PersonResolved[]): Matching | 'mixed' | 'none' => {
+  if (!ppl.length) return 'none';
+  const set = new Set(ppl.map((p) => p.matching));
+  return set.size === 1 ? [...set][0] : 'mixed';
+};
+
+// GET /travel/plans — sanctioned trips + advance. ?status= ?employeeId= ?projectId=
+router.get('/travel/plans', requireRealm('travel'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const where: Record<string, unknown> = {};
+  if (req.query.status) where.status = String(req.query.status).toUpperCase();
+  if (req.query.employeeId) where.employeeId = String(req.query.employeeId);
+  if (req.query.projectId) where.projectId = String(req.query.projectId);
+  const [plans, total] = await Promise.all([
+    prisma.travelPlan.findMany({ where, orderBy: { createdAt: 'desc' }, skip: offset, take: limit }),
+    prisma.travelPlan.count({ where }),
+  ]);
+  const persons = await resolvePersons(plans.map((p) => ({ userId: p.employeeId, name: p.employeeName })));
+  const rows = plans.map((p, i) => ({
+    id: p.id, planNumber: p.planNumber, kind: p.kind ?? null, status: p.status,
+    employeeName: p.employeeName, mLevel: p.mLevel,                    // employeeName → read:people
+    person: persons[i],                                               // resolved identity + matching
+    origin: p.origin, destination: p.destination, purpose: p.purpose,
+    fromDate: iso(p.fromDate), toDate: iso(p.toDate), days: p.days,
+    totalAdvance: p.totalAdvance,                                      // read:money
+    techEntryStatus: p.techEntryStatus, projectId: p.projectId,
+    deepLink: travelLink(p.projectId),
+  }));
+  return sendList(req, res, rows, total, { matching: matchingSummary(persons) });
+}));
+
+// GET /travel/expenses — day-wise tech entry + Reviewer→Final→Final-approval chain
+// + advance settlement. ?status= ?employeeId=
+router.get('/travel/expenses', requireRealm('travel'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const where: Record<string, unknown> = { techEntryStatus: { not: null } };
+  if (req.query.status) where.techEntryStatus = String(req.query.status).toUpperCase();
+  if (req.query.employeeId) where.employeeId = String(req.query.employeeId);
+  const [plans, total] = await Promise.all([
+    prisma.travelPlan.findMany({ where, orderBy: { techEntrySubmittedAt: 'desc' }, skip: offset, take: limit }),
+    prisma.travelPlan.count({ where }),
+  ]);
+  const persons = await resolvePersons(plans.map((p) => ({ userId: p.employeeId, name: p.employeeName })));
+  const rows = plans.map((p, i) => {
+    const s1 = parseJ<Record<string, unknown> | null>(p.techStage1, null);
+    const s2 = parseJ<Record<string, unknown> | null>(p.techStage2, null);
+    const s3 = parseJ<Record<string, unknown> | null>(p.techStage3, null);
+    const approved = parseJ<Record<string, unknown> | null>(p.techApproved, null);
+    const actualSpent = parseJ<Record<string, unknown>[]>(p.actualDayCosts, []).reduce((s, d) => s + dayGrand(d), 0);
+    return {
+      id: p.id, planNumber: p.planNumber, employeeName: p.employeeName, person: persons[i], techEntryStatus: p.techEntryStatus, days: p.days,
+      actualSpent,                                                      // read:money
+      approvedAmount: approved ? catGrand(approved) : null,             // read:money
+      submittedAt: iso(p.techEntrySubmittedAt),
+      // Approval chain (flattened; the signer names are read:people).
+      reviewerStatus: (s1?.status as string) ?? null, reviewerName: (s1?.by as string) ?? null, reviewedAt: (s1?.at as string) ?? null,
+      finalStatus: (s2?.status as string) ?? null, finalName: (s2?.by as string) ?? null, finalActedAt: (s2?.at as string) ?? null,
+      finalApprovalStatus: (s3?.status as string) ?? null, stage3Name: (s3?.by as string) ?? null, finalApprovalAt: (s3?.at as string) ?? null,
+      // Advance settlement + payment (Accounts).
+      totalAdvance: p.totalAdvance, advanceSettledAmount: p.advanceSettledAmount, // read:money
+      accountsPayAmount: p.accountsPayAmount, accountsPaidAt: iso(p.accountsPaidAt), accountsFinalized: p.accountsFinalized,
+      projectId: p.projectId, deepLink: travelLink(p.projectId),
+    };
+  });
+  return sendList(req, res, rows, total, { matching: matchingSummary(persons) });
+}));
+
+// GET /travel/ticket-requests — itinerary, fare, approval. ?status= ?employeeId=
+router.get('/travel/ticket-requests', requireRealm('travel'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const where: Record<string, unknown> = { OR: [{ kind: 'REQUEST' }, { travelMode: { not: null } }] };
+  if (req.query.status) (where as Record<string, unknown>).status = String(req.query.status).toUpperCase();
+  if (req.query.employeeId) (where as Record<string, unknown>).employeeId = String(req.query.employeeId);
+  const [plans, total] = await Promise.all([
+    prisma.travelPlan.findMany({ where, orderBy: { createdAt: 'desc' }, skip: offset, take: limit }),
+    prisma.travelPlan.count({ where }),
+  ]);
+  const persons = await resolvePersons(plans.map((p) => ({ userId: p.employeeId, name: p.employeeName })));
+  const rows = plans.map((p, i) => ({
+    id: p.id, planNumber: p.planNumber, status: p.status, employeeName: p.employeeName, person: persons[i],
+    origin: p.origin, destination: p.destination, travelMode: p.travelMode, tripType: p.tripType,
+    ticketPrice: p.ticketPrice,                                        // read:money
+    fromDate: iso(p.fromDate), toDate: iso(p.toDate),
+    approvalStatus: p.releaseStatus, approvedByName: p.releaseBy, approvedAt: iso(p.releaseAt),  // approvedByName → read:people
+    bookingStatus: p.bookingStatus, bookingRef: p.bookingRef,
+    projectId: p.projectId, deepLink: travelLink(p.projectId),
+  }));
+  return sendList(req, res, rows, total, { matching: matchingSummary(persons) });
+}));
+
+// GET /travel/advances — New-Advance disbursements + approval + FMS VR/UTR. ?status= ?personId=
+router.get('/travel/advances', requireRealm('travel'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const where: Record<string, unknown> = { category: 'Advance to Technician' };
+  if (req.query.status) where.status = String(req.query.status).toUpperCase();
+  if (req.query.personId) where.personId = String(req.query.personId);
+  const [advs, total] = await Promise.all([
+    prisma.pettyCashEntry.findMany({ where, orderBy: { date: 'desc' }, skip: offset, take: limit }),
+    prisma.pettyCashEntry.count({ where }),
+  ]);
+  const persons = await resolvePersons(advs.map((a) => ({ userId: a.personId, name: a.technician })));
+  const rows = advs.map((a, i) => ({
+    id: a.id, entryNumber: a.entryNumber, technician: a.technician, person: persons[i],   // technician → read:people
+    sanctionedAmount: a.sanctionedAmount ?? a.amount,                 // read:money
+    status: a.status, approvalStatus: a.approvalStatus,
+    vrNo: a.vrNo, utrNumber: a.utrNumber,                             // read:money
+    date: iso(a.date), note: a.description, projectId: a.projectId,
+    deepLink: travelLink(a.projectId),
+  }));
+  return sendList(req, res, rows, total, { matching: matchingSummary(persons) });
+}));
+
+// GET /projects/:id/deposits — deposit recovery (HELD/REFUNDED/ADJUSTED). Finance realm.
+router.get('/projects/:id/deposits', requireRealm('finance'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const where = { projectId: req.params.id };
+  const [deps, total] = await Promise.all([
+    prisma.depositRecovery.findMany({ where, orderBy: { createdAt: 'desc' }, skip: offset, take: limit }),
+    prisma.depositRecovery.count({ where }),
+  ]);
+  const rows = deps.map((d) => ({
+    id: d.id, docNumber: d.docNumber, description: d.descKey,
+    amountReceived: d.amountReceived,                                 // read:money
+    refDetails: d.refDetails, status: d.status,
+    projectId: d.projectId, deepLink: travelLink(d.projectId),
+  }));
+  return sendList(req, res, rows, total);
+}));
+
+// GET /people/:code/tasks — what is pending FOR THIS PERSON (their approval queue,
+// across procurement + travel + advances). Approvals realm. `:code` = userId |
+// email | employeeCode.
+router.get('/people/:code/tasks', requireRealm('approvals'), asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListParams(req);
+  const code = req.params.code.trim();
+  const u = await prisma.user.findFirst({ where: { OR: [{ id: code }, { email: code }, { employeeCode: code }] }, select: { id: true } });
+  const approverId = u?.id ?? '__no_such_user__';
+  const where = { approverId, status: 'PENDING' };
+  const [steps, total] = await Promise.all([
+    prisma.approvalStep.findMany({ where, orderBy: { createdAt: 'desc' }, skip: offset, take: limit }),
+    prisma.approvalStep.count({ where }),
+  ]);
+  const rows = await enrichApprovalSteps(steps);
   return sendList(req, res, rows, total);
 }));
 

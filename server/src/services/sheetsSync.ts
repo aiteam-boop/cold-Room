@@ -9,6 +9,7 @@ import { google, sheets_v4 } from 'googleapis';
 import { MongoClient, Db } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { signApiPath } from '../lib/signedUrl';
+import { appBaseUrl } from './email';
 
 // ── Entity → tab config ─────────────────────────────────────────────────────
 // `collection` is the MongoDB collection name (same as the Prisma model name).
@@ -411,6 +412,14 @@ export async function importPaidFromSheet(): Promise<number> {
       { _id: m._id } as never,
       { $set: { status: 'PAID', amountPaid: m.inrAmount || 0, utrNumber: utr, paymentReference: utr, remarks: remark || m.remarks || null, paymentDate: paidAt } },
     );
+    // Also mark the linked GRN/Payment (PAY-QAS) row paid — the Payments list reads
+    // GRN.paymentStatus, so without this a sheet-paid term stays "Triggered" in the UI
+    // even though the milestone is PAID. Mirrors the in-app Mark-Paid; skips rows
+    // already PAID/CLOSED, and never fires an email (that's the in-app route only).
+    await db.collection('GRN').updateMany(
+      { milestoneId: String(m._id), paymentStatus: { $nin: ['PAID', 'CLOSED'] } } as never,
+      { $set: { paymentStatus: 'PAID', utrNumber: utr, paidAt } },
+    );
     if (delta > 0) {
       await db.collection('PaymentInstallment').insertOne({
         _id: randomUUID(), milestoneId: String(m._id), docId: m.docId, amount: delta,
@@ -638,10 +647,21 @@ export async function exportPaymentAccountFms(): Promise<number> {
 // reverse-sync maps a row back by. Timestamp (A) is a real datetime, like the
 // payment tab. Nothing here touches the payment-FMS export.
 export const ADVANCE_FMS_TAB = 'Advance Account FMS';
+// The FMS team's COMMON template columns (same across their sheets) sit first (A–O)
+// — the app leaves them blank and PRESERVES them so the team fills them. The app's
+// own reference data (Petty #, Person, Amount, …) follows (P–U), then VR/UTR (the
+// reverse-sync columns the team fills) and the Advance Ref key.
+const ADV_FMS_COMMON = [
+  'Email address', 'User', 'Invoice Number', 'Invoice Date', 'Bill received by User', // B–F
+  'Vendor Name', 'Full Amount', 'Amount To Pay', 'Payment Due Date', 'Payment Type',  // G–K
+  'Payment Terms', 'Invoice with Supporting', 'PI', 'Department',                      // L–O
+];
 const ADV_FMS_HEADERS = [
-  'Timestamp', 'Petty #', 'Person', 'Amount', 'Date', 'Site / Project', 'Note', // A–G
-  '', '', '', '', '', '', '', '',                                                 // H–O (blank spacers)
-  'VR No.', 'UTR / Payment Ref', 'Advance Ref',                                   // P, Q, R (VR still column P)
+  'Timestamp',                                                    // A (app)
+  ...ADV_FMS_COMMON,                                              // B–O (FMS team fills — preserved)
+  'Petty #', 'Person', 'Amount', 'Date', 'Site / Project', 'Note', // P–U (app data)
+  'VR No.', 'UTR / Payment Ref',                                  // V, W (FMS fills — preserved)
+  'Advance Ref',                                                  // X (reverse-sync key)
 ];
 
 // Pull VR/UTR the FMS team entered against an advance row back into the app:
@@ -695,22 +715,112 @@ export async function exportAdvanceAccountFms(): Promise<number> {
     const amt = Number(e.sanctionedAmount ?? e.amount) || 0;
     const site = e.projectId ? (projName.get(String(e.projectId)) || '') : '';
     return [
-      istSerial(e.date || e.createdAt), (e.entryNumber as string) || '', (e.technician as string) || '', amt, dmy(e.date), site, (e.description as string) || '',
-      '', '', '', '', '', '', '', '',        // H–O blank
-      '', '', String(e._id),                 // P VR (preserved), Q UTR (preserved), R ref
+      istSerial(e.date || e.createdAt),                          // A Timestamp
+      '', '', '', '', '', '', '', '', '', '', '', '', '', '',    // B–O FMS common (blank, preserved)
+      (e.entryNumber as string) || '', (e.technician as string) || '', amt, dmy(e.date), site, (e.description as string) || '',  // P–U app data
+      '', '',                                                    // V VR, W UTR (preserved)
+      String(e._id),                                             // X Advance Ref
     ];
   });
   rows.sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0));
-  const preserve = ['VR No.', 'UTR / Payment Ref'].map((h) => ADV_FMS_HEADERS.indexOf(h)).filter((i) => i >= 0);
+  // Preserve the FMS team's common columns (B–O) + VR/UTR — the app never overwrites them.
+  const preserve = [...ADV_FMS_COMMON, 'VR No.', 'UTR / Payment Ref'].map((h) => ADV_FMS_HEADERS.indexOf(h)).filter((i) => i >= 0);
   await writeTabPreservingCols(ADVANCE_FMS_TAB, ADV_FMS_HEADERS, rows as (string | number | boolean)[][], preserve);
   await formatTimestampColumn(ADVANCE_FMS_TAB);
+  return rows.length;
+}
+
+// ── "Travel Account FMS" — pay the technician the part of a trip claim that was
+// NOT settled against their advance. A trip "Marked processed" with a payable > 0
+// lands here; the FMS team fills VR/UTR, which reverse-syncs back and marks the
+// trip Paid (finalised). Mirrors the payment/advance FMS round-trip exactly.
+export const TRAVEL_FMS_TAB = 'Travel Account FMS';
+// Same layout as Advance Account FMS: the FMS team's COMMON template columns (A–O)
+// first (app leaves blank + preserves), then the app's own trip data (P–V), then
+// VR/UTR (preserved, reverse-sync) and the Trip Ref key.
+const TRAVEL_FMS_HEADERS = [
+  'Timestamp',                                                                                // A (app)
+  ...ADV_FMS_COMMON,                                                                          // B–O (FMS team fills — preserved)
+  'Trip #', 'Person', 'Amount to pay', 'Trip dates', 'Site / Project', 'Note', 'Documents',   // P–V (app data)
+  'VR No.', 'UTR / Payment Ref',                                                              // W, X (FMS fills — preserved)
+  'Trip Ref',                                                                                 // Y (reverse-sync key)
+];
+
+// Pull VR/UTR the FMS team entered against a trip row back into the app: a trip
+// awaiting payment becomes Paid (finalised) once its UTR lands.
+async function importTravelUtrsFromSheet(): Promise<number> {
+  if (!sheetsEnabled()) return 0;
+  let vals: string[][] = [];
+  try {
+    const resp = await getSheetsClient().spreadsheets.values.get({ spreadsheetId: getSpreadsheetId(), range: `${TRAVEL_FMS_TAB}!A1:Z2000` });
+    vals = (resp.data.values as string[][]) || [];
+  } catch { return 0; }
+  if (vals.length < 2) return 0;
+  const H = vals[0];
+  const iRef = H.indexOf('Trip Ref'); const iUtr = H.indexOf('UTR / Payment Ref'); const iVr = H.indexOf('VR No.');
+  if (iRef < 0 || iUtr < 0) return 0;
+  const db = await getDb();
+  const col = db.collection('TravelPlan');
+  const bad = (s: string) => !s || s === '—' || /^#(REF|N\/A|VALUE|ERROR|NAME|DIV|NULL|NUM|GETTING_DATA)/i.test(s) || /^Loading/i.test(s);
+  let done = 0;
+  for (const row of vals.slice(1)) {
+    const ref = (row[iRef] || '').trim();
+    if (!ref) continue;
+    const utrRaw = (row[iUtr] || '').trim();
+    const vrRaw = iVr >= 0 ? (row[iVr] || '').trim() : '';
+    const utr = bad(utrRaw) ? '' : utrRaw;
+    const vr = bad(vrRaw) ? '' : vrRaw;
+    if (!utr && !vr) continue;
+    const p = await col.findOne({ _id: ref } as never);
+    if (!p || !p.accountsSentToFmsAt) continue;              // only trips actually sent to the sheet
+    const set: Record<string, unknown> = {};
+    if (vr && p.accountsPayVr !== vr) set.accountsPayVr = vr;                          // store VR as soon as it lands
+    if (utr && p.accountsPayUtr !== utr) set.accountsPayUtr = utr;                     // store UTR
+    if (utr && !p.accountsFinalized) {                                                 // UTR marks it Paid + finalised
+      set.accountsFinalized = true; set.accountsPaidAt = new Date();
+      set.accountsFinalizedBy = 'FMS (UTR)'; set.accountsFinalizedAt = new Date();
+    }
+    if (Object.keys(set).length) { set.updatedAt = new Date(); await col.updateOne({ _id: p._id } as never, { $set: set }); done++; }
+  }
+  return done;
+}
+
+export async function exportTravelAccountFms(): Promise<number> {
+  // Consume any VR/UTR the FMS team entered before we overwrite the tab.
+  try { await importTravelUtrsFromSheet(); } catch { /* best-effort */ }
+  if (!sheetsEnabled()) return 0;
+  const db = await getDb();
+  const [plans, projects] = await Promise.all([
+    db.collection('TravelPlan').find({ accountsSentToFmsAt: { $ne: null } }).sort({ accountsSentToFmsAt: 1 }).toArray(),
+    db.collection('Project').find({}).project({ name: 1 }).toArray(),
+  ]);
+  const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
+  const base = appBaseUrl();
+  const rows: (string | number)[][] = plans.map((p) => {
+    const amt = Number(p.accountsPayAmount) || 0;
+    const site = p.projectId ? (projName.get(String(p.projectId)) || '') : '';
+    const dates = `${dmy(p.fromDate)} - ${dmy(p.toDate)}`;
+    const docs = p.docsToken ? `${base}/api/public/travel-docs/${p.docsToken}` : '';
+    return [
+      istSerial(p.accountsSentToFmsAt || p.createdAt),          // A Timestamp
+      '', '', '', '', '', '', '', '', '', '', '', '', '', '',   // B–O FMS common (blank, preserved)
+      (p.planNumber as string) || '', (p.employeeName as string) || '', amt, dates, site, '', docs,  // P–V app data (Trip#, Person, Amount to pay, Trip dates, Site, Note, Documents)
+      '', '',                                                   // W VR, X UTR (preserved)
+      String(p._id),                                            // Y Trip Ref
+    ];
+  });
+  rows.sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0));
+  // Preserve the FMS team's common columns (B–O) + VR/UTR — the app never overwrites them.
+  const preserve = [...ADV_FMS_COMMON, 'VR No.', 'UTR / Payment Ref'].map((h) => TRAVEL_FMS_HEADERS.indexOf(h)).filter((i) => i >= 0);
+  await writeTabPreservingCols(TRAVEL_FMS_TAB, TRAVEL_FMS_HEADERS, rows as (string | number | boolean)[][], preserve);
+  await formatTimestampColumn(TRAVEL_FMS_TAB);
   return rows.length;
 }
 
 /** Full export of every configured entity. */
 export async function exportAll(): Promise<ExportResult> {
   if (!sheetsEnabled()) throw new Error('Sheets sync disabled (missing env)');
-  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB, ADVANCE_FMS_TAB]);
+  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB, ADVANCE_FMS_TAB, TRAVEL_FMS_TAB]);
   const result: ExportResult = [];
   for (const cfg of ENTITIES) {
     const count = await exportEntity(cfg);
@@ -718,6 +828,7 @@ export async function exportAll(): Promise<ExportResult> {
   }
   result.push({ tab: FMS_TAB, rows: await exportPaymentAccountFms() });
   result.push({ tab: ADVANCE_FMS_TAB, rows: await exportAdvanceAccountFms() });
+  result.push({ tab: TRAVEL_FMS_TAB, rows: await exportTravelAccountFms() });
   return result;
 }
 
@@ -766,6 +877,7 @@ export function startFmsReverseSyncPoll(): void {
     fmsPolling = true;
     void exportPaymentAccountFms()
       .then(() => exportAdvanceAccountFms())   // pull advance VR/UTR + refresh that tab too
+      .then(() => exportTravelAccountFms())    // pull travel-payment VR/UTR + refresh that tab too
       .catch((e) => console.error('[sheetsSync] FMS reverse-sync poll failed:', (e as Error).message))
       .finally(() => { fmsPolling = false; });
   }, everyMs);

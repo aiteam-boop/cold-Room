@@ -7,15 +7,16 @@
 //     to a response you must classify it, and the leak test (see
 //     unclassifiedSensitiveKeys) fails if a sensitive-looking name is unclassified.
 
-export type RealmKey = 'projects' | 'procurement' | 'timeline' | 'finance' | 'vendors' | 'approvals';
+export type RealmKey = 'projects' | 'procurement' | 'timeline' | 'finance' | 'vendors' | 'approvals' | 'travel';
 export type ScopeKey = 'read:core' | 'read:money' | 'read:parties' | 'read:people' | 'read:files' | 'write:tasks';
 
 export const REALMS: { key: RealmKey; label: string; desc: string; requiresScope?: ScopeKey }[] = [
   { key: 'projects',    label: 'Projects',    desc: 'Projects, team, rooms/zones, milestones, drawings, change orders.' },
   { key: 'procurement', label: 'Procurement', desc: 'Purchase & work orders, GRNs, BOQ, quotations, documents, payment milestones.' },
   { key: 'timeline',    label: 'Timeline',    desc: 'Gantt activities, BOQ progress entries, daily progress (DPR). Task writes need write:tasks.' },
-  { key: 'approvals',   label: 'Approvals',   desc: 'Who has to approve what, right now — per person. The pending queue for POs, WOs, GRNs and payments.' },
-  { key: 'finance',     label: 'Finance',     desc: 'Vendor payments (FMS) — amounts, status, paid dates.', requiresScope: 'read:money' },
+  { key: 'approvals',   label: 'Approvals',   desc: 'Who has to approve what, right now — per person. The pending queue for POs, WOs, GRNs, payments, travel & advances.' },
+  { key: 'travel',      label: 'Travel & Advances', desc: 'Travel plans, day-wise expense claims + approval chain, ticket requests, and New-Advance disbursements + FMS status.' },
+  { key: 'finance',     label: 'Finance',     desc: 'Vendor payments (FMS), deposits — amounts, status, paid dates.', requiresScope: 'read:money' },
   { key: 'vendors',     label: 'Vendors',     desc: 'The vendor master — names, GSTIN/PAN, contacts.', requiresScope: 'read:parties' },
 ];
 
@@ -39,6 +40,10 @@ const MONEY = new Set([
   'unitprice', 'price', 'rate', 'tds', 'tdsamount', 'utr', 'utrnumber', 'paymentreference',
   'budget', 'budgetamount', 'budgetrate', 'budgetqty', 'pivalue', 'gstpct', 'gstamount', 'value', 'total',
   'costimpact', 'inramount', 'paymentterms',
+  // Travel / advance / deposit money.
+  'totaladvance', 'personadvance', 'effectiveadvance', 'ticketprice', 'sanctionedfare', 'sanctionedamount',
+  'accountspayamount', 'advancesettledamount', 'actualspent', 'approvedamount', 'amountreceived',
+  'vrno', 'vrnumber', 'dailycap', 'entitledperday', 'entitledtotal', 'perdaycap',
 ]);
 const PARTY = new Set([
   'client', 'clientname', 'vendor', 'vendorname', 'contact', 'contactperson', 'phone', 'phones',
@@ -50,6 +55,11 @@ const PEOPLE = new Set([
   'submittedbyname', 'approvedbyname', 'uploadedbyname', 'handoverbyname', 'raisedbyname',
   'employeename', 'employeecode', 'filledbyname', 'labourteam',
   'perdiem', 'allowance', 'slab', 'drivername',
+  // Travel / advance people identities.
+  'technician', 'personname', 'reviewername', 'finalname', 'stage3name', 'techapprovedby',
+  'advancesettledby', 'recordedbyname', 'settledby',
+  // Resolved-person block (matchPerson): the identity is people; `matching`/`ambiguous` are core labels.
+  'personuserid', 'personemail',
 ]);
 const FILES = new Set([
   'pdfurl', 'invoicepdfurl', 'taxinvoicepdfurl', 'pipdfurl', 'kycpdfurl', 'tdsurl', 'drawingurl',

@@ -1270,6 +1270,32 @@ router.post('/grns/:grnId/invoice', requireProjectMember, requireEdit('grn'), up
   res.json({ ok: true, invoicePdfUrl: grn.invoicePdfUrl, paymentStatus: grn.paymentStatus });
 }));
 
+// POST .../grns/:grnId/invoice-extract — read the uploaded tax-invoice PDF with the
+// SAME reader as the PI (pdf-text + regex, falling back to a vision model) and return
+// { invoiceNumber, invoiceDate, invoiceValue } to PRE-FILL the form. Read-only — it
+// never saves; the user reviews the values and clicks "Save tax invoice".
+router.post('/grns/:grnId/invoice-extract', requireProjectMember, requireEdit('grn'), asyncHandler(async (req, res) => {
+  const grn = await prisma.gRN.findFirst({ where: { id: req.params.grnId, projectId: req.params.projectId }, select: { invoicePdfUrl: true } });
+  if (!grn?.invoicePdfUrl) throw badRequest('Upload the tax invoice PDF first, then fetch its details.');
+  const filename = path.basename(grn.invoicePdfUrl);
+  let filePath = path.resolve(process.cwd(), 'uploads', filename);
+  let temp: string | null = null;
+  // A redeploy wipes the disk but not Atlas → fall back to GridFS via a temp file.
+  if (!fs.existsSync(filePath)) {
+    const buf = await readFromDb(filename);
+    if (!buf) throw badRequest('The invoice file is no longer available — please re-upload it.');
+    temp = path.join(os.tmpdir(), `inv-${Date.now()}-${filename}`);
+    fs.writeFileSync(temp, buf);
+    filePath = temp;
+  }
+  try {
+    const r = await extractPiFields(filePath, 'application/pdf');
+    res.json({ invoiceNumber: r.piNumber ?? null, invoiceDate: r.piDate ?? null, invoiceValue: r.piValue ?? null, source: r.source, note: r.note });
+  } finally {
+    if (temp) fs.rmSync(temp, { force: true });
+  }
+}));
+
 // Upload the Proforma Invoice (PI) — drives the payment and comes BEFORE the tax
 // invoice (§3.1, §3.6). Stored under piPdfUrl on the GRN; PI number/date are
 // entered/auto-captured on the form and saved via PATCH.
