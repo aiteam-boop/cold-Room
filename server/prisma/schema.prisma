@@ -25,6 +25,11 @@ model User {
   active       Boolean          @default(true)
   employeeCode String?          // company employee ID/code — lets external systems match a person
   mLevel       String?          // management level (e.g. M1, M2) — auto-filled into the Travel module when this user is the traveller
+  // Aadhaar captured ONCE on the user profile (admin) and auto-filled into a Travel
+  // request when this user is the traveller — same pattern as mLevel. Never exposed
+  // via the public API (aadhaar names are hard-denied in apiScopes).
+  aadharNo     String?          // 12-digit Aadhaar number
+  aadharFileUrl String?         // uploaded Aadhaar card (image/PDF)
   whatsapp     String?          // optional, for parity with IMS (no alerting yet)
   // IMS-style per-user grants (admin-controlled). JSON, parsed in permissions.ts.
   pageAccess   String?          // { [pageKey]: { view: bool, edit: bool } }
@@ -591,6 +596,9 @@ model GRN {
   // PI (PDF only). Stays null/unused for PO/WO payments.
   lrNumber      String?
   lrPdfUrl      String?
+  // Vendor-signed & stamped copy of the order (PO/WO/TO). Uploaded at payment time
+  // as proof the vendor accepted the order. PDF only, like the LR/PI. Optional.
+  signedPoUrl   String?
   // The amount to release for this milestone (editable; may be partial). Balance
   // is derived = piValue − advance already paid on the PO − amountToPay.
   amountToPay   Float?
@@ -1636,6 +1644,10 @@ model TravelPlan {
   // LEGACY record reads as null and can be inferred — a @default would make every
   // old doc read as 'REQUEST' and hide New-plans.
   kind          String?
+  // A dedicated "Site Expense" trip — its own TRV id created from the Tech-entry tab
+  // for a spare/machine purchase. Shows only the BOQ-mapped site-expense editor (no
+  // personal day-wise grid). Normal trips stay false.
+  isSiteExpense Boolean  @default(false)
 
   // Traveller — a CRMCTS User, or a free-typed non-Crystal person.
   employeeId    String?                         // User.id when a Crystal employee; null for Other
@@ -1713,8 +1725,13 @@ model TravelPlan {
   releaseRemark  String?
 
   // ── Tech entry (day-wise ACTUAL spend, filed after the trip is Closed) ──────
-  // JSON [{ day,date,bus,auto,food,hotel,other,misc,notes }] — what it actually cost.
+  // JSON [{ day,date,bus,auto,food,hotel,other,misc,notes,jobOrderNos }] — what it actually cost.
   actualDayCosts   String?
+  // Site expenses (OPTIONAL) — when the tech also buys a spare/machine on the trip,
+  // each line maps to a project's BOQ head + item (like a PO line). Separate from the
+  // personal day-wise spend above; coexists with it. JSON [{ id, jo, boqHead, boqItemId,
+  // boqItemDesc, date, description, amount, paymentMode, attachmentUrl, cashReason }].
+  siteExpenses     String?
   techEntryStatus  String?      // NOT_FILED | SUBMITTED | APPROVED | REJECTED (null = not filed)
   techEntryNotes   String?
   techEntrySubmittedAt DateTime?

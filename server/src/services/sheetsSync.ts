@@ -10,6 +10,7 @@ import { MongoClient, Db } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { signApiPath } from '../lib/signedUrl';
 import { appBaseUrl } from './email';
+import { signApprovalToken } from './approvalChain';
 
 // ── Entity → tab config ─────────────────────────────────────────────────────
 // `collection` is the MongoDB collection name (same as the Prisma model name).
@@ -817,10 +818,64 @@ export async function exportTravelAccountFms(): Promise<number> {
   return rows.length;
 }
 
+// ── "CEO Approvals" — everything currently PENDING with the Director (Akash
+// Agarwal · Director) mirrored to a sheet: what it is (PO/WO/TO/Payment + number),
+// the details, and the SAME one-click approval-form link the email carries. The
+// approval EMAIL still goes as before — this is an additive mirror. Read-only;
+// re-written each export so the sheet always shows the live pending queue.
+export const CEO_APPROVAL_TAB = 'CEO Approvals';
+// The approver role whose pending queue is mirrored (Akash = 'Director'). Override
+// via env if the CEO/Director role label differs.
+const CEO_APPROVAL_ROLE = process.env.CEO_APPROVAL_ROLE || 'Director';
+const CEO_APPROVAL_HEADERS = [
+  'Timestamp', 'Approval Type', 'Number', 'Project', 'Vendor', 'Amount', 'Raised by', 'Pending with', 'Submitted', 'Approval Form Link',
+];
+
+export async function exportCeoApprovals(): Promise<number> {
+  if (!sheetsEnabled()) return 0;
+  const db = await getDb();
+  const steps = await db.collection('ApprovalStep')
+    .find({ approverRole: CEO_APPROVAL_ROLE, status: 'PENDING' } as never)
+    .sort({ createdAt: 1 }).toArray();
+  await ensureTabs([CEO_APPROVAL_TAB]);
+  if (!steps.length) { await writeTab(CEO_APPROVAL_TAB, CEO_APPROVAL_HEADERS, []); return 0; }
+  const idsOf = (types: string[]) => steps.filter((s) => types.includes(s.docType as string)).map((s) => String(s.docId));
+  const [procDocs, grns, plans, advs, projects, users] = await Promise.all([
+    db.collection('ProcurementDoc').find({ _id: { $in: idsOf(['PO', 'WO', 'TO']) } } as never).toArray(),
+    db.collection('GRN').find({ _id: { $in: idsOf(['GRN', 'INVOICE', 'PAYMENT']) } } as never).toArray(),
+    db.collection('TravelPlan').find({ _id: { $in: idsOf(['TRAVEL', 'TRAVEL_EXPENSE']) } } as never).toArray(),
+    db.collection('PettyCashEntry').find({ _id: { $in: idsOf(['ADVANCE']) } } as never).toArray(),
+    db.collection('Project').find({}).project({ name: 1 }).toArray(),
+    db.collection('User').find({}).project({ name: 1 }).toArray(),
+  ]);
+  const projName = new Map(projects.map((p) => [String(p._id), p.name as string]));
+  const userName = new Map(users.map((u) => [String(u._id), u.name as string]));
+  interface DocInfo { number: string; amount: number | null; vendor: string; project: string; raisedBy: string; at: unknown }
+  const doc = new Map<string, DocInfo>();
+  for (const d of procDocs) doc.set(String(d._id), { number: d.docNumber, amount: d.finalAmount, vendor: d.vendorName || '', project: projName.get(String(d.projectId)) || '', raisedBy: userName.get(String(d.createdById)) || '', at: d.updatedAt || d.createdAt });
+  for (const g of grns) doc.set(String(g._id), { number: g.grnNumber, amount: g.invoiceValue ?? g.amountToPay ?? null, vendor: g.vendorName || '', project: projName.get(String(g.projectId)) || '', raisedBy: userName.get(String(g.createdById)) || '', at: g.updatedAt || g.createdAt });
+  for (const t of plans) doc.set(String(t._id), { number: t.planNumber, amount: t.totalAdvance, vendor: t.employeeName || '', project: projName.get(String(t.projectId)) || '', raisedBy: t.employeeName || '', at: t.createdAt });
+  for (const a of advs) doc.set(String(a._id), { number: a.entryNumber, amount: a.sanctionedAmount ?? a.amount, vendor: a.technician || '', project: projName.get(String(a.projectId)) || '', raisedBy: a.recordedByName || '', at: a.date || a.createdAt });
+  const base = appBaseUrl();
+  const rows: (string | number)[][] = steps.map((s) => {
+    const d = doc.get(String(s.docId));
+    const token = signApprovalToken({ stepId: String(s._id), docType: s.docType, docId: String(s.docId), approverId: String(s.approverId) });
+    const link = `${base}/api/approvals/act?token=${encodeURIComponent(token)}`;
+    return [
+      istSerial(s.createdAt), (s.docType as string) || '', d?.number || '', d?.project || '', d?.vendor || '',
+      Number(d?.amount) || 0, d?.raisedBy || '', (s.approverName as string) || '', dmy(d?.at), link,
+    ];
+  });
+  rows.sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0));
+  await writeTab(CEO_APPROVAL_TAB, CEO_APPROVAL_HEADERS, rows as (string | number | boolean)[][]);
+  await formatTimestampColumn(CEO_APPROVAL_TAB);
+  return rows.length;
+}
+
 /** Full export of every configured entity. */
 export async function exportAll(): Promise<ExportResult> {
   if (!sheetsEnabled()) throw new Error('Sheets sync disabled (missing env)');
-  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB, ADVANCE_FMS_TAB, TRAVEL_FMS_TAB]);
+  await ensureTabs([...ENTITIES.map((e) => e.tab), FMS_TAB, ADVANCE_FMS_TAB, TRAVEL_FMS_TAB, CEO_APPROVAL_TAB]);
   const result: ExportResult = [];
   for (const cfg of ENTITIES) {
     const count = await exportEntity(cfg);
@@ -829,6 +884,7 @@ export async function exportAll(): Promise<ExportResult> {
   result.push({ tab: FMS_TAB, rows: await exportPaymentAccountFms() });
   result.push({ tab: ADVANCE_FMS_TAB, rows: await exportAdvanceAccountFms() });
   result.push({ tab: TRAVEL_FMS_TAB, rows: await exportTravelAccountFms() });
+  result.push({ tab: CEO_APPROVAL_TAB, rows: await exportCeoApprovals() });
   return result;
 }
 
@@ -878,6 +934,7 @@ export function startFmsReverseSyncPoll(): void {
     void exportPaymentAccountFms()
       .then(() => exportAdvanceAccountFms())   // pull advance VR/UTR + refresh that tab too
       .then(() => exportTravelAccountFms())    // pull travel-payment VR/UTR + refresh that tab too
+      .then(() => exportCeoApprovals())        // refresh the Director's live pending-approval sheet
       .catch((e) => console.error('[sheetsSync] FMS reverse-sync poll failed:', (e as Error).message))
       .finally(() => { fmsPolling = false; });
   }, everyMs);

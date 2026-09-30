@@ -21,6 +21,8 @@ interface UserRow {
   whatsapp: string;
   employeeCode: string;
   mLevel?: string;
+  aadharNo?: string;
+  aadharFileUrl?: string;
   pageAccess: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sectionPerms: Partial<Record<SectionKey, boolean>>;
   approver?: ApproverProfile;
@@ -36,6 +38,7 @@ interface Form {
   id?: string;
   name: string; email: string; password: string;
   role: string; active: boolean; whatsapp: string; employeeCode: string; mLevel: string;
+  aadharNo: string; aadharFileUrl: string;
   grants: Partial<Record<PageKey, { view: boolean; edit: boolean }>>;
   sections: Partial<Record<SectionKey, boolean>>;
   projects: ProjAccess;
@@ -63,6 +66,7 @@ export default function UsersAdmin() {
   function openNew() {
     setEditing({
       name: '', email: '', password: '', role: 'USER', active: true, whatsapp: '', employeeCode: '', mLevel: '',
+      aadharNo: '', aadharFileUrl: '',
       grants: {}, sections: {}, projects: blankProjects(),
     });
   }
@@ -74,6 +78,7 @@ export default function UsersAdmin() {
     setEditing({
       id: u.id, name: u.name, email: u.email, password: '', role: u.role, active: u.active,
       whatsapp: u.whatsapp || '', employeeCode: u.employeeCode || '', mLevel: u.mLevel || '',
+      aadharNo: u.aadharNo || '', aadharFileUrl: u.aadharFileUrl || '',
       grants: u.pageAccess || {}, sections: u.sectionPerms || {}, projects,
     });
   }
@@ -278,11 +283,13 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
         await api.post('/users', {
           name: form.name, email: form.email, password: form.password,
           role: form.role, active: form.active, whatsapp: form.whatsapp, employeeCode: form.employeeCode, mLevel: form.mLevel,
+          aadharNo: form.aadharNo, aadharFileUrl: form.aadharFileUrl,
           pageAccess: form.grants, sectionPerms: form.sections, projects: includedProjects,
         });
       } else {
         await api.patch(`/users/${form.id}`, {
           name: form.name, role: form.role, active: form.active, whatsapp: form.whatsapp, employeeCode: form.employeeCode, mLevel: form.mLevel,
+          aadharNo: form.aadharNo, aadharFileUrl: form.aadharFileUrl,
           pageAccess: form.grants, sectionPerms: form.sections,
         });
         if (form.password) await api.post(`/users/${form.id}/password`, { password: form.password });
@@ -343,6 +350,27 @@ function UserDrawer({ meta, form, onChange, onClose, onSaved }: {
               <input className="input" value={form.mLevel} placeholder="e.g. M1, M2" onChange={(e) => onChange({ ...form, mLevel: e.target.value })} />
               {/* Auto-filled into the Travel module when this user is the traveller. */}
               <p className="mt-1 text-xs text-slate-400">Management level — shown automatically when this person is selected in Travel Planning.</p>
+            </div>
+            <div>
+              <label className="label">Aadhaar number (optional)</label>
+              <input className="input" value={form.aadharNo} placeholder="12-digit — or upload the card to auto-read" onChange={(e) => onChange({ ...form, aadharNo: e.target.value })} />
+              <div className="mt-1 flex items-center gap-2">
+                <label className="cursor-pointer rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-navy hover:bg-slate-50">
+                  📎 {form.aadharFileUrl ? 'Replace Aadhaar card' : 'Upload Aadhaar card'}
+                  <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                    const input = e.currentTarget; const f = input.files?.[0]; if (!f) return;
+                    try {
+                      const fd = new FormData(); fd.append('file', f);
+                      const r = (await api.post('/users/aadhar-upload', fd)).data as { fileUrl: string; aadhaar?: string | null };
+                      onChange({ ...form, aadharFileUrl: r.fileUrl, ...(r.aadhaar ? { aadharNo: r.aadhaar } : {}) });
+                    } catch (err) { alert(errMsg(err)); }
+                    finally { input.value = ''; }
+                  }} />
+                </label>
+                {form.aadharFileUrl && <a href={form.aadharFileUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">View ✓</a>}
+              </div>
+              {/* Captured once here; auto-filled into Travel when this user is the traveller. */}
+              <p className="mt-1 text-xs text-slate-400">Single-time capture — auto-fills into Travel Planning when this person is selected. Upload auto-reads the number.</p>
             </div>
           </div>
 

@@ -1,10 +1,13 @@
 import { Router } from 'express';
+import path from 'path';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { asyncHandler, badRequest, conflict, notFound } from '../lib/errors';
 import { requireAuth, requireAdmin } from '../middleware/authMiddleware';
 import { hashPassword, validatePassword } from '../lib/auth';
 import { audit } from '../lib/audit';
+import { upload, UPLOADS_PATH } from '../middleware/upload';
+import { extractAadharNumber } from '../services/aadharExtract';
 import { ROLES, ROLE_LABELS, PROJECT_ROLES } from '../lib/enums';
 import {
   PAGE_KEYS, PAGE_LABELS, SECTION_KEYS, SECTION_LABELS,
@@ -32,7 +35,7 @@ const projectsInput = z
 
 function publicUser(u: {
   id: string; name: string; email: string; role: string; active: boolean;
-  employeeCode?: string | null; mLevel?: string | null;
+  employeeCode?: string | null; mLevel?: string | null; aadharNo?: string | null; aadharFileUrl?: string | null;
   whatsapp: string | null; pageAccess: string | null; sectionPerms: string | null; approver?: string | null; createdAt?: Date;
   lastLoginAt?: Date | null; lastLogoutAt?: Date | null;
 }) {
@@ -40,6 +43,8 @@ function publicUser(u: {
     id: u.id, name: u.name, email: u.email, role: u.role, active: u.active,
     employeeCode: u.employeeCode ?? '',
     mLevel: u.mLevel ?? '',
+    aadharNo: u.aadharNo ?? '',
+    aadharFileUrl: u.aadharFileUrl ?? '',
     whatsapp: u.whatsapp ?? '',
     pageAccess: parseGrants(u.pageAccess),
     sectionPerms: parseSections(u.sectionPerms),
@@ -53,6 +58,7 @@ function publicUser(u: {
 // Column selection shared by the user endpoints (keeps `approver` included).
 const USER_SELECT = {
   id: true, name: true, email: true, role: true, active: true, employeeCode: true, mLevel: true,
+  aadharNo: true, aadharFileUrl: true,
   whatsapp: true, pageAccess: true, sectionPerms: true, approver: true, createdAt: true,
   lastLoginAt: true, lastLogoutAt: true,
 } as const;
@@ -273,6 +279,8 @@ const createSchema = z.object({
   active: z.boolean().default(true),
   employeeCode: z.string().trim().optional(),
   mLevel: z.string().trim().optional(),
+  aadharNo: z.string().trim().optional(),
+  aadharFileUrl: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -299,6 +307,8 @@ router.post(
         active: body.active,
         employeeCode: body.employeeCode?.trim() || null,
         mLevel: body.mLevel?.trim() || null,
+        aadharNo: body.aadharNo?.trim() || null,
+        aadharFileUrl: body.aadharFileUrl?.trim() || null,
         whatsapp: body.whatsapp || null,
         pageAccess: JSON.stringify(cleanGrants(body.pageAccess)),
         sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)),
@@ -320,6 +330,8 @@ const updateSchema = z.object({
   active: z.boolean().optional(),
   employeeCode: z.string().trim().optional(),
   mLevel: z.string().trim().optional(),
+  aadharNo: z.string().trim().optional(),
+  aadharFileUrl: z.string().trim().optional(),
   whatsapp: z.string().optional(),
   pageAccess: grantsInput,
   sectionPerms: sectionsInput,
@@ -349,6 +361,8 @@ router.patch(
         ...(body.active !== undefined && { active: body.active }),
         ...(body.employeeCode !== undefined && { employeeCode: body.employeeCode?.trim() || null }),
         ...(body.mLevel !== undefined && { mLevel: body.mLevel?.trim() || null }),
+        ...(body.aadharNo !== undefined && { aadharNo: body.aadharNo?.trim() || null }),
+        ...(body.aadharFileUrl !== undefined && { aadharFileUrl: body.aadharFileUrl?.trim() || null }),
         ...(body.whatsapp !== undefined && { whatsapp: body.whatsapp || null }),
         ...(body.pageAccess !== undefined && { pageAccess: JSON.stringify(cleanGrants(body.pageAccess)) }),
         ...(body.sectionPerms !== undefined && { sectionPerms: JSON.stringify(cleanSections(body.sectionPerms)) }),
@@ -393,6 +407,25 @@ router.put(
     ]);
     await audit({ userId: req.account!.id, action: 'USER_PROJECTS_SET', entity: 'User', entityId: req.params.id, details: { count: list.length } });
     res.json({ ok: true, count: list.length });
+  })
+);
+
+// POST /api/users/aadhar-upload — upload an Aadhaar card for a user profile and
+// auto-read its 12-digit number (best-effort). Returns { fileUrl, aadhaar } which
+// the admin form saves onto the user via create/PATCH. Admin-only (router-level).
+router.post(
+  '/aadhar-upload',
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw badRequest('No file uploaded');
+    const fileUrl = `/uploads/${req.file.filename}`;
+    let aadhaar: string | null = null;
+    let note: string | undefined;
+    try {
+      const out = await extractAadharNumber(path.join(UPLOADS_PATH, req.file.filename), req.file.mimetype);
+      aadhaar = out.aadhaar; note = out.note;
+    } catch { /* extraction is best-effort — the upload still succeeds */ }
+    res.status(201).json({ fileUrl, fileName: req.file.originalname, aadhaar, note });
   })
 );
 

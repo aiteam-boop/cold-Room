@@ -1322,6 +1322,17 @@ router.post('/grns/:grnId/lr', requireProjectMember, requireEdit('grn'), uploadP
   res.json({ ok: true, lrPdfUrl: grn.lrPdfUrl });
 }));
 
+// Upload the vendor-SIGNED & STAMPED copy of the order (PO/WO/TO) at payment time —
+// proof the vendor accepted the order. Stored under signedPoUrl on the GRN and filed
+// in Documents (type SIGNED_PO). PDF only, like the PI/LR. Optional for any order type.
+router.post('/grns/:grnId/signed-po', requireProjectMember, requireEdit('grn'), uploadPdf.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Only PDF files are allowed for the signed PO — please upload a PDF (images / JPEG are not accepted).');
+  const fileUrl = `/uploads/${req.file.filename}`;
+  const grn = await prisma.gRN.update({ where: { id: req.params.grnId }, data: { signedPoUrl: fileUrl } });
+  await prisma.procurementDocument.create({ data: { projectId: req.params.projectId, type: 'SIGNED_PO', fileName: req.file.originalname, fileUrl, linkedDocNumber: grn.grnNumber, vendorName: grn.vendorName, mimeType: req.file.mimetype, uploadedById: req.user!.sub } });
+  res.json({ ok: true, signedPoUrl: grn.signedPoUrl });
+}));
+
 // Upload a photo of the received material (optional — Sprint PRD §7.2).
 router.post('/grns/:grnId/photo', requireProjectMember, requireEdit('grn'), upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) throw badRequest('No file uploaded');

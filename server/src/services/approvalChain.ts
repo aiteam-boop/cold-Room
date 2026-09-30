@@ -329,6 +329,14 @@ export async function buildChain(docType: DocType, docId: string, projectId: str
   const doc = await docSummary(docType, docId);
   const firstSteps = await prisma.approvalStep.findMany({ where: { docType, docId, order: 1 } });
   if (doc) for (const s of firstSteps) await notifyStep(s, doc, 'NEW');
+  refreshCeoApprovalSheet();
+}
+
+// Mirror the Director's live pending queue to the "CEO Approvals" sheet whenever the
+// chain changes (submit / approve / hold). Fire-and-forget — a slow or failed sheet
+// write must never block an approval. Dynamic import avoids a static import cycle.
+export function refreshCeoApprovalSheet(): void {
+  import('./sheetsSync').then((m) => m.exportCeoApprovals()).catch(() => { /* best-effort */ });
 }
 
 // ── Chain state (for the timeline) ───────────────────────────────────────────
@@ -383,6 +391,7 @@ export async function recordDecision(docType: DocType, docId: string, actor: Act
     await prisma.approvalStep.update({ where: { id: acting.id }, data: { status: 'ON_HOLD', actedAt: new Date(), remarks: remarks ?? null } });
     await logAction(docType, docId, acting.id, actor, 'ON_HOLD', remarks);
     if (doc?.createdById) await notifyUser(doc.createdById, { type: 'APPROVAL_ON_HOLD', title: `${doc.label} ${doc.number} put on hold`, message: `${actor.name} put it on hold — please correct and resubmit${remarks ? `: ${remarks}` : '.'}`, projectId: doc.projectId, relatedDocType: docType, relatedDocId: docId, link: doc.link });
+    refreshCeoApprovalSheet();
     return 'ON_HOLD';
   }
 
@@ -391,6 +400,7 @@ export async function recordDecision(docType: DocType, docId: string, actor: Act
   // Any-one-approves: the other approvers on this step are no longer needed.
   const peers = group.filter((s) => s.id !== acting.id);
   if (peers.length) await prisma.approvalStep.updateMany({ where: { id: { in: peers.map((p) => p.id) } }, data: { status: 'SKIPPED', actedAt: new Date() } });
+  refreshCeoApprovalSheet();   // the Director's queue changed (advanced to / away from them)
 
   // Advance to the next step: promote every row at the next-highest order and
   // notify all of them at once.

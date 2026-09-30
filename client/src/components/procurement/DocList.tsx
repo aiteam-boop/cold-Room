@@ -16,6 +16,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
   const label = type === 'PO' ? 'Purchase Orders' : type === 'TO' ? 'Transport Orders' : 'Work Orders';
   const money = (n: number | null | undefined) => (hideFinancials ? '—' : inr(n));
   const [openId, setOpenId] = useState<string | null>(focusId ?? null);
+  const [q, setQ] = useState('');
 
   const { data, isLoading } = useQuery({
     queryKey: ['proc-docs', projectId, type],
@@ -36,16 +37,28 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
 
   if (openId) return <DocBuilder projectId={projectId} docId={openId} role={role} onClose={() => { setOpenId(null); qc.invalidateQueries({ queryKey: ['proc-docs', projectId, type] }); }} />;
   if (isLoading) return <Spinner label="Loading…" />;
-  const docs = data ?? [];
+  const allDocs = data ?? [];
+  // Client-side search over number / vendor / raiser / status — no server round-trip.
+  const term = q.trim().toLowerCase();
+  const docs = term
+    ? allDocs.filter((d) => [d.docNumber, d.vendorName, d.createdBy?.email, d.createdBy?.name, d.status].some((v) => (v || '').toLowerCase().includes(term)))
+    : allDocs;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-slate-600">{label} ({docs.length})</h3>
-        {isAdmin && <button className="btn-primary text-sm" disabled={create.isPending} onClick={() => create.mutate()}>+ New {type}</button>}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-medium text-slate-600">{label} ({docs.length}{term && docs.length !== allDocs.length ? ` of ${allDocs.length}` : ''})</h3>
+        <div className="flex items-center gap-2">
+          {allDocs.length > 0 && (
+            <input className="input h-8 w-52 text-sm" placeholder={`Search ${type} no. / vendor…`} value={q} onChange={(e) => setQ(e.target.value)} />
+          )}
+          {isAdmin && <button className="btn-primary text-sm" disabled={create.isPending} onClick={() => create.mutate()}>+ New {type}</button>}
+        </div>
       </div>
-      {docs.length === 0 ? (
+      {allDocs.length === 0 ? (
         <EmptyState title={`No ${label} yet`} hint={isAdmin ? `Create a ${type} with the company's exact format — vendor auto-fill, line items, 6-field payment terms and T&C.` : 'None created yet.'} action={isAdmin ? <button className="btn-primary mt-2" onClick={() => create.mutate()}>+ New {type}</button> : undefined} />
+      ) : docs.length === 0 ? (
+        <div className="card px-4 py-8 text-center text-sm text-slate-400">No {type} matches “{q}”.</div>
       ) : (
         <div className="card overflow-hidden">
           <table className="w-full text-sm">

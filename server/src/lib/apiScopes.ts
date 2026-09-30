@@ -68,7 +68,7 @@ const FILES = new Set([
 ]);
 // Always stripped, under every scope — never exposed via the public API.
 const HARD_DENY = new Set([
-  'aadhaar', 'aadhar', 'aadharnumber', 'nationalid', 'dob', 'dateofbirth', 'password', 'passwordhash',
+  'aadhaar', 'aadhar', 'aadharno', 'aadharnumber', 'aadharfileurl', 'nationalid', 'dob', 'dateofbirth', 'password', 'passwordhash',
   'keyhash', 'secret', 'token', 'apikey', 'embedding', 'vector', 'ip', 'ipaddress', 'before', 'after', 'sig',
 ]);
 

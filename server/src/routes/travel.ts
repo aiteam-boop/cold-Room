@@ -35,6 +35,7 @@ function serializePlan(p: any) {
     planDayCosts: parseJson(p.planDayCosts, [] as any[]),
     advances: parseJson(p.advances, [] as any[]),
     actualDayCosts: parseJson(p.actualDayCosts, [] as any[]),
+    siteExpenses: parseJson(p.siteExpenses, [] as any[]),
     techAttachments: parseJson(p.techAttachments, [] as any[]),
     joClosureProofs: parseJson(p.joClosureProofs, [] as any[]),
     techApproved: parseJson(p.techApproved, null as any),
@@ -66,7 +67,7 @@ async function nextNumber(prefix: string, table: 'travelPlan' | 'travelExpense')
 
 // ── Employees (traveller dropdown + M-Level auto-fill) ───────────────────────
 router.get('/employees', requirePage('travel'), asyncHandler(async (_req, res) => {
-  const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, name: true, email: true, mLevel: true, whatsapp: true, employeeCode: true }, orderBy: { name: 'asc' } });
+  const users = await prisma.user.findMany({ where: { active: true }, select: { id: true, name: true, email: true, mLevel: true, whatsapp: true, employeeCode: true, aadharNo: true, aadharFileUrl: true }, orderBy: { name: 'asc' } });
   res.json({ employees: users });
 }));
 
@@ -76,6 +77,20 @@ router.get('/entitlement', requirePage('travel'), asyncHandler(async (req, res) 
   const mLevel = typeof req.query.mLevel === 'string' ? req.query.mLevel : null;
   const city = typeof req.query.city === 'string' ? req.query.city : null;
   res.json({ entitlement: travelEntitlement(mLevel, city) });
+}));
+
+// ── Project BOQ (lightweight) — for the Site Expense BOQ head+item picker in tech
+// entry. Travel-gated so a travel user can map a spare/machine expense to a project's
+// BOQ WITHOUT the full 'boq' page grant. Read-only; returns only identifiers + head /
+// description (no quantities, no money) — same dropdown source a PO line uses.
+router.get('/project-boq/:projectId', requirePage('travel'), asyncHandler(async (req, res) => {
+  const items = await prisma.bOQItem.findMany({
+    where: { projectId: req.params.projectId, isGroup: false },
+    select: { id: true, srNo: true, description: true, category: true, unit: true },
+    orderBy: { sortOrder: 'asc' },
+  });
+  const categories = [...new Set(items.map((i) => i.category).filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b));
+  res.json({ items, categories });
 }));
 
 // ── Travel settings: who does the day-wise expense review (Reviewer / Final) ──
@@ -353,6 +368,54 @@ router.post('/', requireEdit('travel'), asyncHandler(async (req, res) => {
   res.status(201).json({ plan: serializePlan(plan) });
 }));
 
+// ── Create a dedicated Site-Expense trip (its own TRV id) ─────────────────────
+// Raised from the Tech-entry tab for a spare/machine purchase. Opens CLOSED so it
+// shows straight away in the tech-entry list; the traveller is the current user so
+// only they (or an admin) can file it. Shows only the BOQ-mapped site-expense editor.
+router.post('/site-expense', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const u = req.user!;
+  const planNumber = await nextNumber('TRV', 'travelPlan');
+  const now = new Date();
+  const plan = await prisma.travelPlan.create({
+    data: {
+      planNumber, kind: 'PLAN', isSiteExpense: true,
+      employeeId: u.sub, employeeName: u.name, employeeEmail: null,
+      appliedById: u.sub, appliedByName: u.name,
+      fromDate: now, toDate: now, days: 1,
+      jobOrders: JSON.stringify([]), planCosts: JSON.stringify({}), planDayCosts: JSON.stringify([]),
+      advances: JSON.stringify([]), actualDayCosts: JSON.stringify([]), siteExpenses: JSON.stringify([]), totalAdvance: 0,
+      status: 'CLOSED',
+      trail: JSON.stringify([{ at: now.toISOString(), action: 'Site-expense trip created', byName: u.name, remark: null }]),
+    },
+  });
+  await audit({ userId: u.sub, action: 'TRAVEL_CREATE', entity: 'TravelPlan', entityId: plan.id, details: { planNumber, siteExpense: true } });
+  res.status(201).json({ plan: serializePlan(plan) });
+}));
+
+// ── Create a Personal-Expense trip (its own TRV id) straight from Tech-entry ──
+// Mirrors the site-expense creator but a normal trip (isSiteExpense false): the tech
+// sets the dates + projects and fills the day-wise personal spend. Opens CLOSED so it
+// lands in the tech-entry list; traveller is the current user.
+router.post('/personal-expense', requireEdit('travel'), asyncHandler(async (req, res) => {
+  const u = req.user!;
+  const planNumber = await nextNumber('TRV', 'travelPlan');
+  const now = new Date();
+  const plan = await prisma.travelPlan.create({
+    data: {
+      planNumber, kind: 'PLAN', isSiteExpense: false,
+      employeeId: u.sub, employeeName: u.name, employeeEmail: null,
+      appliedById: u.sub, appliedByName: u.name,
+      fromDate: now, toDate: now, days: 1,
+      jobOrders: JSON.stringify([]), planCosts: JSON.stringify({}), planDayCosts: JSON.stringify([]),
+      advances: JSON.stringify([]), actualDayCosts: JSON.stringify([]), siteExpenses: JSON.stringify([]), totalAdvance: 0,
+      status: 'CLOSED',
+      trail: JSON.stringify([{ at: now.toISOString(), action: 'Personal-expense trip created', byName: u.name, remark: null }]),
+    },
+  });
+  await audit({ userId: u.sub, action: 'TRAVEL_CREATE', entity: 'TravelPlan', entityId: plan.id, details: { planNumber, personalExpense: true } });
+  res.status(201).json({ plan: serializePlan(plan) });
+}));
+
 // ── Update plan ──────────────────────────────────────────────────────────────
 router.patch('/:id', requireEdit('travel'), asyncHandler(async (req, res) => {
   const b = planBody.partial().parse(req.body);
@@ -415,8 +478,17 @@ router.patch('/:id/booking', requireEdit('travel'), asyncHandler(async (req, res
 }));
 
 // ── Tech entry — day-wise ACTUAL spend filed after the trip is Closed ────────
-const techDay = z.object({ day: z.coerce.number().default(1), date: z.string().optional().nullable(), bus: z.coerce.number().default(0), auto: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0), notes: z.string().optional().nullable() });
-const techBody = z.object({ actualDayCosts: z.array(techDay).default([]), notes: z.string().optional().nullable(), attachments: z.array(z.any()).optional(), joClosureProofs: z.array(z.any()).optional(), submit: z.boolean().optional() });
+const techDay = z.object({ day: z.coerce.number().default(1), date: z.string().optional().nullable(), bus: z.coerce.number().default(0), auto: z.coerce.number().default(0), food: z.coerce.number().default(0), hotel: z.coerce.number().default(0), other: z.coerce.number().default(0), misc: z.coerce.number().default(0), notes: z.string().optional().nullable(), jobOrderNos: z.array(z.string()).optional().default([]) });
+// Optional site-expense lines (spare/machine bought on the trip, mapped to a project's
+// BOQ head+item). Lenient so partial drafts save; the UI enforces online→attachment /
+// cash→reason before submit.
+const siteExpenseSchema = z.object({
+  id: z.string().optional(), jo: z.string().optional().nullable(),
+  boqHead: z.string().optional().nullable(), boqItemId: z.string().optional().nullable(), boqItemDesc: z.string().optional().nullable(),
+  date: z.string().optional().nullable(), description: z.string().optional().nullable(), amount: z.coerce.number().default(0),
+  paymentMode: z.string().optional().nullable(), attachmentUrl: z.string().optional().nullable(), cashReason: z.string().optional().nullable(),
+});
+const techBody = z.object({ actualDayCosts: z.array(techDay).default([]), notes: z.string().optional().nullable(), attachments: z.array(z.any()).optional(), joClosureProofs: z.array(z.any()).optional(), siteExpenses: z.array(siteExpenseSchema).optional(), submit: z.boolean().optional() });
 router.post('/:id/tech-entry', requireEdit('travel'), asyncHandler(async (req, res) => {
   const b = techBody.parse(req.body);
   const u = req.user!;
@@ -436,6 +508,7 @@ router.post('/:id/tech-entry', requireEdit('travel'), asyncHandler(async (req, r
   };
   if (b.attachments !== undefined) data.techAttachments = JSON.stringify(b.attachments);
   if (b.joClosureProofs !== undefined) data.joClosureProofs = JSON.stringify(b.joClosureProofs);
+  if (b.siteExpenses !== undefined) data.siteExpenses = JSON.stringify(b.siteExpenses);
   if (b.submit) { data.techEntrySubmittedAt = new Date(); data.trail = withTrail(cur, 'Expenses submitted', u.name); }
   const plan = await prisma.travelPlan.update({ where: { id: cur.id }, data });
   await audit({ userId: u.sub, action: b.submit ? 'TRAVEL_TECH_SUBMIT' : 'TRAVEL_TECH_SAVE', entity: 'TravelPlan', entityId: cur.id, details: { planNumber: cur.planNumber } });

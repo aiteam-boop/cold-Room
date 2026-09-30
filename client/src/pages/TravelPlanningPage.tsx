@@ -13,7 +13,7 @@ import PettyCashPage from './PettyCashPage';
 // 'Travel Expense') → the employee is notified + can download the approval PDF.
 // Approvers are whoever the "Approval Chains" config lists for those two types.
 
-type Employee = { id: string; name: string; email: string | null; mLevel: string | null; whatsapp: string | null };
+type Employee = { id: string; name: string; email: string | null; mLevel: string | null; whatsapp: string | null; aadharNo?: string | null; aadharFileUrl?: string | null };
 type Advance = { amount: number; fileUrl?: string | null };
 type ExpenseItem = { date?: string | null; details: string; paymentMode: 'Online' | 'Cash'; amount: number; supportingUrl?: string | null };
 
@@ -145,22 +145,111 @@ function TicketRequestTab({ canManage }: { canManage: boolean }) {
 }
 
 // ── Tech entry: file day-wise ACTUAL spend for CLOSED plans (Spare-AI style) ──
-type ActualDay = { day: number; date: string; bus: number; auto: number; food: number; hotel: number; other: number; misc: number; notes: string };
+type ActualDay = { day: number; date: string; bus: number; auto: number; food: number; hotel: number; other: number; misc: number; notes: string; jobOrderNos: string[] };
 const CATS = ['bus', 'auto', 'food', 'hotel', 'other', 'misc'] as const;
-const CAT_LABEL: Record<string, string> = { bus: 'Bus', auto: 'Auto', food: 'Food', hotel: 'Hotel', other: 'Other', misc: 'Misc' };
+// Data keys stay `bus`/`auto` (so existing entries are preserved); only the labels
+// read Hotel-to-Site / Site-to-Hotel per the travel-expense sheet.
+const CAT_LABEL: Record<string, string> = { bus: 'Hotel-to-Site', auto: 'Site-to-Hotel', food: 'Food', hotel: 'Hotel', other: 'Other', misc: 'Misc' };
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function buildActuals(days: number, fromDate: string, prev: ActualDay[]): ActualDay[] {
   const out: ActualDay[] = [];
   for (let i = 0; i < days; i++) {
     const p = prev[i];
     const d = new Date(fromDate); d.setDate(d.getDate() + i);
-    out.push(p ? { ...p, day: i + 1, date: p.date || d.toISOString().slice(0, 10) } : { day: i + 1, date: d.toISOString().slice(0, 10), bus: 0, auto: 0, food: 0, hotel: 0, other: 0, misc: 0, notes: '' });
+    out.push(p ? { ...p, day: i + 1, date: p.date || d.toISOString().slice(0, 10), jobOrderNos: p.jobOrderNos || [] } : { day: i + 1, date: d.toISOString().slice(0, 10), bus: 0, auto: 0, food: 0, hotel: 0, other: 0, misc: 0, notes: '', jobOrderNos: [] });
   }
   return out;
 }
 const dayActualTotal = (d: ActualDay) => (+d.bus || 0) + (+d.auto || 0) + (+d.food || 0) + (+d.hotel || 0) + (+d.other || 0) + (+d.misc || 0);
 const techLabel = (s?: string) => (s === 'SUBMITTED' ? 'Submitted' : s === 'APPROVED' ? 'Approved' : 'Expenses not filed');
 const techPill = (s?: string) => (s === 'SUBMITTED' ? 'bg-blue-100 text-blue-700' : s === 'APPROVED' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700');
+
+// ── Site expense (OPTIONAL) — a spare/machine bought on the trip, mapped to a
+// project's BOQ head + item (like a PO line). Coexists with the personal day-wise
+// spend; it does not replace it.
+type SiteExpense = { id: string; jo: string; boqHead: string; boqItemId: string; boqItemDesc: string; date: string; description: string; amount: number; paymentMode: '' | 'Cash' | 'Online'; attachmentUrl: string; cashReason: string };
+const newSiteExpense = (date: string): SiteExpense => ({ id: Math.random().toString(36).slice(2), jo: '', boqHead: '', boqItemId: '', boqItemDesc: '', date, description: '', amount: 0, paymentMode: '', attachmentUrl: '', cashReason: '' });
+// Returns the first blocking problem (submit-time), or '' when every line is valid.
+function siteExpenseError(list: SiteExpense[]): string {
+  for (const s of list) {
+    if (!s.jo) return 'Site expense: pick a project for each line.';
+    if (!s.boqHead) return 'Site expense: select a BOQ head for each line.';
+    if (!(Number(s.amount) > 0)) return 'Site expense: enter an amount (greater than 0) for each line.';
+    if (!s.paymentMode) return 'Site expense: select the payment mode (Cash / Online).';
+    if (s.paymentMode === 'Online' && !s.attachmentUrl) return 'Site expense: an Online payment needs an attachment (proof).';
+    if (s.paymentMode === 'Cash' && !s.cashReason.trim()) return 'Site expense: a Cash payment needs a reason (why no online proof).';
+  }
+  return '';
+}
+
+// One site-expense line — fetches the chosen project's BOQ (travel-gated endpoint)
+// to drive the head + item dropdowns, exactly like a PO line.
+function SiteExpenseRow({ line, index, joNos, projects, readOnly, onChange, onRemove }: {
+  line: SiteExpense; index: number; joNos: string[]; projects: any[]; readOnly: boolean;
+  onChange: (patch: Partial<SiteExpense>) => void; onRemove: () => void;
+}) {
+  const projectId = projects.find((p) => p.name === line.jo)?.id as string | undefined;
+  const boqQ = useQuery({
+    queryKey: ['travel-project-boq', projectId],
+    queryFn: async () => (await api.get(`/travel/project-boq/${projectId}`)).data as { items: any[]; categories: string[] },
+    enabled: !!projectId,
+  });
+  const items = boqQ.data?.items ?? [];
+  const heads = boqQ.data?.categories ?? [];
+  const itemsForHead = line.boqHead ? items.filter((b) => b.category === line.boqHead) : items;
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-500">Site expense #{index + 1}</span>
+        {!readOnly && <button type="button" className="text-xs text-rose-400 hover:text-rose-600" onClick={onRemove}>Remove ✕</button>}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <div><label className="label">Project *</label>
+          <select className="input h-8 text-xs" value={line.jo} onChange={(e) => onChange({ jo: e.target.value, boqHead: '', boqItemId: '', boqItemDesc: '' })}>
+            <option value="">— Select project —</option>
+            {joNos.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div><label className="label">BOQ head *</label>
+          <select className="input h-8 text-xs" value={line.boqHead} disabled={!projectId} onChange={(e) => onChange({ boqHead: e.target.value, boqItemId: '', boqItemDesc: '' })}>
+            <option value="">{projectId ? (boqQ.isLoading ? 'loading…' : '— Select head —') : 'pick project first'}</option>
+            {heads.map((h) => <option key={h} value={h}>{h}</option>)}
+          </select>
+        </div>
+        <div><label className="label">BOQ item</label>
+          <select className="input h-8 text-xs" value={line.boqItemId} disabled={!projectId} onChange={(e) => { const b = items.find((x) => x.id === e.target.value); onChange({ boqItemId: e.target.value, boqItemDesc: b ? b.description : '', ...(b && !line.boqHead && b.category ? { boqHead: b.category } : {}) }); }}>
+            <option value="">Other (no specific item)</option>
+            {itemsForHead.map((b) => <option key={b.id} value={b.id}>{b.srNo ? `${b.srNo}. ` : ''}{String(b.description).slice(0, 50)}</option>)}
+          </select>
+        </div>
+        <div><label className="label">Date</label><input type="date" className="input h-8 text-xs" value={line.date} onChange={(e) => onChange({ date: e.target.value })} /></div>
+        <div className="sm:col-span-2"><label className="label">Description</label><input className="input h-8 text-xs" value={line.description} onChange={(e) => onChange({ description: e.target.value })} placeholder="e.g. Compressor spare for Blast Freezer" /></div>
+        <div><label className="label">Amount (₹) *</label><input type="number" min={0} className="input h-8 text-xs" value={line.amount || ''} onChange={(e) => onChange({ amount: Number(e.target.value) })} placeholder="0" /></div>
+        <div><label className="label">Payment mode *</label>
+          <select className="input h-8 text-xs" value={line.paymentMode} onChange={(e) => onChange({ paymentMode: e.target.value as SiteExpense['paymentMode'] })}>
+            <option value="">— Select —</option>
+            <option value="Online">Online</option>
+            <option value="Cash">Cash</option>
+          </select>
+        </div>
+        <div>
+          {line.paymentMode === 'Cash' ? (
+            <><label className="label">Cash reason *</label><input className="input h-8 text-xs" value={line.cashReason} onChange={(e) => onChange({ cashReason: e.target.value })} placeholder="why no online proof" /></>
+          ) : (
+            <><label className="label">Attachment{line.paymentMode === 'Online' ? ' *' : ''}</label>
+              <div className="flex items-center gap-2">
+                <label className="cursor-pointer rounded border border-slate-300 px-2 py-1 text-xs text-navy hover:bg-slate-50">📎 {line.attachmentUrl ? 'Replace' : 'Upload'}
+                  <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const url = await uploadFile(f); onChange({ attachmentUrl: url }); } (e.currentTarget as HTMLInputElement).value = ''; }} />
+                </label>
+                {line.attachmentUrl && <a href={line.attachmentUrl} target="_blank" rel="noreferrer" className="text-xs text-navy hover:underline">View ✓</a>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function TechEntryTab({ canManage }: { canManage: boolean }) {
   const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
@@ -171,6 +260,17 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
   const nowD = new Date();
   const [month, setMonth] = useState(String(nowD.getMonth()));
   const [year, setYear] = useState(String(nowD.getFullYear()));
+  // "+ Site Expense" / "+ Personal Expense" — each creates its own TRV trip and opens it.
+  const createSite = useMutation({
+    mutationFn: async () => (await api.post('/travel/site-expense', {})).data.plan as any,
+    onSuccess: (p) => { plansQ.refetch(); setOpen(p.id); },
+    onError: (e) => alert(errMsg(e)),
+  });
+  const createPersonal = useMutation({
+    mutationFn: async () => (await api.post('/travel/personal-expense', {})).data.plan as any,
+    onSuccess: (p) => { plansQ.refetch(); setOpen(p.id); },
+    onError: (e) => alert(errMsg(e)),
+  });
   if (plansQ.isLoading) return <Spinner label="Loading closed trips…" />;
   const allClosed = (plansQ.data ?? []).filter((p) => p.status === 'CLOSED');
   const closed = allClosed.filter((p) => {
@@ -193,6 +293,8 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
           <select className="input h-8 w-24 py-0 text-xs" value={year} onChange={(e) => setYear(e.target.value)}><option value="">All years</option>{years.map((y) => <option key={y} value={y}>{y}</option>)}</select>
           <select className="input h-8 py-0 text-xs" value={tech} onChange={(e) => setTech(e.target.value)}><option value="">All technicians</option>{techs.map((t) => <option key={t} value={t}>{t}</option>)}</select>
           <span className="text-slate-400">{closed.length} trip(s) · {filed} submission(s)</span>
+          {canManage && <button className="btn-outline h-8 text-xs" disabled={createPersonal.isPending} onClick={() => createPersonal.mutate()} title="Create a separate Personal-Expense trip (day-wise spend)">📄 + Personal Expense</button>}
+          {canManage && <button className="btn-primary h-8 text-xs" disabled={createSite.isPending} onClick={() => createSite.mutate()} title="Create a separate Site-Expense trip for a spare/machine purchase">🔧 + Site Expense</button>}
         </div>
       </div>
       {closed.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">No closed trips yet. Close a plan from <span className="font-medium">Plan history</span> to file its expenses.</div> : (
@@ -203,7 +305,7 @@ function TechEntryTab({ canManage }: { canManage: boolean }) {
                 <span className="text-slate-400">{open === p.id ? '▾' : '▸'}</span>
                 <span className="font-medium text-navy">{p.planNumber}</span>
                 <span className="text-sm text-slate-500">· {p.employeeName} · {fmtDate(p.fromDate)} → {fmtDate(p.toDate)} <span className="text-xs">({p.days}d · {(p.jobOrders ?? []).filter((j: any) => j.jo).length} projects)</span></span>
-                <span className="badge ml-1 bg-slate-200 text-slate-600">CLOSED</span>
+                {p.isSiteExpense ? <span className="badge ml-1 bg-indigo-100 text-indigo-700">🔧 Site Expense</span> : <span className="badge ml-1 bg-slate-200 text-slate-600">CLOSED</span>}
                 <span className="ml-auto flex items-center gap-2 text-xs">
                   <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-700" title={p.personAdvance ? `Plan ${inr(p.totalAdvance || 0)} + New Advance ${inr(p.personAdvance)}${p.personSettled ? ` − ${inr(p.personSettled)} settled` : ''}` : undefined}>Adv {inr(Math.max(0, (p.effectiveAdvance ?? p.totalAdvance ?? 0) - (Number(p.personSettled) || 0)))}{p.personAdvance ? <span className="text-[9px] text-indigo-500"> (+NA)</span> : null}</span>
                   {(() => { const spent = (p.actualDayCosts || []).reduce((s: number, d: any) => s + dayActualTotal(d), 0); return spent > 0 ? <span className="font-medium text-slate-700">Spent {inr(spent)}</span> : null; })()}
@@ -226,13 +328,33 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
   // login, no employeeId) stay open to the coordinator, so nothing breaks.
   const notMyTrip = !!plan.employeeId && plan.employeeId !== user?.id && !isAdmin;
   const readOnly = !canManage || notMyTrip || plan.techEntryStatus === 'APPROVED';
+  // A dedicated Site-Expense trip (its own TRV id) shows ONLY the BOQ-mapped site
+  // editor — no personal day-wise grid / slab / advance reconciliation.
+  const isSite = !!plan.isSiteExpense;
   const pc = plan.planCosts || {};
   const from = plan.fromDate ? new Date(plan.fromDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
-  const [rows, setRows] = useState<ActualDay[]>(() => plan.actualDayCosts?.length ? plan.actualDayCosts.map((d: any, i: number) => ({ day: i + 1, date: d.date || '', bus: +d.bus || 0, auto: +d.auto || 0, food: +d.food || 0, hotel: +d.hotel || 0, other: +d.other || 0, misc: +d.misc || 0, notes: d.notes || '' })) : buildActuals(plan.days || 1, from, []));
+  const [rows, setRows] = useState<ActualDay[]>(() => plan.actualDayCosts?.length ? plan.actualDayCosts.map((d: any, i: number) => ({ day: i + 1, date: d.date || '', bus: +d.bus || 0, auto: +d.auto || 0, food: +d.food || 0, hotel: +d.hotel || 0, other: +d.other || 0, misc: +d.misc || 0, notes: d.notes || '', jobOrderNos: d.jobOrderNos || [] })) : buildActuals(plan.days || 1, from, []));
   const [notes, setNotes] = useState(plan.techEntryNotes || '');
   const [atts, setAtts] = useState<Record<string, string>>(() => { const m: Record<string, string> = {}; (plan.techAttachments || []).forEach((a: any) => { m[`${a.day}:${a.category}`] = a.fileUrl; }); return m; });
   const [err, setErr] = useState('');
+  // Project + trip-date selection — the same two picks made in Plan history, surfaced
+  // here so a ticket-request trip can be set up right in tech entry (choose projects +
+  // from/to date) and then have its per-day spend filled below. Saved via the plan PATCH.
+  const projectsQ = useQuery({ queryKey: ['travel-projects'], queryFn: async () => (await api.get('/projects')).data.projects as any[] });
+  const projects = projectsQ.data ?? [];
+  const [jobOrders, setJobOrders] = useState<JobOrder[]>((plan.jobOrders?.length ? plan.jobOrders : [{ jo: '', cn: '', loc: '', cont: '', ms: '' }]).map((j: any) => ({ jo: j.jo || '', cn: j.cn || '', loc: j.loc || '', cont: j.cont || '', ms: j.ms || '' })));
+  const [fromDate, setFromDate] = useState(plan.fromDate ? new Date(plan.fromDate).toISOString().slice(0, 10) : from);
+  const [toDate, setToDate] = useState(plan.toDate ? new Date(plan.toDate).toISOString().slice(0, 10) : (plan.fromDate ? new Date(plan.fromDate).toISOString().slice(0, 10) : from));
+  const days = useMemo(() => daysBetween(fromDate || from, toDate || fromDate || from), [fromDate, toDate]);
+  // Keep the day-wise spend rows in step with the chosen dates (preserves entered values).
+  useEffect(() => { if (!readOnly) setRows((prev) => buildActuals(days, fromDate, prev)); }, [days, fromDate, readOnly]);
+  const joNos = jobOrders.map((j) => j.jo).filter(Boolean);
+  const setJo = (i: number, patch: Partial<JobOrder>) => setJobOrders(jobOrders.map((j, k) => k === i ? { ...j, ...patch } : j));
   const set = (i: number, patch: Partial<ActualDay>) => setRows(rows.map((d, j) => j === i ? { ...d, ...patch } : d));
+  // Optional site expenses (BOQ-mapped) — coexist with the personal day-wise spend.
+  const [siteExpenses, setSiteExpenses] = useState<SiteExpense[]>(() => (plan.siteExpenses || []).map((s: any) => ({ id: s.id || Math.random().toString(36).slice(2), jo: s.jo || '', boqHead: s.boqHead || '', boqItemId: s.boqItemId || '', boqItemDesc: s.boqItemDesc || '', date: s.date || '', description: s.description || '', amount: +s.amount || 0, paymentMode: s.paymentMode || '', attachmentUrl: s.attachmentUrl || '', cashReason: s.cashReason || '' })));
+  const setSe = (i: number, patch: Partial<SiteExpense>) => setSiteExpenses((prev) => prev.map((s, k) => k === i ? { ...s, ...patch } : s));
+  const siteTotal = siteExpenses.reduce((s, x) => s + (+x.amount || 0), 0);
 
   const act = { travel: rows.reduce((s, d) => s + (+d.bus || 0) + (+d.auto || 0), 0), food: rows.reduce((s, d) => s + (+d.food || 0), 0), hotel: rows.reduce((s, d) => s + (+d.hotel || 0), 0), other: rows.reduce((s, d) => s + (+d.other || 0) + (+d.misc || 0), 0) };
   const actGrand = act.travel + act.food + act.hotel + act.other;
@@ -257,7 +379,7 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
   // Per-day policy slab (M-Level + city): one combined cap spendable on anything that
   // day; a day over the cap is flagged over-slab. City = first project's location, else
   // the destination (empty → policy default category).
-  const techCity = (plan.jobOrders || []).map((j: any) => j.loc).find(Boolean) || plan.destination || '';
+  const techCity = jobOrders.map((j) => j.loc).find(Boolean) || plan.destination || '';
   const entQ = useQuery({
     queryKey: ['travel-entitlement', plan.mLevel, techCity],
     queryFn: async () => (await api.get(`/travel/entitlement?mLevel=${encodeURIComponent(plan.mLevel || '')}&city=${encodeURIComponent(techCity)}`)).data.entitlement as { group: string; category: string; hotel: number; food: number; other: number },
@@ -269,8 +391,14 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
 
   const save = useMutation({
     mutationFn: async (submit: boolean) => {
+      // Site-expense lines are validated only on SUBMIT (a draft save may be partial).
+      if (submit) { const msg = siteExpenseError(siteExpenses); if (msg) { setErr(msg); throw new Error(msg); } }
+      // Persist the trip's projects + dates (same as Plan history) first, then the
+      // day-wise spend + any site expenses. Only these fields are patched — nothing
+      // else on the plan is touched.
+      await api.patch(`/travel/${plan.id}`, { jobOrders: jobOrders.filter((j) => j.jo.trim()), fromDate, toDate, days });
       const attachments = Object.entries(atts).filter(([, v]) => v).map(([k, fileUrl]) => { const [day, category] = k.split(':'); return { day: Number(day), category, fileUrl }; });
-      return api.post(`/travel/${plan.id}/tech-entry`, { actualDayCosts: rows, notes, attachments, submit });
+      return api.post(`/travel/${plan.id}/tech-entry`, { actualDayCosts: rows, notes, attachments, siteExpenses, submit });
     },
     onSuccess: onDone,
     onError: (e) => setErr(errMsg(e)),
@@ -283,7 +411,61 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
   return (
     <div className="space-y-4">
       {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
-      {/* Plan vs Actual */}
+
+      {/* Trip setup — projects + dates (the same two picks as Plan history). Lets a
+          ticket-request trip be set up right here before filling day-wise spend. */}
+      <fieldset disabled={readOnly}>
+        <div className="rounded-lg border border-slate-200 bg-white p-3">
+          <div className="mb-2 text-[10px] font-semibold uppercase text-slate-400">Trip — projects &amp; dates</div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div><label className="label">From date</label><input type="date" className="input" value={fromDate} onChange={(e) => setFromDate(e.target.value)} /></div>
+            <div><label className="label">To date</label><input type="date" className="input" value={toDate} onChange={(e) => setToDate(e.target.value)} /></div>
+            <div><label className="label">Days</label><input className="input bg-slate-50" value={days} readOnly /></div>
+          </div>
+          <div className="mt-3">
+            <div className="mb-1 flex items-center justify-between"><span className="text-xs font-semibold uppercase text-slate-400">Projects</span>{!readOnly && <button type="button" className="text-xs font-medium text-navy hover:underline" onClick={() => setJobOrders([...jobOrders, { jo: '', cn: '', loc: '', cont: '', ms: '' }])}>+ Add project</button>}</div>
+            <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-sm"><thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="w-6">#</th><th>Project</th><th>Client</th><th>Location</th><th></th></tr></thead>
+              <tbody>{jobOrders.map((j, i) => (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="py-1 text-slate-400">{i + 1}</td>
+                  <td className="pr-2"><select className="input h-8 text-xs" value={j.jo} onChange={(e) => { const pr = projects.find((x) => x.name === e.target.value); setJo(i, { jo: e.target.value, cn: pr?.clientName || '', loc: pr?.siteLocation || '' }); }}><option value="">{j.jo || '— Select —'}</option>{projects.map((pr) => <option key={pr.id} value={pr.name}>{pr.name}</option>)}</select></td>
+                  <td className="pr-2 text-xs text-slate-500">{j.cn || '—'}</td>
+                  <td className="pr-2 text-xs text-slate-500">{j.loc || '—'}</td>
+                  <td>{!readOnly && <button type="button" className="text-rose-400 hover:text-rose-600" onClick={() => setJobOrders(jobOrders.filter((_, k) => k !== i))}>✕</button>}</td>
+                </tr>))}</tbody></table></div>
+          </div>
+        </div>
+      </fieldset>
+
+      {/* Site expenses — a dedicated Site-Expense trip: each line maps to a project's
+          BOQ head + item (like a PO line). Shown only for isSiteExpense trips. */}
+      {isSite && (
+      <fieldset disabled={readOnly}>
+        <div className="rounded-lg border border-slate-200 bg-white p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div><span className="text-[10px] font-semibold uppercase text-slate-400">Site expenses (BOQ-mapped)</span>
+              <div className="text-[11px] text-slate-400">Spare/machine purchase. Pick the project, its BOQ head + item, amount &amp; payment mode.</div>
+            </div>
+            {!readOnly && <button type="button" className="btn-primary text-xs" onClick={() => setSiteExpenses((prev) => [...prev, newSiteExpense(fromDate)])}>+ Add site expense</button>}
+          </div>
+          {siteExpenses.length > 0 ? (
+            <div className="mt-2 space-y-2">
+              {siteExpenses.map((s, i) => (
+                <SiteExpenseRow key={s.id} line={s} index={i} joNos={joNos} projects={projects} readOnly={readOnly} onChange={(patch) => setSe(i, patch)} onRemove={() => setSiteExpenses((prev) => prev.filter((_, k) => k !== i))} />
+              ))}
+              <div className="text-right text-xs font-semibold text-navy">Site total: {m0(siteTotal)}</div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-center text-xs text-slate-400">
+              No site expenses. {readOnly ? '' : 'Click “+ Add site expense” above to add a BOQ-mapped spare/machine purchase.'}
+            </div>
+          )}
+        </div>
+      </fieldset>
+      )}
+
+      {/* Personal-expense blocks (hidden for a Site-Expense trip) */}
+      {!isSite && (<>
       <div><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">Plan vs actual</div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{pvA('Travel', +pc.travel || 0, act.travel)}{pvA('Food', +pc.food || 0, act.food)}{pvA('Hotel', +pc.hotel || 0, act.hotel)}{pvA('Other', +pc.other || 0, act.other)}<div className="rounded-lg border border-navy/20 bg-navy/5 p-2.5"><div className="text-[10px] uppercase text-navy/60">Grand</div><div className="text-xs">Plan: <span className="font-medium">{m0(planGrand)}</span></div><div className="text-xs">Act: <span className="font-bold text-navy">{m0(actGrand)}</span></div></div></div>
       </div>
@@ -301,12 +483,13 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
       {/* Day-wise actual grid */}
       <fieldset disabled={readOnly}>
       <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm">
-        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th>{CATS.map((c) => <th key={c} className="pl-1">{CAT_LABEL[c]}</th>)}<th>Notes</th><th className="text-right pr-2">Total</th></tr></thead>
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Day</th><th>Date</th><th>Projects</th>{CATS.map((c) => <th key={c} className="pl-1">{CAT_LABEL[c]}</th>)}<th>Notes</th><th className="text-right pr-2">Total</th></tr></thead>
         <tbody>
           {rows.map((d, i) => (
             <tr key={i} className="border-t border-slate-100">
               <td className="py-1 font-medium text-slate-600">Day {d.day}</td>
               <td className="text-xs text-slate-500">{d.date}</td>
+              <td className="pr-2"><DayProjectPicker available={joNos} selected={d.jobOrderNos} onChange={(next) => set(i, { jobOrderNos: next })} /></td>
               {CATS.map((c) => { const key = `${d.day}:${c}`; return (
                 <td key={c} className="pr-1">
                   <div className="flex items-center gap-1">
@@ -358,6 +541,8 @@ function TechEntryEditor({ plan, canManage, onDone }: { plan: any; canManage: bo
           </table>
         </div>
       </div>
+
+      </>)}
 
       {!readOnly && (
         <div className="flex gap-2">
@@ -1041,7 +1226,7 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
             <div className="overflow-x-auto">
               <table className="w-full text-xs [&_td]:px-2 [&_td]:py-1 [&_th]:px-2 [&_th]:py-1">
                 <thead className="bg-slate-50 text-left text-[10px] uppercase text-slate-400">
-                  <tr><th>Day</th><th>Date</th><th className="text-right">Bus</th><th className="text-right">Auto</th><th className="text-right">Food</th><th className="text-right">Hotel</th><th className="text-right">Other</th><th className="text-right">Misc</th><th className="text-right">Day total</th><th>Notes</th></tr>
+                  <tr><th>Day</th><th>Date</th><th className="text-right">{CAT_LABEL.bus}</th><th className="text-right">{CAT_LABEL.auto}</th><th className="text-right">Food</th><th className="text-right">Hotel</th><th className="text-right">Other</th><th className="text-right">Misc</th><th className="text-right">Day total</th><th>Notes</th></tr>
                 </thead>
                 <tbody>
                   {actualDays.map((d, i) => (
@@ -1575,7 +1760,13 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
   function pickEmployee(id: string) {
     setEmployeeId(id);
     const e = employees.find((x) => x.id === id);
-    if (e) { setName(e.name); setEmail(e.email || ''); setMLevel(e.mLevel || ''); setPhone(e.whatsapp || ''); }
+    if (e) {
+      setName(e.name); setEmail(e.email || ''); setMLevel(e.mLevel || ''); setPhone(e.whatsapp || '');
+      // Aadhaar auto-fills from the user profile (like M-Level); still editable /
+      // re-uploadable per trip. Only prefill when present — never wipe a typed value.
+      if (e.aadharNo) setAadharNo(e.aadharNo);
+      if (e.aadharFileUrl) setAadharFile(e.aadharFileUrl);
+    }
   }
   // Raise this request AGAINST an existing New plan: link to it + prefill the traveller
   // and dates from the plan. Leave the picker on "New" to raise a fresh request with
@@ -1699,12 +1890,22 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
               <label className="label">Mode of travel *</label>
               <div className="flex flex-wrap gap-2">
                 {MODES.map((m) => {
+                  // Outside-policy modes stay SELECTABLE (urgent travel — e.g. Flight
+                  // for a grade that normally can't fly). They are flagged amber and a
+                  // warning shows below; the approver sees it and must authorise it.
                   const blocked = !!allowedModes && !allowedModes.includes(m);
+                  const selected = travelMode === m;
                   return (
-                    <button key={m} type="button" disabled={blocked} onClick={() => setMode(m)} title={blocked ? `Not allowed for ${mLevel}` : ''} className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${blocked ? 'cursor-not-allowed border-slate-200 text-slate-300' : travelMode === m ? 'border-navy bg-navy text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{MODE_ICON[m]} {m}</button>
+                    <button key={m} type="button" onClick={() => setMode(m)} title={blocked ? `Outside policy for ${mLevel} — urgent travel only` : ''} className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${selected ? (blocked ? 'border-amber-500 bg-amber-500 text-white' : 'border-navy bg-navy text-white') : blocked ? 'border-amber-300 text-amber-600 hover:bg-amber-50' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{MODE_ICON[m]} {m}{blocked ? ' ⚠' : ''}</button>
                   );
                 })}
               </div>
+              {/* Out-of-policy mode chosen (e.g. urgent Flight): warn + tell the requester the approver must authorise. */}
+              {allowedModes && travelMode && !allowedModes.includes(travelMode) && (
+                <div className="mt-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
+                  ⚠ <b>{travelMode}</b> is outside policy for M-Level {mLevel || '—'} (allowed: {allowedModes.join(' / ')}). Use only for <b>urgent travel</b> — the approver will see this and must authorise it.
+                </div>
+              )}
               {/* Entitlement (auto from M-Level + destination). */}
               {ent && (
                 <div className="mt-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-slate-600">

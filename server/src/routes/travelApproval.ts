@@ -105,6 +105,7 @@ function page(data: Loaded, token: string, chain: Awaited<ReturnType<typeof trav
            <option value="">— Select —</option>
            <option value="Card"${plan.paymentMethod === 'Card' ? ' selected' : ''}>Card</option>
            <option value="Online"${plan.paymentMethod === 'Online' ? ' selected' : ''}>Online</option>
+           <option value="Cash"${plan.paymentMethod === 'Cash' ? ' selected' : ''}>Cash</option>
          </select>
          <label style="${lbl}">Bank</label>
          <input type="text" name="paymentBank" list="banklist" value="${esc(plan.paymentBank || '')}" placeholder="e.g. SBI, HDFC" style="${fld}" />

@@ -333,6 +333,12 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
     onSuccess: (r) => { setG({ ...g, lrPdfUrl: r?.data?.lrPdfUrl ?? g.lrPdfUrl }); setMsg('LR uploaded.'); },
     onError: (e) => setMsg(errMsg(e)),
   });
+  // Vendor-signed & stamped copy of the order (PO/WO/TO) — proof the vendor accepted it.
+  const uploadSignedPo = useMutation({
+    mutationFn: async (file: File) => { const fd = new FormData(); fd.append('file', file); return api.post(`/projects/${projectId}/procurement/grns/${grnId}/signed-po`, fd); },
+    onSuccess: (r) => { setG({ ...g, signedPoUrl: r?.data?.signedPoUrl ?? g.signedPoUrl }); setMsg('Signed PO uploaded.'); },
+    onError: (e) => setMsg(errMsg(e)),
+  });
   const act = useMutation({ mutationFn: (v: { verb: string; body?: any }) => api.post(`/projects/${projectId}/procurement/grns/${grnId}/${v.verb}`, v.body ?? {}), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grn', grnId] }); qc.invalidateQueries({ queryKey: ['grns', projectId] }); }, onError: (e) => setMsg(errMsg(e)) });
   // Accounts record the UTR (§5–§6). Marking paid does NOT close the entry — the
   // tax invoice does — so a "paid but open" GRN is a real state.
@@ -884,6 +890,14 @@ function GRNForm({ projectId, grnId, canApprove, onClose, showTaxInvoice = false
               {g.doc?.docNumber
                 ? <button className="text-sm text-navy hover:underline" onClick={() => downloadFile(`/projects/${projectId}/procurement/docs/${g.docId}/pdf`, `${g.doc?.docNumber || 'PO'}.pdf`)}>📄 {g.doc.docNumber}</button>
                 : <span className="text-xs text-slate-400">No PO linked</span>}
+            </F>
+            {/* Vendor-signed & stamped copy of the order (PO/WO/TO) — uploaded at
+                payment time as proof the vendor accepted it. PDF only, optional. */}
+            <F label={`Signed ${g.doc?.type || 'PO'} (vendor)`}>
+              {g.signedPoUrl
+                ? <a className="text-sm text-navy hover:underline" href={g.signedPoUrl} target="_blank" rel="noreferrer">📄 View signed {g.doc?.type || 'PO'}</a>
+                : <span className="text-xs text-slate-400">Not uploaded</span>}
+              {editable && <input className="input mt-1 text-xs" type="file" accept=".pdf,application/pdf" onChange={(e) => e.target.files?.[0] && uploadSignedPo.mutate(e.target.files[0])} />}
             </F>
             {/* KYC is held against the vendor master, so the whole set is fetched
                 and listed — never uploaded here. If there is none, say so plainly. */}
