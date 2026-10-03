@@ -1825,3 +1825,58 @@ model TravelExpense {
   @@index([planId])
   @@index([status])
 }
+
+// ── Site Forms (DPR) ──────────────────────────────────────────────────────────
+// Daily Progress Report — a global page with TWO form types: a Site-Engineer
+// activity-wise DPR and a Safety-Engineer checklist DPR. The full form (manpower,
+// activity sections, temperature log, BOQ-today, safety checklist, photo/TBT URLs)
+// is stored as a JSON blob in `data`; the indexed columns drive listing/filtering.
+model SiteDpr {
+  id            String   @id @default(cuid()) @map("_id")
+  dprNumber     String?  @unique              // DPR-SITE-#### / DPR-SAFE-####
+  type          String                        // SITE | SAFETY
+  projectId     String?
+  projectName   String?
+  clientName    String?
+  siteLocation  String?
+  dprDate       DateTime @default(now())
+  engineerName  String?
+  status        String   @default("SUBMITTED") // DRAFT | ASSIGNED | SUBMITTED
+  data          String?                        // JSON of the whole form
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+  // No-login share link (same idea as the Goods-Receipt assignment): the engineer
+  // gets `/site-forms/:linkToken` by email and fills + submits the DPR without login.
+  assignedEmail String?
+  linkToken     String?
+  assignedAt    DateTime?
+  submittedAt   DateTime?
+
+  @@index([projectId])
+  @@index([type])
+  @@index([linkToken])
+}
+
+// ── Attendance (field punch) ──────────────────────────────────────────────────
+// Site punch-in / punch-out with a selfie, GPS location and a server timestamp.
+// Separate from the login/logout "last-seen" attendance shown in the Users admin.
+model Attendance {
+  id          String   @id @default(cuid()) @map("_id")
+  userId      String?
+  userName    String?
+  type        String                       // IN | OUT
+  selfieUrl   String?
+  lat         Float?
+  lng         Float?
+  accuracy    Float?                        // GPS accuracy in metres
+  address     String?                       // optional manual note / pincode
+  geoAddress  String?                       // reverse-geocoded street address (from lat/lng)
+  projectId   String?
+  projectName String?
+  at          DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([at])
+}

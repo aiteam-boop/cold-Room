@@ -70,7 +70,7 @@ export default function GoodsReceiptView({ projectId, focusId }: { projectId: st
       {grs.length === 0 ? (
         <EmptyState title="No goods receipts yet" hint="When material, spares or machines arrive on site, raise a GRN against the relevant PO/WO to record the delivery and what was received." />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">GRN No.</th><th>Against</th><th>Vendor</th><th>Received by</th><th>Date</th><th className="pl-2">Status</th><th></th></tr></thead>
             <tbody>

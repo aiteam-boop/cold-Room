@@ -17,6 +17,10 @@ export const PAGE_KEYS = [
   'pettycash',
   // Travel Planning & Booking.
   'travel',
+  // Site Forms — Site-Engineer & Safety-Engineer DPR.
+  'siteforms',
+  // Attendance — field punch-in/out with selfie + GPS + timestamp.
+  'attendance',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -42,6 +46,8 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   fms: 'FMS — Vendor Payments',
   pettycash: 'Petty Cash',
   travel: 'Travel Planning',
+  siteforms: 'Site Forms (DPR)',
+  attendance: 'Attendance',
 };
 
 export const SECTION_KEYS = ['hideFinancials', 'canApprove', 'canMarkPaid', 'accountsTeam', 'raiseAdvance', 'canEditBudget', 'canFreezeBudget', 'seeAllApprovals'] as const;

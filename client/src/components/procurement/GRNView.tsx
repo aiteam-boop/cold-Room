@@ -108,7 +108,7 @@ export default function GRNView({ projectId, focusId }: { projectId: string; rol
       ) : grns.length === 0 ? (
         <EmptyState title="No payments yet" hint="Raise a payment against an approved PO/WO — pick the payment term, upload the PI, and send it for approval. Physical delivery is recorded separately on the Goods Receipt (GRN) page." />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Raised by</th><th>Date</th><th className="text-right">PI Value</th><th className="pr-8 text-right">Invoice Value</th><th className="pl-2">Status</th><th></th></tr></thead>
             <tbody>
@@ -169,7 +169,7 @@ function InvoicesPanel({ grns, pendingCount, onOpenInvoice }: { grns: any[]; pen
     return <EmptyState title="No invoices yet" hint="Paid payments show here — pending ones to upload / approve, and already-approved invoices to view or re-fill." />;
   }
   return (
-    <div className="card overflow-hidden">
+    <div className="card overflow-x-auto">
       <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">{grns.length} payment{grns.length > 1 ? 's' : ''} — tax invoices{pendingCount ? ` · ${pendingCount} pending` : ' · all done'}.</div>
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Payment No.</th><th>Against</th><th>Vendor</th><th>Date</th><th className="text-right">PI Value</th><th className="text-right">Invoice Value</th><th>Status</th><th></th></tr></thead>

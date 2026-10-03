@@ -6,7 +6,7 @@
 // is grant-based — it sees only what an admin explicitly grants (pages +
 // section permissions + project access). The role beyond ADMIN is effectively
 // a descriptive label; access comes from the grants, so admins stay in control.
-export const ROLES = ['USER', 'ADMIN', 'CEO', 'SITE_ENGINEER', 'SITE_SUPERVISOR'] as const;
+export const ROLES = ['USER', 'ADMIN', 'CEO', 'SITE_ENGINEER', 'SITE_SUPERVISOR', 'SAFETY_ENGINEER'] as const;
 export type Role = (typeof ROLES)[number];
 
 // Human-friendly labels for the account-role dropdown.
@@ -16,6 +16,7 @@ export const ROLE_LABELS: Record<Role, string> = {
   CEO: 'CEO',
   SITE_ENGINEER: 'Site Engineer',
   SITE_SUPERVISOR: 'Site Supervisor',
+  SAFETY_ENGINEER: 'Safety Engineer',
 };
 
 // ── Per-project roles ────────────────────────────────────────────────────────

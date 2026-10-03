@@ -44,7 +44,7 @@ export default function MachineModelsPage() {
       {models.length === 0 ? (
         <EmptyState title="No machine models yet" hint="Add makes/models (Bitzer, Copeland, Danfoss…) so equipment BOQ items can be matched to a specific unit." action={canManage ? <button className="btn-primary mt-2" onClick={() => setShow(true)}>+ Add Model</button> : undefined} />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
               <tr><th className="px-4 py-2">Make</th><th>Model Code</th><th>Capacity</th><th>Refrigerant</th><th className="text-right">Ref. Price</th><th className="text-right">Last Paid</th><th>TDS</th><th>Status</th>{canManage && <th></th>}</tr>

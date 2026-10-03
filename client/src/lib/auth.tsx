@@ -6,7 +6,7 @@ import {
 } from './permissions';
 
 // ADMIN = full access; any other value (USER, CEO, SITE_ENGINEER, …) is grant-based.
-export type Role = 'ADMIN' | 'USER' | 'CEO' | 'SITE_ENGINEER';
+export type Role = 'ADMIN' | 'USER' | 'CEO' | 'SITE_ENGINEER' | 'SITE_SUPERVISOR' | 'SAFETY_ENGINEER';
 
 // The single identity allowed to manage API keys. Keep in sync with the server's
 // API_SUPERADMIN_EMAIL (middleware/authMiddleware).

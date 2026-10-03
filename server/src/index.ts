@@ -6,6 +6,7 @@ import fs from 'fs';
 import { streamFromDb, restoreBrandingCache } from './lib/fileStore';
 import { startFmsReverseSyncPoll } from './services/sheetsSync';
 import { startApprovalReminderPoll } from './services/approvalChain';
+import { isEmailEnabled } from './services/email';
 import { startPackingListReminderPoll } from './services/grnReminders';
 import { startPendingDepositReminderPoll } from './services/depositReminders';
 import type { Request, Response, NextFunction } from 'express';
@@ -43,6 +44,7 @@ import fmsRoutes from './routes/fms';
 import apiKeyRoutes from './routes/apiKeys';
 import publicApiRoutes from './routes/publicApi';
 import publicGrnRoutes from './routes/publicGrn';
+import publicSiteFormsRoutes from './routes/publicSiteForms';
 import paymentApprovalRoutes from './routes/paymentApproval';
 import invoiceApprovalRoutes from './routes/invoiceApproval';
 import travelRoutes from './routes/travel';
@@ -51,6 +53,8 @@ import advanceApprovalRoutes from './routes/advanceApproval';
 import techApprovalRoutes from './routes/techApproval';
 import travelDocsPublicRoutes from './routes/travelDocsPublic';
 import depositRoutes from './routes/deposits';
+import siteFormsRoutes from './routes/siteForms';
+import attendanceRoutes from './routes/attendance';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -82,6 +86,8 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/petty-cash', pettyCashRoutes);
 app.use('/api/travel', travelRoutes);
+app.use('/api/site-forms', siteFormsRoutes);
+app.use('/api/attendance', attendanceRoutes);
 app.use('/api/approval-chains', approvalChainRoutes);
 app.use('/api/machine-models', machineModelRoutes);
 app.use('/api/sync-sheets', syncRoutes);
@@ -90,6 +96,7 @@ app.use('/api/api-keys', apiKeyRoutes);
 app.use('/api/v1', publicApiRoutes);
 // Public no-login site-engineer GRN form (token is the credential; no requireAuth).
 app.use('/api/public/grn', publicGrnRoutes);
+app.use('/api/public/site-forms', publicSiteFormsRoutes);
 // Public no-login payment-release "Approval Form" linked from the FMS sheet.
 app.use('/api/public/payment-approval', paymentApprovalRoutes);
 app.use('/api/public/invoice-approval', invoiceApprovalRoutes);
@@ -158,12 +165,20 @@ app.listen(PORT, () => {
   // Poll the accounts FMS sheet so UTRs Accounts enter there flow back into the
   // Payment Pipeline (milestone → PAID). No-op when Sheets sync is disabled.
   startFmsReverseSyncPoll();
-  // Nudge approvers whose documents have waited 24h+. Off when APPROVAL_REMINDERS=off.
-  startApprovalReminderPoll();
-  // Nudge site engineers whose signed packing list is still pending. Off when GRN_REMINDERS=off.
-  startPackingListReminderPoll();
-  // Weekly nudge to each project's site supervisor about pending deposit recovery. Off when DEPOSIT_REMINDERS=off.
-  startPendingDepositReminderPoll();
+  // Outbound reminder polls run ONLY when email is actually enabled. This keeps a
+  // dev box (EMAIL_SEND=off) from mailing real approvers localhost links AND from
+  // stamping reminder timestamps on the shared prod rows (which would suppress the
+  // VPS's real reminders). On the VPS (email on) they run as before.
+  if (isEmailEnabled()) {
+    // Nudge approvers whose documents have waited 24h+. Off when APPROVAL_REMINDERS=off.
+    startApprovalReminderPoll();
+    // Nudge site engineers whose signed packing list is still pending. Off when GRN_REMINDERS=off.
+    startPackingListReminderPoll();
+    // Weekly nudge to each project's site supervisor about pending deposit recovery. Off when DEPOSIT_REMINDERS=off.
+    startPendingDepositReminderPoll();
+  } else {
+    console.log('Reminder polls: not started (email disabled / EMAIL_SEND=off) — no outbound mail, no reminder-timestamp writes.');
+  }
 });
 
 async function ensureCappedApiLog() {

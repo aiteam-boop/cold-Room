@@ -124,6 +124,9 @@ export default function ProjectWorkspace() {
   // Seed it open when we deep-linked straight to a PO/WO/TO.
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set(deep && ['po', 'wo', 'to'].includes(deep.key) ? ['2. Orders'] : []));
   const toggleGroup = (name: string) => setOpenGroups((prev) => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
+  // On mobile the rail is a slide-in drawer (hidden by default); on lg+ it stays
+  // the fixed left rail exactly as before.
+  const [railOpen, setRailOpen] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project', projectId],
@@ -242,7 +245,9 @@ export default function ProjectWorkspace() {
           centred container and cannot drift sideways when the browser is zoomed
           or the window resized. It scrolls inside itself (overflow-y-auto) rather
           than with the page, so it stays put while the content scrolls. */}
-      <aside className="fixed bottom-0 left-0 top-14 z-30 flex w-60 flex-col overflow-y-auto border-r border-slate-200 bg-white">
+      {/* Mobile backdrop — tap to close the drawer. Only below lg. */}
+      {railOpen && <div className="fixed inset-0 top-14 z-30 bg-black/30 lg:hidden" onClick={() => setRailOpen(false)} />}
+      <aside className={`fixed bottom-0 left-0 top-14 z-40 flex w-60 flex-col overflow-y-auto border-r border-slate-200 bg-white transition-transform lg:z-30 lg:translate-x-0 ${railOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'}`}>
         <div className="flex items-center gap-2 border-b border-slate-100 p-4">
           <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-navy text-sm font-bold text-white">{p.name.slice(0, 1)}</div>
           <div className="min-w-0">
@@ -262,7 +267,7 @@ export default function ProjectWorkspace() {
                   const nav: Nav = { key: it.key, view: it.view };
                   const on = current != null && navId(current) === navId(nav);
                   return (
-                    <button key={navId(nav)} onClick={() => setActive(nav)}
+                    <button key={navId(nav)} onClick={() => { setActive(nav); setRailOpen(false); }}
                       className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md ${nested ? 'pl-9 pr-3' : 'px-3'} py-2 text-left font-display text-[12.5px] font-semibold transition-colors ${on ? 'bg-navy-50 text-navy' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
                       <span className={`shrink-0 ${on ? 'text-navy' : 'text-slate-400'}`}>{ICONS[it.icon]}</span>
                       <span className="min-w-0 flex-1">{it.label}</span>
@@ -301,8 +306,13 @@ export default function ProjectWorkspace() {
 
       {/* Main content — offset by exactly the rail's width (w-60 → pl-60), so it
           fills everything to the right of the rail and never sits under it. */}
-      <main className="min-w-0 pl-60">
-        <div className="px-5 py-6 lg:px-6">
+      <main className="min-w-0 overflow-x-hidden lg:pl-60">
+        <div className="px-4 py-5 sm:px-5 lg:px-6 lg:py-6">
+        {/* Mobile-only toggle to open the project rail (drawer). */}
+        <button className="mb-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-navy shadow-sm lg:hidden" onClick={() => setRailOpen(true)}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+          Project menu
+        </button>
         {metricBar}
         {current.key === 'dashboard' && <DashboardTab projectId={projectId!} onOpenGantt={canView('gantt') ? () => setActive({ key: 'gantt' }) : undefined} />}
         {current.key === 'boq' && current.view !== 'budget' && <BOQTab projectId={projectId!} role={role} locked={p.boqLocked} />}

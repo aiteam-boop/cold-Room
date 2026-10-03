@@ -13,7 +13,16 @@ function mailgunEnabled(): boolean {
 function smtpEnabled(): boolean {
   return !!process.env.SMTP_HOST;
 }
+// Hard kill-switch so a dev machine that shares the PROD database (and happens to
+// have Mailgun/SMTP creds) never sends real emails — those would carry a localhost
+// APP_URL link and would also stamp reminder timestamps on prod rows. Set
+// EMAIL_SEND=off locally; leave it unset (or =on) on the VPS.
+export function emailSendingDisabled(): boolean {
+  const v = (process.env.EMAIL_SEND ?? '').trim().toLowerCase();
+  return v === 'off' || v === 'false' || v === '0' || v === 'no';
+}
 export function isEmailEnabled(): boolean {
+  if (emailSendingDisabled()) return false;
   return mailgunEnabled() || smtpEnabled();
 }
 
@@ -111,6 +120,7 @@ async function sendViaMailgun({ to, cc, subject, html, text, attachments }: Emai
 // so callers can fire-and-forget alongside in-app notifications.
 export async function sendEmail({ to, cc, subject, html, text, attachments }: EmailInput): Promise<boolean> {
   if (!to) return false;
+  if (emailSendingDisabled()) { console.log(`[email] (EMAIL_SEND=off) suppressed to ${to}: ${subject}`); return false; }
   try {
     if (mailgunEnabled()) return await sendViaMailgun({ to, cc, subject, html, text, attachments });
     const t = transporter();

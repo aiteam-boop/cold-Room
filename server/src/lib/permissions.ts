@@ -29,6 +29,10 @@ export const PAGE_KEYS = [
   'pettycash',
   // Travel Planning & Booking — request → approval → booking → expense → approval.
   'travel',
+  // Site Forms — Site-Engineer & Safety-Engineer Daily Progress Reports (DPR).
+  'siteforms',
+  // Attendance — field punch-in/out with selfie + GPS + timestamp.
+  'attendance',
 ] as const;
 export type PageKey = (typeof PAGE_KEYS)[number];
 
@@ -54,6 +58,8 @@ export const PAGE_LABELS: Record<PageKey, string> = {
   fms: 'FMS — Vendor Payments',
   pettycash: 'Petty Cash',
   travel: 'Travel Planning',
+  siteforms: 'Site Forms (DPR)',
+  attendance: 'Attendance',
 };
 
 // Curated section-level toggles (IMS "section permissions").

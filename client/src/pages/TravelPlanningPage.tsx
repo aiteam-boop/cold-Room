@@ -251,6 +251,37 @@ function SiteExpenseRow({ line, index, joNos, projects, readOnly, onChange, onRe
   );
 }
 
+// Read-only view of a trip's site expenses (BOQ-mapped) — shown to the approver and
+// to Accounts so the spare/machine purchase travels through the SAME review pipeline.
+function SiteExpenseReadonly({ list }: { list: any[] }) {
+  if (!list?.length) return null;
+  const total = list.reduce((s, x) => s + (+x.amount || 0), 0);
+  const m = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+  return (
+    <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+      <div className="mb-1 text-[10px] font-semibold uppercase text-indigo-500">🔧 Site expenses (BOQ-mapped)</div>
+      <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-xs">
+        <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="py-1">Project</th><th>BOQ head</th><th>BOQ item</th><th>Date</th><th>Description</th><th className="text-right">Amount</th><th>Mode</th><th>Proof / Reason</th></tr></thead>
+        <tbody>
+          {list.map((s, i) => (
+            <tr key={i} className="border-t border-indigo-100 align-top">
+              <td className="py-1 text-slate-600">{s.jo || '—'}</td>
+              <td className="text-slate-500">{s.boqHead || '—'}</td>
+              <td className="text-slate-500">{s.boqItemDesc || '—'}</td>
+              <td className="text-slate-500">{s.date || '—'}</td>
+              <td className="text-slate-500">{s.description || '—'}</td>
+              <td className="text-right font-medium">{m(+s.amount || 0)}</td>
+              <td className="text-slate-500">{s.paymentMode || '—'}</td>
+              <td>{s.paymentMode === 'Cash' ? <span className="text-slate-500">{s.cashReason || '—'}</span> : (s.attachmentUrl ? <a href={s.attachmentUrl} target="_blank" rel="noreferrer" className="text-navy hover:underline">View</a> : <span className="text-slate-300">—</span>)}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-indigo-200 font-semibold text-indigo-800"><td colSpan={5} className="py-1.5">Site total</td><td className="text-right">{m(total)}</td><td colSpan={2}></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  );
+}
+
 function TechEntryTab({ canManage }: { canManage: boolean }) {
   const plansQ = useQuery({ queryKey: ['travel-plans', 'PLAN'], queryFn: async () => (await api.get('/travel?kind=PLAN')).data.plans as any[] });
   const [open, setOpen] = useState<string | null>(null);
@@ -734,6 +765,9 @@ function ApprovalReviewEditor({ plan, canManage, onDone }: { plan: any; canManag
       {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
       <div className="text-xs text-slate-500">Submitted {plan.techEntrySubmittedAt ? fmtDate(plan.techEntrySubmittedAt) : ''} · {plan.days} day(s)</div>
 
+      {/* Site expenses (read-only) — BOQ-mapped purchases on this trip, for review. */}
+      {plan.siteExpenses?.length > 0 && <SiteExpenseReadonly list={plan.siteExpenses} />}
+
       {/* Advance reconciliation */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-2.5"><div className="text-xs text-blue-700">Advance outstanding</div><div className="text-lg font-bold text-blue-800">{m0(advReceived)}</div>{settledSoFar > 0 ? <div className="text-[10px] text-blue-500">{m0(planAdv + raisedAdvance)} − {m0(settledSoFar)} settled</div> : raisedAdvance > 0 ? <div className="text-[10px] text-blue-500">Plan {m0(planAdv)} + New Advance {m0(raisedAdvance)}</div> : null}</div>
@@ -943,7 +977,7 @@ function PersonStatement({ pkey }: { pkey: string }) {
     <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-2">
       <div className="text-xs font-semibold text-slate-500">Statement — every advance, expense &amp; settlement in date order</div>
       <div className="mb-1 text-[10px] text-slate-400"><span className="text-blue-600">Advance received</span> adds to in-hand · <span className="text-rose-500">Settled from advance</span> reduces it (only when Accounts settles) · <span className="text-slate-500">Trip spend</span> is the approved cost, shown for info — it does NOT change in-hand until settled.</div>
-      <table className="w-full text-xs">
+      <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-xs">
         <thead className="text-left text-[10px] uppercase text-slate-400"><tr><th className="px-2 py-1">Date</th><th className="px-2">Kind</th><th className="px-2">Detail</th><th className="px-2 text-right text-blue-600">Advance received</th><th className="px-2 text-right text-slate-500">Trip spend</th><th className="px-2 text-right text-rose-500">Settled from advance</th><th className="px-2 text-right">Running in hand</th></tr></thead>
         <tbody>
           {events.map((e, i) => (
@@ -958,7 +992,7 @@ function PersonStatement({ pkey }: { pkey: string }) {
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 }
@@ -1161,6 +1195,8 @@ function AccountsEditor({ plan, isAccounts, onDone }: { plan: any; canManage: bo
   return (
     <div className="space-y-4">
       {err && <div className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+      {/* Site expenses (read-only) — BOQ-mapped purchases on this trip, for Accounts. */}
+      {plan.siteExpenses?.length > 0 && <SiteExpenseReadonly list={plan.siteExpenses} />}
       {/* Money trail */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {card('Plan (sanctioned)', planGrand, 'Budget set when planned', 'border-blue-200 bg-blue-50')}

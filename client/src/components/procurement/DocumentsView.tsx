@@ -82,7 +82,7 @@ export default function DocumentsView({ projectId }: { projectId: string; role: 
       {docs.length === 0 ? (
         <EmptyState title="No documents yet" hint="System-generated PO/WO/GRN PDFs are auto-saved on approval. Upload PIs, kaccha bills, tax invoices, KYC, payment proofs, etc." />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400"><tr><th className="px-4 py-2">Type</th><th>File</th><th>Linked</th><th>Vendor</th><th>Uploaded</th><th></th></tr></thead>
             <tbody>

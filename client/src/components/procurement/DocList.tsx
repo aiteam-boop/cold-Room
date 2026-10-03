@@ -60,7 +60,7 @@ export default function DocList({ projectId, role, type, focusId }: { projectId:
       ) : docs.length === 0 ? (
         <div className="card px-4 py-8 text-center text-sm text-slate-400">No {type} matches “{q}”.</div>
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
               <tr><th className="px-4 py-2">{type} No.</th><th>Vendor</th><th>Created by</th><th>Date</th><th className="text-right">Basic</th><th className="text-right">Final</th><th>Status</th><th>Delivery</th><th></th></tr>

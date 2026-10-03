@@ -98,7 +98,7 @@ export default function UsersAdmin() {
         </div>
       </div>
 
-      <div className="card overflow-hidden">
+      <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
             <tr><th className="px-4 py-2">Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th>Last logout</th><th className="text-right">Actions</th></tr>
@@ -172,7 +172,7 @@ const CUSTOM = '__custom__';
 
 function ApprovalPermissions({ users, meta, onSaved }: { users: UserRow[]; meta: Meta; onSaved: () => void }) {
   return (
-    <div className="card overflow-hidden">
+    <div className="card overflow-x-auto">
       <div className="border-b border-slate-200 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-700">Approval Permissions</h2>
         <p className="text-xs text-slate-500">Mark who can approve documents and what they can approve. These users become selectable when building an approval chain on a PO / WO / GRN.</p>

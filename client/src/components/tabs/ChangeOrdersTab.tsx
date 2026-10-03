@@ -33,7 +33,7 @@ export default function ChangeOrdersTab({ projectId }: { projectId: string }) {
       {orders.length === 0 ? (
         <EmptyState title="No change orders" hint="Raise a change order when more material is needed than the BOQ planned, or for new/substituted items. It routes to AA sir for approval and updates the BOQ baseline on approval." action={canManage ? <button className="btn-primary mt-2" onClick={() => setShow(true)}>+ Raise Change Order</button> : undefined} />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
               <tr><th className="px-4 py-2">CO No.</th><th>Type</th><th>Item</th><th className="text-right">Change</th><th>Status</th><th></th></tr>

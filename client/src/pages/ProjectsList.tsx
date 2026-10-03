@@ -163,7 +163,7 @@ function ProjectCardTile({ p }: { p: ProjectCard }) {
 
   return (
     <>
-    <Link to={`/projects/${p.id}`} className="card block p-5 transition hover:shadow-md">
+    <Link to={`/projects/${p.id}`} className="card block min-w-0 max-w-full p-5 transition hover:shadow-md">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate font-semibold text-navy">{p.name}</h3>
@@ -312,7 +312,7 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
     <Modal title="New Project" onClose={onClose}>
       <form onSubmit={(e) => { e.preventDefault(); m.mutate(); }} className="space-y-3">
         <div><label className="label">Project name *</label><input className="input" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div><label className="label">Client name</label><input className="input" value={form.clientName} onChange={(e) => setForm({ ...form, clientName: e.target.value })} /></div>
           <div><label className="label">Site location</label><input className="input" value={form.siteLocation} onChange={(e) => setForm({ ...form, siteLocation: e.target.value })} /></div>
         </div>
@@ -327,17 +327,17 @@ function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCre
           </select>
           <p className="mt-1 text-[11px] text-slate-400">Responsible for deposit recovery — gets the weekly pending-deposit email.</p>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div><label className="label">Client PO Number</label><input className="input" value={form.clientPoNumber} onChange={(e) => setForm({ ...form, clientPoNumber: e.target.value })} placeholder="Client's PO (shown on packing list)" /></div>
           <div><label className="label">Client GST Number</label><input className="input" value={form.clientGstin} onChange={(e) => setForm({ ...form, clientGstin: e.target.value })} placeholder="e.g. 27AAACQ3481E1ZJ" /></div>
         </div>
         {/* The project clock starts on the LATEST of these — PO received, drawing
             approved (from the drawing checklist) and first advance received. */}
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div><label className="label">PO received date</label><input className="input" type="date" value={form.orderReceiveDate} onChange={(e) => setForm({ ...form, orderReceiveDate: e.target.value })} /></div>
           <div><label className="label">First advance received</label><input className="input" type="date" value={form.advanceReceiveDate} onChange={(e) => setForm({ ...form, advanceReceiveDate: e.target.value })} /></div>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div><label className="label">Start date <span className="text-slate-400">(else auto)</span></label><input className="input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></div>
           <div><label className="label">Target completion</label><input className="input" type="date" value={form.targetCompletionDate} onChange={(e) => setForm({ ...form, targetCompletionDate: e.target.value })} /></div>
         </div>

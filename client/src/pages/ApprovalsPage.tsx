@@ -178,7 +178,7 @@ export default function ApprovalsPage() {
       {tab === 'pending' && (pendingItems.length === 0 ? (
         <EmptyState title={needle || projectFilter ? 'No matches' : 'Nothing pending'} hint={needle || projectFilter ? 'No pending document matches your filter.' : 'You have no documents waiting for your approval right now.'} />
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
               <tr><th className="px-4 py-2">Submitted</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right">Amount</th><th className="text-right">Action</th></tr>
@@ -272,7 +272,7 @@ export default function ApprovalsPage() {
         approvedQ.isLoading ? <Spinner label="Loading approved…" />
         : approvedList.length === 0 ? <EmptyState title={needle || projectFilter ? 'No matches' : (approvedSub === 'payments' ? 'No approved payments' : 'Nothing approved yet')} hint={needle || projectFilter ? 'No approved document matches your filter.' : (approvedSub === 'payments' ? 'Approved payments will appear here.' : 'Approved PO/WO/GRN will appear here.')} />
         : (
-          <div className="card overflow-hidden">
+          <div className="card overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-slate-400">
                 <tr><th className="w-8 pl-4 py-2"></th><th className="py-2">Approved</th><th>Document</th><th>Project</th><th>Vendor</th><th className="text-right pr-6">Amount</th><th className="pl-2">Status</th><th>Goods Receipt</th><th className="text-right">Action</th></tr>

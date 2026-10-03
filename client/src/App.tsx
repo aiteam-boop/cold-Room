@@ -11,12 +11,15 @@ import TravelPlanningPage from './pages/TravelPlanningPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import MasterReports from './pages/MasterReports';
 import DepositTracking from './pages/DepositTracking';
+import SiteForms from './pages/SiteForms';
+import Attendance from './pages/Attendance';
 import UsersAdmin from './pages/UsersAdmin';
 import ApiKeysAdmin from './pages/ApiKeysAdmin';
 import MachineModelsPage from './pages/MachineModelsPage';
 import IntegrationKit from './pages/IntegrationKit';
 import GoResolver from './pages/GoResolver';
 import PublicGrn from './pages/PublicGrn';
+import PublicSiteForm from './pages/PublicSiteForm';
 import AppShell from './components/AppShell';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -57,6 +60,7 @@ export default function App() {
       <Route path="/integration-kit" element={<IntegrationKit />} />
       {/* Public — no auth. Site-engineer goods-receipt form (token is the key). */}
       <Route path="/grn/:token" element={<PublicGrn />} />
+      <Route path="/site-forms/:token" element={<PublicSiteForm />} />
       {/* Deep-link resolver — authed but outside the shell; it redirects instantly. */}
       <Route path="/go/:entity/:id" element={<RequireAuth><GoResolver /></RequireAuth>} />
       <Route
@@ -73,6 +77,8 @@ export default function App() {
         <Route path="/travel" element={<RequirePage page="travel"><TravelPlanningPage /></RequirePage>} />
         <Route path="/approvals" element={<RequirePage page="approvals"><ApprovalsPage /></RequirePage>} />
         <Route path="/reports" element={<RequirePage page="reports"><MasterReports /></RequirePage>} />
+        <Route path="/site-forms" element={<RequirePage page="siteforms"><SiteForms /></RequirePage>} />
+        <Route path="/attendance" element={<RequirePage page="attendance"><Attendance /></RequirePage>} />
         <Route path="/deposits" element={<RequirePage page="po"><DepositTracking /></RequirePage>} />
         <Route path="/settings/users" element={<RequireAdmin><UsersAdmin /></RequireAdmin>} />
         <Route path="/settings/api-keys" element={<RequireSuperAdmin><ApiKeysAdmin /></RequireSuperAdmin>} />
