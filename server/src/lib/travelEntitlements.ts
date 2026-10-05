@@ -62,6 +62,20 @@ export const TRAVEL_MODES: Record<TravelGroup, ModeRule> = {
   V:   { modes: ['Train', 'Bus'],            classText: 'Sleeper' },
 };
 
+// Is the chosen mode OUTSIDE the traveller's grade entitlement? Only meaningful
+// when the M-Level AND a mode are both known — this mirrors the New-request UI,
+// which gates its out-of-policy check on a present M-Level (no M-Level ⇒ no
+// restriction). Returns null when the check doesn't apply, so callers can skip
+// the warning entirely. Used to flag the approver (email + Approval Form) that
+// e.g. Flight was picked by an M-13 (Grade IV, allowed: Train / Taxi / Bus).
+export function modeOutsidePolicy(mLevel?: string | null, travelMode?: string | null):
+  { outside: boolean; allowed: ('Flight' | 'Train' | 'Bus' | 'Taxi')[]; group: TravelGroup } | null {
+  if (!mLevel || !travelMode) return null;
+  const group = travelGroupForMLevel(mLevel);
+  const allowed = TRAVEL_MODES[group].modes;
+  return { outside: !allowed.includes(travelMode as 'Flight' | 'Train' | 'Bus' | 'Taxi'), allowed: [...allowed], group };
+}
+
 // One call: everything the travel form needs for a traveller + destination.
 export function travelEntitlement(mLevel?: string | null, city?: string | null) {
   const group = travelGroupForMLevel(mLevel);

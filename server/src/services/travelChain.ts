@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma';
 import { resolveAutoChain } from './fixedChain';
 import { parseApprover } from '../lib/permissions';
+import { modeOutsidePolicy } from '../lib/travelEntitlements';
 import { sendEmail, appBaseUrl, appClientUrl, isEmailEnabled, approvalCcEmail, approvalEmailHtml } from './email';
 
 const TRAVEL = 'TRAVEL';
@@ -145,7 +146,12 @@ export async function notifyCurrentTravelStep(plan: PlanLike): Promise<void> {
       `Route: <strong>${route}</strong>`,
       `Dates: <strong>${win}</strong>`,
     ];
-    if (plan.travelMode) lines.push(`Mode: <strong>${plan.travelMode}</strong>`);
+    // Flag the approver when the chosen mode is outside the traveller's grade
+    // entitlement (e.g. an M-13 picked Flight). Selectable for urgent travel, but
+    // the approver must consciously authorise it — so make it loud in the email.
+    const mp = modeOutsidePolicy(plan.mLevel, plan.travelMode);
+    if (plan.travelMode) lines.push(`Mode: <strong>${plan.travelMode}</strong>${mp?.outside ? ' <span style="color:#b45309;font-weight:700">⚠ outside entitlement</span>' : ''}`);
+    if (mp?.outside) lines.push(`<span style="color:#b45309;font-weight:700">⚠ Mode of travel (${plan.travelMode}) is NOT in this traveller's entitlement — M-Level ${plan.mLevel}, Grade ${mp.group} allows only ${mp.allowed.join(' / ')}. Approve only if this urgent/out-of-policy travel is authorised.</span>`);
     if (plan.tripType) lines.push(`Ticket for: <strong>${plan.tripType === 'going' ? 'Going only' : plan.tripType === 'return' ? 'Return only' : 'Going + Return'}</strong>`);
     if (plan.ticketPrice != null && plan.ticketPrice > 0) lines.push(`Ticket price: <strong>₹${Math.round(plan.ticketPrice).toLocaleString('en-IN')}</strong>`);
     if (plan.totalAdvance > 0) lines.push(`Advance requested: <strong>₹${Math.round(plan.totalAdvance).toLocaleString('en-IN')}</strong>`);

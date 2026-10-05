@@ -115,13 +115,37 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
   const items = data?.items ?? [];
   const hasItems = items.length > 0;
 
-  // Group rows by category preserving order
+  // A Sub Total / Total roll-up row (imported as a no-category summary row). It is
+  // rendered as its OWN live totals row (Planned/Installed/Remaining), not inside a
+  // category — a subtotal spans every category of its section.
+  const TOTAL_RE = /^\s*(sub\s*-?\s*total|grand\s*total|total)\b/i;
+  const isTotalRow = (it: BOQItem) => it.isGroup && TOTAL_RE.test(it.description);
+
+  // Group rows by category preserving order (total rows handled separately below).
   const grouped: { category: string; rows: BOQItem[] }[] = [];
   for (const it of items) {
+    if (isTotalRow(it)) continue;
     const cat = it.category || 'Uncategorized';
     let g = grouped.find((x) => x.category === cat);
     if (!g) { g = { category: cat, rows: [] }; grouped.push(g); }
     if (!it.isGroup) g.rows.push(it);
+  }
+
+  // Live section subtotals: each total row sums the line items since the previous
+  // total (document order). Planned = Σ planned of those lines (e.g. 2,267);
+  // Installed grows as progress is logged; Remaining = Planned − Installed.
+  const totals: { key: string; label: string; planned: number; installed: number; remaining: number; pct: number }[] = [];
+  {
+    let planned = 0, installed = 0;
+    for (const it of items) {
+      if (isTotalRow(it)) {
+        const pct = planned > 0 ? Math.round((installed / planned) * 1000) / 10 : 0;
+        totals.push({ key: it.id, label: it.description, planned, installed, remaining: Math.max(0, planned - installed), pct });
+        planned = 0; installed = 0;
+      } else if (!it.isGroup) {
+        planned += it.plannedQty; installed += it.installedQty;
+      }
+    }
   }
 
   return (
@@ -215,6 +239,19 @@ export default function BOQTab({ projectId, locked }: { projectId: string; role:
                       canWrite={canWrite}
                       onAdd={(it) => { setEntryItem(it); setShowEntry(true); }}
                     />
+                  ))}
+                  {/* Live Sub Total / Total rows — the section roll-up (Planned, and
+                      Installed/Remaining that update as progress is logged). */}
+                  {totals.map((t) => (
+                    <tr key={t.key} className="border-y-2 border-slate-300 bg-slate-200 font-bold text-slate-800">
+                      <td className="px-2 py-2"></td>
+                      <td className="px-4 py-2" colSpan={5}>{t.label}</td>
+                      <td className="px-2 text-right">{fmtNum(t.planned)}</td>
+                      <td className="px-2 text-right text-navy">{fmtNum(t.installed)}</td>
+                      <td className="px-2 text-right">{fmtNum(t.remaining)}</td>
+                      <td className="px-2"><div className="flex items-center gap-2"><ProgressBar pct={t.pct} height={8} /><span className="w-12 text-right text-xs">{t.pct}%</span></div></td>
+                      {canWrite && <td></td>}
+                    </tr>
                   ))}
                 </tbody>
               </table>

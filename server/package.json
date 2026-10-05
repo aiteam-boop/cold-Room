@@ -14,6 +14,7 @@
     "migrate": "prisma migrate dev",
     "seed": "tsx prisma/seed.ts",
     "backfill:sprint": "tsx prisma/backfillSprint.ts",
+    "backfill:boq-subtotals": "tsx scripts/backfillBoqSubtotals.ts",
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts"
   },
   "dependencies": {

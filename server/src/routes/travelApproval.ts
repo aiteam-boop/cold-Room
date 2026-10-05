@@ -5,6 +5,7 @@ import { asyncHandler } from '../lib/errors';
 import { audit } from '../lib/audit';
 import { appBaseUrl, sendEmail, isEmailEnabled } from '../services/email';
 import { signApiPath } from '../lib/signedUrl';
+import { modeOutsidePolicy } from '../lib/travelEntitlements';
 import { upload } from '../middleware/upload';
 import { notifyUser } from '../services/notify';
 import { decideTravelStep, notifyCurrentTravelStep, decideExpenseStep, notifyCurrentExpenseStep, travelChainState } from '../services/travelChain';
@@ -52,6 +53,12 @@ function page(data: Loaded, token: string, chain: Awaited<ReturnType<typeof trav
   let detail = '';
   if (type === 'request') {
     const meta = [plan.designation, plan.department].filter(Boolean).map(esc).join(' · ');
+    // Out-of-entitlement mode (e.g. an M-13 picked Flight) — flag it loudly so the
+    // approver consciously authorises the out-of-policy travel.
+    const mp = modeOutsidePolicy(plan.mLevel, plan.travelMode);
+    const modeWarnRow = mp?.outside
+      ? `<tr><td colspan="2" style="padding:10px"><div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:10px 12px;color:#92400e;font-weight:700;font-size:13px">⚠ Mode of travel (${esc(plan.travelMode)}) is NOT in this traveller's entitlement — M-Level ${esc(plan.mLevel)}, Grade ${esc(mp.group)} allows only ${esc(mp.allowed.join(' / '))}. Approve only if this urgent / out-of-policy travel is authorised.</div></td></tr>`
+      : '';
     const aadharVal = [plan.aadharNo ? `<strong>${esc(plan.aadharNo)}</strong>` : '', plan.aadharFileUrl ? `<a href="${appBaseUrl()}${esc(plan.aadharFileUrl)}" target="_blank" style="color:#052379;font-weight:600">📎 card</a>` : ''].filter(Boolean).join(' · ');
     detail = [
       row('Traveller', esc(plan.employeeName) + (plan.isNonCrystal ? ' <span style="color:#b45309">(Non-Crystal)</span>' : '') + (plan.mLevel ? ` · ${esc(plan.mLevel)}` : '') + (meta ? ` · ${meta}` : '')),
@@ -60,7 +67,8 @@ function page(data: Loaded, token: string, chain: Awaited<ReturnType<typeof trav
       aadharVal ? row('Aadhaar', aadharVal) : '',
       row('Route', [plan.origin, plan.destination].filter(Boolean).map(esc).join(' → ') || '—'),
       row('Dates', win),
-      plan.travelMode ? row('Mode', esc(plan.travelMode)) : '',
+      modeWarnRow,
+      plan.travelMode ? row('Mode', esc(plan.travelMode) + (mp?.outside ? ' <span style="color:#b45309;font-weight:700">⚠ outside entitlement</span>' : '')) : '',
       plan.tripType ? row('Ticket for', plan.tripType === 'going' ? 'Going only' : plan.tripType === 'return' ? 'Return only' : 'Going + Return') : '',
       (() => { const urls: string[] = (Array.isArray(plan.requestedTicketUrls) && plan.requestedTicketUrls.length) ? plan.requestedTicketUrls : (plan.requestedTicketUrl ? [plan.requestedTicketUrl] : []); return urls.length ? row('Ticket(s) to book', urls.map((u, i) => `<a href="${appBaseUrl()}${esc(u)}" target="_blank" style="color:#052379;font-weight:600">📎 Ticket ${i + 1}</a>`).join(' &nbsp; ')) : ''; })(),
       plan.ticketPrice != null ? row('Ticket price', rs(plan.ticketPrice)) : '',

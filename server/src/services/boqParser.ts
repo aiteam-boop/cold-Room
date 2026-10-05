@@ -16,6 +16,8 @@ export interface ParsedBOQRow {
   remarks?: string;
   plannedQty: number;
   isGroup?: boolean;
+  isTotal?: boolean;  // a Sub Total / Total roll-up row (shown distinctly, not counted)
+  totalQty?: number;  // the roll-up figure to DISPLAY on a total row (not a planned qty)
   flagged?: boolean; // low-confidence quantity mapping — review before import
 }
 
@@ -148,6 +150,15 @@ function looksLikeGroup(desc: string, qty: number | null): boolean {
   return true;
 }
 
+// A subtotal / total roll-up row (e.g. "Sub Total for cold room", "Grand Total").
+// Its number is a SUM of the section's lines (quantity or amount), NOT the row's
+// own planned quantity — so it must never be imported as a priced line item, or
+// it double-counts the detail lines. We keep it visible as a no-quantity summary
+// row (isGroup) so the structure matches the Excel, but with no planned qty.
+function looksLikeTotal(desc: string): boolean {
+  return /^\s*(sub\s*-?\s*total|grand\s*total|total)\b/i.test(desc.trim());
+}
+
 // BOQ sheets merge cells like "Make & Model" / "Remarks" across the rows they
 // apply to; XLSX only stores the value in the merge's top-left cell, leaving the
 // spanned rows blank. This resolves a cell to its merged value so those columns
@@ -190,9 +201,7 @@ export function parseSpreadsheet(filePath: string): ParseResult {
       const row = rows[r];
       const desc = String(row[cols.desc ?? 1] ?? '').trim();
       if (!desc) continue;
-      // Drop only obvious page-break / continuation artifacts. Subtotal & total
-      // rows ARE imported as line items (per project preference) — note this can
-      // double-count against the detailed lines in completion math.
+      // Drop only obvious page-break / continuation artifacts.
       if (/^(page\s*\d+|continued\b)/i.test(desc)) continue;
 
       // srNo & unit may be merged down a block of rows (e.g. one "a" over 5 rows).
@@ -229,6 +238,18 @@ export function parseSpreadsheet(filePath: string): ParseResult {
         } else {
           qty = null;
         }
+      }
+
+      // Subtotal / total roll-up row (e.g. "Sub Total for cold room"): keep it
+      // visible and show its figure (like the Excel), but mark it isTotal so it is
+      // styled DISTINCTLY and is NOT counted as a planned quantity (plannedQty 0 —
+      // its number is a sum of the lines above, so counting it would double-count).
+      // It carries NO category — a subtotal spans every category, so tagging it
+      // with the current one (e.g. "Electrical Items") would be wrong — and it must
+      // NOT become the category for the lines that follow.
+      if (looksLikeTotal(desc)) {
+        out.push({ srNo: sr, description: desc, isGroup: true, isTotal: true, totalQty: qty ?? undefined, plannedQty: 0 });
+        continue;
       }
 
       // makeModel / remarks DO carry down merged blocks. Strip any header label

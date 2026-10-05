@@ -1780,8 +1780,10 @@ function NewPlanTab({ onDone }: { onDone: () => void }) {
   });
   const ent = entQ.data;
   const allowedModes = ent?.modes ?? null; // null → no M-Level yet, no restriction
-  // If the picked mode is no longer allowed for this grade, clear it.
-  useEffect(() => { if (allowedModes && travelMode && !allowedModes.includes(travelMode)) setMode(''); }, [allowedModes, travelMode]);
+  // NOTE: out-of-policy modes stay SELECTABLE (urgent travel — e.g. Flight for a
+  // grade that normally can't fly). We deliberately do NOT clear the picked mode
+  // when it's outside the grade's allowed set — the amber warning below (and the
+  // approver's email + Approval Form) flags it instead, and the approver authorises.
   const [ticketUrls, setTicketUrls] = useState<string[]>([]);
   const [purpose, setPurpose] = useState('');
   const [remarks, setRemarks] = useState('');
